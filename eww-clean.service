@@ -1,0 +1,7 @@
+[Unit]
+Description=CyberClean Auto Disk Cleaner
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=python3 %h/CyberClean/cyber-clean.py
