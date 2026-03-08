@@ -1,43 +1,75 @@
 #!/bin/bash
-# ============================================================
-# CyberClean — Installer
-# Smart Disk Cleaner for Arch Linux
-# Usage: bash install.sh
-# ============================================================
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  CyberClean v2.0 — Installer                                ║
+# ║  Smart Disk Cleaner — Linux (all distros) + Windows         ║
+# ║  Usage: bash install.sh                                     ║
+# ╚══════════════════════════════════════════════════════════════╝
 
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+RED='\033[0;31m'; NC='\033[0m'
 
 APP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 echo -e "${CYAN}"
-echo -e "  ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗  "
-echo -e " ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗ "
-echo -e " ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝    ██║     ██║     █████╗  ███████║██╔██╗"
-echo -e " ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗    ██║     ██║     ██╔══╝  ██╔══██║██║╚██"
-echo -e " ╚██████╗   ██║   ██████╔╝███████╗██║  ██║    ╚██████╗███████╗███████╗██║  ██║██║ ╚█"
-echo -e "  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  "
+echo "  ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗"
+echo " ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗"
+echo " ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝    ██║     ██║     █████╗  ███████║██╔██╗"
+echo " ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗    ██║     ██║     ██╔══╝  ██╔══██║██║╚██"
+echo " ╚██████╗   ██║   ██████╔╝███████╗██║  ██║    ╚██████╗███████╗███████╗██║  ██║██║ ╚█"
+echo "  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝"
 echo -e "${NC}"
-echo -e "${BLUE}  Smart Disk Cleaner for Arch Linux${NC}"
-echo -e "${BLUE}  Source: $APP_DIR${NC}"
+echo -e "${CYAN}  Smart Disk Cleaner v2.0${NC}"
+echo -e "${CYAN}  Source: $APP_DIR${NC}"
 echo ""
 
-# ── 1. Dependencies ────────────────────────────────────────
-echo -e "${BLUE}━━━ Installing dependencies ━━━━━━━━━━━━━━━━━${NC}"
-sudo pacman -S --needed --noconfirm python-pyqt6 polkit pacman-contrib 2>/dev/null \
-    && echo -e "  ${GREEN}✅ python-pyqt6, polkit, pacman-contrib${NC}" \
-    || echo -e "  ${RED}❌ Some packages failed — install manually${NC}"
+ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
+err()  { echo -e "  ${RED}✗${NC}  $1"; }
+head() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
 
-# ── 2. Privileged helper ───────────────────────────────────
-echo ""
-echo -e "${BLUE}━━━ Setting up privileged helper ━━━━━━━━━━━━${NC}"
+# ── 1. Xóa phiên bản cũ nếu có ───────────────────────────────
+head "Cleaning old versions"
+if [ -f /usr/local/bin/cyber-clean-helper ]; then
+    sudo rm -f /usr/local/bin/cyber-clean-helper
+    ok "Removed old helper"
+fi
+if [ -f /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy
+    ok "Removed old polkit policy"
+fi
+
+# ── 2. Cài dependencies ───────────────────────────────────────
+head "Installing dependencies"
+
+# Detect package manager
+if command -v pacman &>/dev/null; then
+    sudo pacman -S --needed --noconfirm python-pyqt6 python-psutil polkit pacman-contrib 2>/dev/null \
+        && ok "python-pyqt6, python-psutil, polkit, pacman-contrib" \
+        || warn "Some packages may have failed — check manually"
+
+elif command -v apt &>/dev/null; then
+    sudo apt-get install -y python3-pyqt6 python3-psutil policykit-1 2>/dev/null \
+        && ok "python3-pyqt6, python3-psutil, policykit-1" \
+        || warn "Some packages may have failed"
+    # pip fallback
+    pip install PyQt6 psutil --break-system-packages 2>/dev/null || true
+
+elif command -v dnf &>/dev/null; then
+    sudo dnf install -y python3-PyQt6 python3-psutil polkit 2>/dev/null \
+        && ok "python3-PyQt6, python3-psutil, polkit" \
+        || warn "Some packages may have failed"
+
+else
+    warn "Unknown package manager — install manually: PyQt6, psutil, polkit"
+    warn "  pip install PyQt6 psutil"
+fi
+
+# ── 3. Privileged helper ──────────────────────────────────────
+head "Setting up privileged helper"
 sudo tee /usr/local/bin/cyber-clean-helper > /dev/null << 'HELPER'
 #!/bin/bash
-# CyberClean privileged helper — called via pkexec
+# CyberClean v2.0 — Privileged helper
+# Called via pkexec only — runs as root
 case "$1" in
   paccache)
     paccache -rk1 2>/dev/null
@@ -52,14 +84,22 @@ case "$1" in
   broken-downloads)
     find /var/cache/pacman/pkg -name "download-*" -delete 2>/dev/null
     ;;
+  apt-clean)
+    apt-get clean 2>/dev/null
+    ;;
+  apt-autoremove)
+    apt-get autoremove -y 2>/dev/null
+    ;;
+  dnf-clean)
+    dnf clean all 2>/dev/null
+    ;;
 esac
 HELPER
 sudo chmod +x /usr/local/bin/cyber-clean-helper
-echo -e "  ${GREEN}✅ /usr/local/bin/cyber-clean-helper${NC}"
+ok "/usr/local/bin/cyber-clean-helper"
 
-# ── 3. Polkit policy ───────────────────────────────────────
-echo ""
-echo -e "${BLUE}━━━ Registering polkit policy ━━━━━━━━━━━━━━━${NC}"
+# ── 4. Polkit policy ──────────────────────────────────────────
+head "Registering polkit policy"
 sudo tee /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy > /dev/null << 'POLICY'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC
@@ -82,18 +122,17 @@ sudo tee /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy > /dev/null <<
   </action>
 </policyconfig>
 POLICY
-echo -e "  ${GREEN}✅ Polkit policy registered${NC}"
+ok "Polkit policy: com.nc2077.cyberclean"
 
-# ── 4. Desktop entry ───────────────────────────────────────
-echo ""
-echo -e "${BLUE}━━━ Creating desktop entry ━━━━━━━━━━━━━━━━━━${NC}"
+# ── 5. Desktop entry ──────────────────────────────────────────
+head "Creating desktop entry"
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/cyber-clean.desktop" << DESKTOP
 [Desktop Entry]
-Name=Cyber-Clean
+Name=CyberClean
 GenericName=Disk Cleaner
-Comment=Smart Disk Cleaner for Arch Linux
-Exec=python3 $APP_DIR/cyber-clean-app.py
+Comment=Smart Disk Cleaner v2.0
+Exec=python3 $APP_DIR/main.py
 Icon=system-software-update
 Terminal=false
 Type=Application
@@ -102,30 +141,53 @@ Keywords=disk;clean;cache;pacman;arch;
 StartupNotify=true
 DESKTOP
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-echo -e "  ${GREEN}✅ Desktop entry: Cyber-Clean${NC}"
+ok "Desktop entry: CyberClean"
 
-# ── 5. systemd auto-clean timer ────────────────────────────
-echo ""
-echo -e "${BLUE}━━━ Setting up auto-clean timer ━━━━━━━━━━━━━${NC}"
+# ── 6. Systemd auto-clean timer ───────────────────────────────
+head "Setting up auto-clean timer"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_USER"
-cp "$APP_DIR/eww-clean.service" "$SYSTEMD_USER/" 2>/dev/null
-cp "$APP_DIR/eww-clean.timer"   "$SYSTEMD_USER/" 2>/dev/null
-systemctl --user daemon-reload 2>/dev/null
-systemctl --user enable --now eww-clean.timer 2>/dev/null \
-    && echo -e "  ${GREEN}✅ Timer active — runs every 6h (disk > 75% only)${NC}" \
-    || echo -e "  ${YELLOW}⚠️  Timer setup skipped (no systemd user session?)${NC}"
 
-# ── Done ───────────────────────────────────────────────────
+# Tạo service file
+cat > "$SYSTEMD_USER/cyber-clean.service" << SERVICE
+[Unit]
+Description=CyberClean Auto Disk Cleaner
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=python3 $APP_DIR/cyber-clean-cli.py
+SERVICE
+
+# Tạo timer file
+cat > "$SYSTEMD_USER/cyber-clean.timer" << TIMER
+[Unit]
+Description=CyberClean Auto Timer — every 6h
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+systemctl --user daemon-reload 2>/dev/null
+systemctl --user enable --now cyber-clean.timer 2>/dev/null \
+    && ok "Auto-clean timer active (every 6h, disk > 75% only)" \
+    || warn "Timer setup skipped (no systemd user session?)"
+
+# ── 7. Keybind hint ───────────────────────────────────────────
+head "Optional: Add keybind"
+echo -e "  ${CYAN}Add to hyprland.conf:${NC}"
+echo -e "  bind = \$mainMod, X, exec, python3 $APP_DIR/main.py"
+
+# ── Done ──────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}══════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✅ CyberClean installed successfully!${NC}"
+echo -e "${GREEN}  ✅ CyberClean v2.0 installed!${NC}"
 echo ""
-echo -e "${BLUE}  Run the app:${NC}"
-echo -e "     python3 $APP_DIR/cyber-clean-app.py"
-echo -e ""
-echo -e "${BLUE}  Or find 'Cyber-Clean' in your app launcher${NC}"
-echo -e ""
-echo -e "${BLUE}  Suggested keybind (Hyprland):${NC}"
-echo -e "     bind = \$mainMod, X, exec, python3 $APP_DIR/cyber-clean-app.py"
+echo -e "${CYAN}  Run:${NC}  python3 $APP_DIR/main.py"
+echo -e "${CYAN}  Or find 'CyberClean' in your app launcher${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════${NC}"

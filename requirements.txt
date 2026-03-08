@@ -1,0 +1,4 @@
+PyQt6>=6.4.0
+psutil>=5.9.0
+# 'distro' is optional — only needed on Linux if /etc/os-release is missing
+# distro>=1.8.0
