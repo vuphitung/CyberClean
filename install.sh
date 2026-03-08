@@ -43,7 +43,7 @@ head "Installing dependencies"
 
 # Detect package manager
 if command -v pacman &>/dev/null; then
-    sudo pacman -S --needed --noconfirm python-pyqt6 python-psutil polkit pacman-contrib 2>/dev/null \
+    sudo pacman -S --needed --noconfirm python-pyqt6 python-psutil polkit pacman-contrib python-send2trash 2>/dev/null \
         && ok "python-pyqt6, python-psutil, polkit, pacman-contrib" \
         || warn "Some packages may have failed — check manually"
 
@@ -92,6 +92,31 @@ case "$1" in
     ;;
   dnf-clean)
     dnf clean all 2>/dev/null
+    ;;
+  zypper-clean)
+    zypper clean --all 2>/dev/null
+    ;;
+  fstrim)
+    fstrim -av 2>/dev/null
+    ;;
+  drop-cache)
+    sync && echo 1 > /proc/sys/vm/drop_caches
+    ;;
+  compact-memory)
+    echo 1 > /proc/sys/vm/compact_memory
+    ;;
+  swappiness)
+    echo 10 > /proc/sys/vm/swappiness
+    ;;
+  optimizer)
+    # Batch optimizer actions — called from optimizer.py
+    sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
+    echo 10 > /proc/sys/vm/swappiness 2>/dev/null
+    fstrim -av 2>/dev/null
+    ;;
+  *)
+    echo "Unknown action: $1" >&2
+    exit 1
     ;;
 esac
 HELPER
@@ -148,15 +173,27 @@ head "Setting up auto-clean timer"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_USER"
 
-# Tạo service file
+# Tạo service file — dùng python inline thay vì cli script riêng
 cat > "$SYSTEMD_USER/cyber-clean.service" << SERVICE
 [Unit]
 Description=CyberClean Auto Disk Cleaner
-After=network.target
+After=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=python3 $APP_DIR/cyber-clean-cli.py
+# Auto-clean safe targets khi disk > 75%
+ExecStart=/bin/bash -c 'python3 -c "
+import sys, os
+sys.path.insert(0, os.path.expanduser('"'"'$APP_DIR'"'"'))
+import psutil
+disk = psutil.disk_usage('"'"'/'"'"').percent
+if disk < 75: sys.exit(0)
+from core.linux_cleaner import LinuxCleaner
+c = LinuxCleaner()
+safe = [t.id for t in c.get_targets() if t.safety=='"'"'safe'"'"' and not t.needs_root]
+[c.clean(tid, dry=False) for tid in safe]
+print(f'"'"'CyberClean auto: {disk:.0f}%% disk, cleaned safe targets'"'"')
+"'
 SERVICE
 
 # Tạo timer file

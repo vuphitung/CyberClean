@@ -40,9 +40,15 @@ from PyQt6.QtGui import (
 
 # ── Internal imports ──────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from core.os_detect  import IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info
+from core.os_detect  import (IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info,
+                                HAS_POLKIT, HAS_POLKIT_AGENT, HAS_FLATPAK, HAS_DOCKER,
+                                HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
 from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linux, fmt_size
 from core.optimizer  import run_optimizer
+
+# ── Windows: request UAC elevation on startup ─────────────────
+if IS_WINDOWS and not is_windows_admin():
+    request_windows_admin()   # re-launches with admin, exits current process
 
 if IS_LINUX:
     from core.linux_cleaner import LinuxCleaner
@@ -455,6 +461,27 @@ class CyberCleanApp(QMainWindow):
         pi_lbl = QLabel(f'OS: {info["os"]}\nDISTRO: {info["distro"] or "n/a"}\nPKG: {info["pkg_manager"] or "n/a"}\nPY: {info["python"]}')
         pi_lbl.setStyleSheet(f'color:{C["dim"]};font-size:9px;letter-spacing:1px;padding:0 18px;line-height:1.8;')
         lay.addWidget(pi_lbl)
+        lay.addSpacing(8)
+        # Status pills
+        pills = []
+        if IS_LINUX:
+            pills.append(('POLKIT', C['green'] if HAS_POLKIT else C['red']))
+            pills.append(('AGENT',  C['green'] if HAS_POLKIT_AGENT else C['yellow']))
+            if HAS_FLATPAK: pills.append(('FLATPAK', C['cyan']))
+            if HAS_DOCKER:  pills.append(('DOCKER',  C['cyan']))
+            if HAS_SEND2TRASH: pills.append(('TRASH', C['green']))
+        elif IS_WINDOWS:
+            pills.append(('ADMIN', C['green'] if is_windows_admin() else C['yellow']))
+        pill_row = QHBoxLayout()
+        pill_row.setContentsMargins(12,0,12,0)
+        pill_row.setSpacing(4)
+        for label, col in pills:
+            pl = QLabel(label)
+            pl.setStyleSheet(f'color:{col};font-size:8px;letter-spacing:1px;'
+                             f'border:1px solid {col}55;padding:1px 5px;')
+            pill_row.addWidget(pl)
+        pill_row.addStretch()
+        lay.addLayout(pill_row)
         return side
 
     def _build_main(self):
@@ -751,10 +778,16 @@ class CyberCleanApp(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(28,22,28,22)
         lay.setSpacing(0)
-        t = QLabel('ROLLBACK LIST')
+
+        tr  = QHBoxLayout()
+        t   = QLabel('ROLLBACK LIST')
         t.setStyleSheet(f'color:{C["cyan"]};font-size:14px;letter-spacing:3px;font-weight:bold;')
-        lay.addWidget(t)
+        clr = styled_btn('✕  CLEAR LIST', 'red', small=True)
+        clr.clicked.connect(self._clear_rollback)
+        tr.addWidget(t); tr.addStretch(); tr.addWidget(clr)
+        lay.addLayout(tr)
         lay.addSpacing(6)
+
         info = QLabel('Everything deleted. Cache files auto-rebuild. Packages: use command in NOTE column to restore.')
         info.setStyleSheet(f'color:{C["dim"]};font-size:10px;')
         info.setWordWrap(True)
@@ -768,6 +801,11 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self.rollback_table, 1)
         return w
 
+    def _clear_rollback(self):
+        if QMessageBox.question(self, 'Clear', 'Delete rollback history?') == QMessageBox.StandardButton.Yes:
+            ROLLBACK_FILE.unlink(missing_ok=True)
+            self.rollback_table.setRowCount(0)
+
     # ── NAVIGATION ────────────────────────────────────────
     def _nav(self, pid):
         pages = ['dashboard','clean','optimize','startup','log','rollback']
@@ -777,6 +815,32 @@ class CyberCleanApp(QMainWindow):
         if pid == 'log':     self._load_log()
         if pid == 'rollback':self._load_rollback()
         if pid == 'startup': self._load_startup()
+        if pid == 'clean' and IS_LINUX and not HAS_POLKIT_AGENT:
+            self._show_polkit_warning()
+
+    # ── POLKIT WARNING ─────────────────────────────────────────
+    def _show_polkit_warning(self):
+        if hasattr(self, '_polkit_warned'): return
+        self._polkit_warned = True
+        if not HAS_POLKIT:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Setup Required')
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setText(
+                'Polkit not configured.'
+                ' Root-level cleaning needs setup.'
+                '<br>Option 1: bash ~/CyberClean/install.sh'
+                '<br>Option 2: sudo python3 ~/CyberClean/main.py'
+                '<br>User-level targets (browser cache, thumbnails) still work.'
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;')
+            msg.exec()
+            self._on_clean_log('  ⚠  Polkit not set up — run install.sh for full functionality', 'warn')
+        elif not HAS_POLKIT_AGENT:
+            self._on_clean_log('  ⚠  Polkit policy OK but no agent running', 'warn')
+            self._on_clean_log('     Password dialog may not appear on Wayland', 'warn')
+            self._on_clean_log('     Fix: sudo pacman -S polkit-gnome  →  re-login', 'warn')
 
     # ── SYSINFO REALTIME ──────────────────────────────────
     def _start_sysinfo(self):
@@ -880,6 +944,8 @@ class CyberCleanApp(QMainWindow):
     def _run_clean(self, dry=True):
         if not CLEANER or not self.selected: return
         if self.worker and self.worker.isRunning(): return
+        # Snapshot disk % BEFORE clean for accurate before/after comparison
+        self._disk_pct_before = self._snap.disks[0].percent if self._snap and self._snap.disks else 0
         self.clean_terminal.clear()
         self.clean_prog.setVisible(True)
         self.clean_prog_lbl.setVisible(True)
@@ -899,11 +965,18 @@ class CyberCleanApp(QMainWindow):
         self.clean_prog.setVisible(False)
         self.clean_prog_lbl.setVisible(False)
         if not result['dry']:
-            disk_pct = self._snap.disks[0].percent if self._snap and self._snap.disks else 0
+            disk_before = self._disk_pct_before
+            # Re-snapshot disk after clean to get real "after" value
+            try:
+                from utils.sysinfo import get_snapshot
+                snap_after = get_snapshot(interval=0.1)
+                disk_after = snap_after.disks[0].percent if snap_after.disks else disk_before
+            except:
+                disk_after = disk_before
             session  = {
                 'time': datetime.now().isoformat(),
-                'disk_before': disk_pct,
-                'disk_after':  disk_pct,
+                'disk_before': disk_before,
+                'disk_after':  round(disk_after, 1),
                 'freed_bytes': result['freed'],
                 'summary':     result['summary'],
             }
