@@ -37,6 +37,8 @@ class SystemSnapshot:
     ram_used:       int = 0
     ram_total:      int = 0
     swap_percent:   float = 0.0
+    swap_total:     int   = 0
+    swap_used:      int   = 0
     disks:          List[DiskInfo] = field(default_factory=list)
     temp_max:       Optional[float] = None
     temp_all:       dict = field(default_factory=dict)
@@ -70,6 +72,8 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
 
     swap = psutil.swap_memory()
     s.swap_percent = swap.percent
+    s.swap_total   = swap.total
+    s.swap_used    = swap.used
 
     # Disks
     ignore_fs = {'tmpfs','squashfs','devtmpfs','overlay','aufs'}

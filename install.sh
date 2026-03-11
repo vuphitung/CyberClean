@@ -109,10 +109,55 @@ case "$1" in
     echo 10 > /proc/sys/vm/swappiness
     ;;
   optimizer)
-    # Batch optimizer actions — called from optimizer.py
     sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
     echo 10 > /proc/sys/vm/swappiness 2>/dev/null
     fstrim -av 2>/dev/null
+    ;;
+  fix-suid)
+    # $2 = file path — remove SUID bit
+    [[ -z "$2" ]] && exit 1
+    chmod u-s "$2" 2>/dev/null
+    ;;
+  fix-writable)
+    # $2 = file path — remove world-writable bit
+    [[ -z "$2" ]] && exit 1
+    chmod o-w "$2" 2>/dev/null
+    ;;
+  remove-file)
+    # $2 = file path — delete suspicious file
+    [[ -z "$2" ]] && exit 1
+    rm -f "$2" 2>/dev/null
+    ;;
+  kill-pid)
+    # $2 = PID
+    [[ -z "$2" ]] && exit 1
+    kill -9 "$2" 2>/dev/null
+    ;;
+  stop-service)
+    # $2 = service name
+    [[ -z "$2" ]] && exit 1
+    systemctl stop "$2" 2>/dev/null
+    ;;
+  pacman-remove)
+    # $2 = package name
+    [[ -z "$2" ]] && exit 1
+    pacman -Rns --noconfirm "$2" 2>/dev/null
+    ;;
+  apt-remove)
+    [[ -z "$2" ]] && exit 1
+    apt-get remove -y "$2" 2>/dev/null
+    ;;
+  dnf-remove)
+    [[ -z "$2" ]] && exit 1
+    dnf remove -y "$2" 2>/dev/null
+    ;;
+  one-click-fix)
+    # Dashboard One-Click: safe clean + tune
+    sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
+    echo 10 > /proc/sys/vm/swappiness 2>/dev/null
+    fstrim -av 2>/dev/null
+    journalctl --vacuum-time=7d 2>/dev/null
+    command -v paccache &>/dev/null && paccache -rk1 2>/dev/null
     ;;
   *)
     echo "Unknown action: $1" >&2
@@ -123,7 +168,26 @@ HELPER
 sudo chmod +x /usr/local/bin/cyber-clean-helper
 ok "/usr/local/bin/cyber-clean-helper"
 
-# ── 4. Polkit policy ──────────────────────────────────────────
+# ── 3b. NOPASSWD sudoers rule ─────────────────────────────────
+head "Setting up NOPASSWD sudo rule"
+SUDOERS_FILE="/etc/sudoers.d/cyberclean"
+SUDOERS_RULE="$USER ALL=(root) NOPASSWD: /usr/local/bin/cyber-clean-helper"
+
+# Write and validate — delete if invalid syntax
+echo "$SUDOERS_RULE" | sudo tee "$SUDOERS_FILE" > /dev/null
+if sudo visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+    sudo chmod 440 "$SUDOERS_FILE"
+    ok "NOPASSWD rule: $USER → cyber-clean-helper"
+    # Test it immediately
+    if sudo -n /usr/local/bin/cyber-clean-helper swappiness &>/dev/null; then
+        ok "sudo -n test: PASSED — no password needed"
+    else
+        warn "sudo -n test failed — may need re-login to take effect"
+    fi
+else
+    sudo rm -f "$SUDOERS_FILE"
+    err "sudoers syntax error — rule NOT applied (safe rollback)"
+fi
 head "Registering polkit policy"
 sudo tee /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy > /dev/null << 'POLICY'
 <?xml version="1.0" encoding="UTF-8"?>

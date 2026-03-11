@@ -44,7 +44,8 @@ from core.os_detect  import (IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info,
                                 HAS_POLKIT, HAS_POLKIT_AGENT, HAS_FLATPAK, HAS_DOCKER,
                                 HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
 from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linux, fmt_size
-from core.optimizer  import run_optimizer
+from core.scanner    import SecurityScanner
+from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
 
 # ── Windows: request UAC elevation on startup ─────────────────
 if IS_WINDOWS and not is_windows_admin():
@@ -261,13 +262,6 @@ class CleanWorker(QThread):
             'summary': ' | '.join(summary), 'rollback': rollback,
         })
 
-class OptimizeWorker(QThread):
-    log  = pyqtSignal(str, str)
-    done = pyqtSignal(list)
-    def run(self):
-        results = run_optimizer(lambda msg, lvl: self.log.emit(msg, lvl))
-        self.done.emit(results)
-
 # ═════════════════════════════════════════════════════════════
 # HELPERS
 # ═════════════════════════════════════════════════════════════
@@ -314,7 +308,6 @@ class CyberCleanApp(QMainWindow):
         self.setMinimumSize(1100, 700)
         self.resize(1200, 760)
         self.worker    = None
-        self.opt_worker= None
         self.selected  = set()
         self._charts   = {}
         self._snap     = None
@@ -413,12 +406,13 @@ class CyberCleanApp(QMainWindow):
 
         self.nav_btns = {}
         nav = [
-            ('dashboard', '◈  DASHBOARD'),
-            ('clean',     '⚡  CLEAN'),
-            ('optimize',  '◆  OPTIMIZE'),
-            ('startup',   '▷  STARTUP'),
-            ('log',       '◎  HISTORY'),
-            ('rollback',  '↺  ROLLBACK'),
+            ('dashboard',  '◈  DASHBOARD'),
+            ('clean',      '⚡  CLEAN'),
+            ('scanner',    '🛡  SCANNER'),
+            ('uninstall',  '✕  UNINSTALL'),
+            ('startup',    '▷  PROCESSES'),
+            ('log',        '◎  HISTORY'),
+            ('rollback',   '↺  ROLLBACK'),
         ]
         for pid, label in nav:
             btn = QPushButton(label)
@@ -487,12 +481,13 @@ class CyberCleanApp(QMainWindow):
     def _build_main(self):
         self.stack = QStackedWidget()
         self.stack.setStyleSheet(f'background:{C["bg"]};')
-        self.stack.addWidget(self._build_dashboard())  # 0
-        self.stack.addWidget(self._build_clean())       # 1
-        self.stack.addWidget(self._build_optimize())    # 2
-        self.stack.addWidget(self._build_startup())     # 3
-        self.stack.addWidget(self._build_log())         # 4
-        self.stack.addWidget(self._build_rollback())    # 5
+        self.stack.addWidget(self._build_dashboard())   # 0
+        self.stack.addWidget(self._build_clean())        # 1
+        self.stack.addWidget(self._build_scanner())      # 2
+        self.stack.addWidget(self._build_uninstall())    # 3
+        self.stack.addWidget(self._build_startup())    # 4
+        self.stack.addWidget(self._build_log())          # 5
+        self.stack.addWidget(self._build_rollback())     # 6
         return self.stack
 
     # ── DASHBOARD ─────────────────────────────────────────
@@ -509,7 +504,50 @@ class CyberCleanApp(QMainWindow):
         ref.clicked.connect(self._refresh_now)
         tr.addWidget(t); tr.addStretch(); tr.addWidget(ref)
         lay.addLayout(tr)
-        lay.addSpacing(16)
+        lay.addSpacing(12)
+
+        # ── Health Score + One-Click Fix row ──────────────
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+
+        # Health score card
+        health_card = card()
+        health_card.setFixedWidth(160)
+        hcl = QVBoxLayout(health_card)
+        hcl.setContentsMargins(14,12,14,12)
+        hcl.setSpacing(4)
+        hl = QLabel('HEALTH SCORE')
+        hl.setStyleSheet(f'color:{C["dim"]};font-size:9px;letter-spacing:2px;')
+        self.health_score_lbl = QLabel('—')
+        self.health_score_lbl.setStyleSheet(f'color:{C["green"]};font-size:28px;font-weight:bold;letter-spacing:2px;')
+        self.health_status_lbl = QLabel('Calculating...')
+        self.health_status_lbl.setStyleSheet(f'color:{C["dim"]};font-size:9px;letter-spacing:1px;')
+        self.health_status_lbl.setWordWrap(True)
+        hcl.addWidget(hl)
+        hcl.addWidget(self.health_score_lbl)
+        hcl.addWidget(self.health_status_lbl)
+        top_row.addWidget(health_card)
+
+        # One-Click Fix card
+        fix_card = card()
+        fcl = QVBoxLayout(fix_card)
+        fcl.setContentsMargins(16,12,16,12)
+        fcl.setSpacing(6)
+        fl = QLabel('ONE-CLICK FIX')
+        fl.setStyleSheet(f'color:{C["dim"]};font-size:9px;letter-spacing:2px;')
+        fd = QLabel('Drop cache · Tune swap · TRIM SSD · Clean journal')
+        fd.setStyleSheet(f'color:{C["dim"]};font-size:9px;')
+        fd.setWordWrap(True)
+        self.oneclick_btn = styled_btn('⚡  OPTIMIZE NOW', 'cyan')
+        self.oneclick_btn.clicked.connect(self._one_click_fix)
+        self.oneclick_log = QLabel('')
+        self.oneclick_log.setStyleSheet(f'color:{C["green"]};font-size:9px;letter-spacing:1px;')
+        fcl.addWidget(fl); fcl.addWidget(fd)
+        fcl.addWidget(self.oneclick_btn)
+        fcl.addWidget(self.oneclick_log)
+        top_row.addWidget(fix_card, 1)
+        lay.addLayout(top_row)
+        lay.addSpacing(12)
 
         # Stat cards row
         cards_row = QHBoxLayout()
@@ -552,13 +590,20 @@ class CyberCleanApp(QMainWindow):
         lay.addSpacing(16)
 
         # Top processes
-        lay.addWidget(section_lbl('TOP PROCESSES — CPU'))
+        proc_hdr = QHBoxLayout()
+        proc_hdr.addWidget(section_lbl('TOP PROCESSES — CPU'))
+        kill_btn = styled_btn('✕ KILL SELECTED', 'red', small=True)
+        kill_btn.clicked.connect(self._kill_selected_proc)
+        proc_hdr.addStretch()
+        proc_hdr.addWidget(kill_btn)
+        lay.addLayout(proc_hdr)
         self.proc_table = QTableWidget(0, 4)
         self.proc_table.setHorizontalHeaderLabels(['PID','NAME','CPU %','MEM %'])
         self.proc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.proc_table.verticalHeader().setVisible(False)
         self.proc_table.setMaximumHeight(180)
         self.proc_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.proc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         lay.addWidget(self.proc_table)
 
         # Disk list
@@ -662,21 +707,21 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self.clean_terminal, 1)
         return w
 
-    # ── OPTIMIZE ──────────────────────────────────────────
-    def _build_optimize(self):
+    # ── SCANNER ─────────────────────────────────────────────
+    def _build_scanner(self):
         w   = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(28,22,28,22)
         lay.setSpacing(0)
 
-        t = QLabel('ONE-CLICK OPTIMIZE')
+        t = QLabel('🛡  SECURITY SCANNER')
         t.setStyleSheet(f'color:{C["cyan"]};font-size:14px;letter-spacing:3px;font-weight:bold;')
         lay.addWidget(t)
         lay.addSpacing(6)
 
         desc = QLabel(
-            'Frees page cache · kills zombies · tunes swappiness · trims SSD (Linux)\n'
-            'Flushes DNS · checks telemetry services · optimizes power plan (Windows)'
+            'Deep scan: malware · reverse shells · crypto miners · SUID · cron backdoors\n'
+            'World-writable files · suspicious autoruns · hosts hijack · network ports'
         )
         desc.setStyleSheet(f'color:{C["dim"]};font-size:10px;line-height:1.8;')
         lay.addWidget(desc)
@@ -684,9 +729,9 @@ class CyberCleanApp(QMainWindow):
 
         # Warning boxes
         warns = [
-            ('◆', C['cyan'],   'Safe operations only — no files deleted.'),
-            ('⚠', C['yellow'], 'Some actions (drop_cache, fstrim) need root/admin.'),
-            ('◎', C['dim'],    'Services are only flagged — NOT auto-disabled. You decide.'),
+            ('🛡', C['cyan'],   'Read-only scan — nothing is deleted automatically.'),
+            ('⚠', C['yellow'], 'Review all findings before taking action.'),
+            ('◆', C['green'],  'Checks: miners · shells · SUID · cron · hosts · ports · autoruns'),
         ]
         for icon, col, msg in warns:
             wf = QFrame()
@@ -698,21 +743,91 @@ class CyberCleanApp(QMainWindow):
             lay.addSpacing(4)
 
         lay.addSpacing(10)
-        run_btn = styled_btn('◆  RUN OPTIMIZER', 'purple')
+        br2 = QHBoxLayout()
+        run_btn = styled_btn('🛡  RUN DEEP SCAN', 'cyan')
         run_btn.setFixedWidth(220)
-        run_btn.clicked.connect(self._run_optimize)
-        self.opt_btn = run_btn
-        lay.addWidget(run_btn)
+        run_btn.clicked.connect(self._run_scanner)
+        self.scan_btn = run_btn
+        self.fix_btn  = styled_btn('⚡ AUTO-FIX SELECTED', 'red', small=True)
+        self.fix_btn.clicked.connect(self._fix_scan_results)
+        self.fix_btn.setEnabled(False)
+        br2.addWidget(run_btn); br2.addWidget(self.fix_btn); br2.addStretch()
+        lay.addLayout(br2)
         lay.addSpacing(12)
 
-        lay.addWidget(section_lbl('OPTIMIZER OUTPUT'))
+        lay.addWidget(section_lbl('SCAN OUTPUT'))
         self.opt_terminal = QTextEdit()
         self.opt_terminal.setReadOnly(True)
-        self.opt_terminal.setPlaceholderText('  → Click RUN OPTIMIZER to start...')
+        self.opt_terminal.setPlaceholderText('  → Click RUN DEEP SCAN to start...')
         lay.addWidget(self.opt_terminal, 1)
+
+        # Results table
+        lay.addWidget(section_lbl('FINDINGS'))
+        self.scan_table = QTableWidget(0, 4)
+        self.scan_table.setHorizontalHeaderLabels(['SEV','CATEGORY','PATH','DETAIL'])
+        self.scan_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.scan_table.verticalHeader().setVisible(False)
+        self.scan_table.setMaximumHeight(160)
+        self.scan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.scan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scan_table.itemSelectionChanged.connect(self._on_scan_select)
+        lay.addWidget(self.scan_table)
         return w
 
-    # ── STARTUP MANAGER ───────────────────────────────────
+    # ── UNINSTALL ───────────────────────────────────────────
+    def _build_uninstall(self):
+        w   = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(28,22,28,22)
+        lay.setSpacing(0)
+
+        tr  = QHBoxLayout()
+        t   = QLabel('APP UNINSTALLER')
+        t.setStyleSheet(f'color:{C["cyan"]};font-size:14px;letter-spacing:3px;font-weight:bold;')
+        ref = styled_btn('↻ REFRESH', small=True)
+        ref.clicked.connect(self._load_uninstall)
+        tr.addWidget(t); tr.addStretch(); tr.addWidget(ref)
+        lay.addLayout(tr)
+        lay.addSpacing(6)
+
+        info = QLabel('All installed apps. Select one or more → Uninstall.')
+        info.setStyleSheet(f'color:{C["dim"]};font-size:10px;')
+        lay.addWidget(info)
+        lay.addSpacing(6)
+
+        search_row = QHBoxLayout()
+        from PyQt6.QtWidgets import QLineEdit
+        self.uninstall_search = QLineEdit()
+        self.uninstall_search.setPlaceholderText('Filter apps...')
+        self.uninstall_search.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};border:1px solid {C["border"]};padding:5px 10px;font-family:monospace;font-size:11px;')
+        self.uninstall_search.textChanged.connect(self._filter_uninstall)
+        search_row.addWidget(self.uninstall_search)
+        lay.addLayout(search_row)
+        lay.addSpacing(8)
+
+        self.uninstall_table = QTableWidget(0, 4)
+        self.uninstall_table.setHorizontalHeaderLabels(['NAME','VERSION','SIZE','SOURCE'])
+        self.uninstall_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.uninstall_table.verticalHeader().setVisible(False)
+        self.uninstall_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.uninstall_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        lay.addWidget(self.uninstall_table, 1)
+
+        btn_row = QHBoxLayout()
+        un_btn = styled_btn('✕  UNINSTALL SELECTED', 'red')
+        un_btn.clicked.connect(self._do_uninstall)
+        btn_row.addWidget(un_btn); btn_row.addStretch()
+        lay.addSpacing(8)
+        lay.addLayout(btn_row)
+
+        self.uninstall_log = QTextEdit()
+        self.uninstall_log.setReadOnly(True)
+        self.uninstall_log.setMaximumHeight(80)
+        self.uninstall_log.setPlaceholderText('  → Select app and click Uninstall...')
+        lay.addWidget(self.uninstall_log)
+        return w
+
+    # ── STARTUP MANAGER → PROCESS MANAGER ───────────────────────────────────
     def _build_startup(self):
         w   = QWidget()
         lay = QVBoxLayout(w)
@@ -720,7 +835,7 @@ class CyberCleanApp(QMainWindow):
         lay.setSpacing(0)
 
         tr  = QHBoxLayout()
-        t   = QLabel('STARTUP MANAGER')
+        t   = QLabel('PROCESS & STARTUP MANAGER')
         t.setStyleSheet(f'color:{C["cyan"]};font-size:14px;letter-spacing:3px;font-weight:bold;')
         ref = styled_btn('↻ SCAN', small=True)
         ref.clicked.connect(self._load_startup)
@@ -728,7 +843,7 @@ class CyberCleanApp(QMainWindow):
         lay.addLayout(tr)
         lay.addSpacing(6)
 
-        info = QLabel('Apps and services that start automatically with your system.')
+        info = QLabel('Running processes + startup items. Kill or disable as needed.')
         info.setStyleSheet(f'color:{C["dim"]};font-size:10px;')
         lay.addWidget(info)
         lay.addSpacing(14)
@@ -741,11 +856,14 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self.startup_table, 1)
 
         btn_row = QHBoxLayout()
-        dis_btn = styled_btn('✕ DISABLE SELECTED', 'red',   small=True)
-        en_btn  = styled_btn('✓ ENABLE SELECTED',  'green', small=True)
+        kill_btn2 = styled_btn('✕ KILL PROCESS',    'red',    small=True)
+        dis_btn   = styled_btn('⏸ DISABLE STARTUP', 'yellow', small=True)
+        en_btn    = styled_btn('▷ ENABLE STARTUP',  'green',  small=True)
+        kill_btn2.clicked.connect(self._kill_from_startup)
         dis_btn.clicked.connect(lambda: self._toggle_startup(False))
         en_btn.clicked.connect(lambda:  self._toggle_startup(True))
-        btn_row.addWidget(dis_btn); btn_row.addWidget(en_btn); btn_row.addStretch()
+        for b in [kill_btn2, dis_btn, en_btn]: btn_row.addWidget(b)
+        btn_row.addStretch()
         lay.addSpacing(8)
         lay.addLayout(btn_row)
         return w
@@ -808,15 +926,287 @@ class CyberCleanApp(QMainWindow):
 
     # ── NAVIGATION ────────────────────────────────────────
     def _nav(self, pid):
-        pages = ['dashboard','clean','optimize','startup','log','rollback']
+        pages = ['dashboard','clean','scanner','uninstall','startup','log','rollback']
         self.stack.setCurrentIndex(pages.index(pid))
         for k, b in self.nav_btns.items():
             b.setChecked(k == pid)
-        if pid == 'log':     self._load_log()
-        if pid == 'rollback':self._load_rollback()
-        if pid == 'startup': self._load_startup()
+        if pid == 'log':        self._load_log()
+        if pid == 'rollback':   self._load_rollback()
+        if pid == 'startup':    self._load_processes()
+        if pid == 'uninstall':  self._load_uninstall()
         if pid == 'clean' and IS_LINUX and not HAS_POLKIT_AGENT:
             self._show_polkit_warning()
+
+    # ── ONE-CLICK FIX ─────────────────────────────────────
+    def _one_click_fix(self):
+        self.oneclick_btn.setEnabled(False)
+        self.oneclick_log.setText('Running...')
+        import subprocess as _sp
+
+        class OneClickWorker(QThread):
+            done = pyqtSignal(str, bool)
+            def run(self_w):
+                HELPER = '/usr/local/bin/cyber-clean-helper'
+                results = []
+                # 1. Drop page cache (root)
+                r = _sp.run(f'sudo -n {HELPER} drop-cache', shell=True,
+                            capture_output=True, text=True, timeout=15)
+                results.append(('Drop cache', r.returncode == 0))
+                # 2. Tune swappiness
+                r = _sp.run(f'sudo -n {HELPER} swappiness', shell=True,
+                            capture_output=True, text=True, timeout=10)
+                results.append(('Swappiness→10', r.returncode == 0))
+                # 3. SSD TRIM
+                r = _sp.run(f'sudo -n {HELPER} fstrim', shell=True,
+                            capture_output=True, text=True, timeout=30)
+                results.append(('SSD TRIM', r.returncode == 0))
+                # 4. Journal vacuum
+                r = _sp.run(f'sudo -n {HELPER} journal', shell=True,
+                            capture_output=True, text=True, timeout=20)
+                results.append(('Journal', r.returncode == 0))
+                # 5. Pacman cache (if applicable)
+                import shutil
+                if shutil.which('paccache'):
+                    r = _sp.run(f'sudo -n {HELPER} paccache', shell=True,
+                                capture_output=True, text=True, timeout=60)
+                    results.append(('Pacman cache', r.returncode == 0))
+                ok_count = sum(1 for _, ok in results if ok)
+                summary = f'✓ {ok_count}/{len(results)} done: ' + \
+                          ' · '.join(f'{"✓" if ok else "~"}{n}' for n, ok in results)
+                self_w.done.emit(summary, ok_count > 0)
+
+        self._oneclick_worker = OneClickWorker()
+        self._oneclick_worker.done.connect(self._on_oneclick_done)
+        self._oneclick_worker.start()
+
+    def _on_oneclick_done(self, summary, success):
+        self.oneclick_btn.setEnabled(True)
+        col = C['green'] if success else C['yellow']
+        self.oneclick_log.setText(summary)
+        self.oneclick_log.setStyleSheet(f'color:{col};font-size:9px;letter-spacing:1px;')
+        QTimer.singleShot(3000, self._refresh_now)
+
+    # ── KILL PROCESS (Dashboard) ─────────────────────────────
+    def _kill_selected_proc(self):
+        rows = set(i.row() for i in self.proc_table.selectedItems())
+        if not rows:
+            return
+        killed = []
+        for row in rows:
+            pid_item = self.proc_table.item(row, 0)
+            name_item = self.proc_table.item(row, 1)
+            if not pid_item: continue
+            pid  = pid_item.text()
+            name = name_item.text() if name_item else pid
+            try:
+                import psutil
+                p = psutil.Process(int(pid))
+                p.terminate()
+                killed.append(name)
+            except Exception as e:
+                QMessageBox.warning(self, 'Kill failed', f'Cannot kill {name}: {e}')
+        if killed:
+            QMessageBox.information(self, 'Done',
+                f'Terminated: {", ".join(killed)}\nRefreshing in 2s...')
+            QTimer.singleShot(2000, self._refresh_now)
+
+    # ── KILL PROCESS (Process tab) ────────────────────────────
+    def _kill_from_startup(self):
+        rows = set(i.row() for i in self.startup_table.selectedItems())
+        for row in rows:
+            item = self.startup_table.item(row, 0)
+            if not item: continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data and data.get('pid'):
+                try:
+                    import psutil; psutil.Process(data['pid']).terminate()
+                except: pass
+        self._load_processes()
+
+    # ── SCANNER ───────────────────────────────────────────────
+    def _run_scanner(self):
+        if hasattr(self, '_scan_running') and self._scan_running: return
+        self._scan_running = True
+        self.scan_btn.setEnabled(False)
+        self.fix_btn.setEnabled(False)
+        self.opt_terminal.clear()
+        self.scan_table.setRowCount(0)
+        self._scan_results = []
+
+        class ScanWorker(QThread):
+            log  = pyqtSignal(str, str)
+            done = pyqtSignal(list)
+            def run(self_w):
+                sc = SecurityScanner()
+                results = sc.scan(lambda m, l: self_w.log.emit(m, l))
+                self_w.done.emit(results)
+
+        self._scan_worker = ScanWorker()
+        self._scan_worker.log.connect(self._on_opt_log)
+        self._scan_worker.done.connect(self._on_scan_done)
+        self._scan_worker.start()
+
+    def _on_scan_done(self, results):
+        self._scan_running = False
+        self.scan_btn.setEnabled(True)
+        self._scan_results = results
+        # Populate table
+        sev_col = {'critical': C['red'], 'high': C['yellow'],
+                   'medium': C['cyan'], 'info': C['dim']}
+        for r in results:
+            row = self.scan_table.rowCount()
+            self.scan_table.insertRow(row)
+            for i, val in enumerate([r.severity.upper(), r.category, r.path, r.detail]):
+                ti = QTableWidgetItem(val)
+                if i == 0: ti.setForeground(QColor(sev_col.get(r.severity, C['text'])))
+                self.scan_table.setItem(row, i, ti)
+            self.scan_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, r)
+        fixable = [r for r in results if r.can_fix]
+        if fixable: self.fix_btn.setEnabled(True)
+
+    def _on_scan_select(self):
+        rows = set(i.row() for i in self.scan_table.selectedItems())
+        fixable = any(
+            self.scan_table.item(r, 0) and
+            self.scan_table.item(r, 0).data(Qt.ItemDataRole.UserRole) and
+            self.scan_table.item(r, 0).data(Qt.ItemDataRole.UserRole).can_fix
+            for r in rows
+        )
+        self.fix_btn.setEnabled(fixable)
+
+    def _fix_scan_results(self):
+        rows = set(i.row() for i in self.scan_table.selectedItems())
+        if not rows:
+            rows = set(range(self.scan_table.rowCount()))
+        to_fix = []
+        for row in rows:
+            item = self.scan_table.item(row, 0)
+            if item:
+                r = item.data(Qt.ItemDataRole.UserRole)
+                if r and r.can_fix:
+                    to_fix.append(r)
+        if not to_fix: return
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Auto-Fix')
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(f'Apply {len(to_fix)} auto-fix(es)?\n\n' +
+                    '\n'.join(f'• {r.path}: {r.detail[:60]}' for r in to_fix[:5]))
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if msg.exec() != QMessageBox.StandardButton.Yes: return
+        import subprocess as _sp
+        for r in to_fix:
+            try:
+                result = _sp.run(r.fix_cmd, shell=True, capture_output=True, text=True, timeout=10)
+                self._on_opt_log(
+                    f'  {"✓" if result.returncode==0 else "✗"}  {r.path}: {r.fix_cmd}',
+                    'ok' if result.returncode==0 else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.fix_cmd}: {e}', 'err')
+        self._run_scanner()  # re-scan after fixes
+
+    # ── UNINSTALL ─────────────────────────────────────────────
+    def _load_uninstall(self):
+        self.uninstall_table.setRowCount(0)
+        self.uninstall_log.append('  Loading installed apps...')
+        self._all_apps = get_installed_apps()
+        self._populate_uninstall(self._all_apps)
+        self.uninstall_log.append(f'  Found {len(self._all_apps)} apps')
+
+    def _populate_uninstall(self, apps):
+        self.uninstall_table.setRowCount(0)
+        for app in apps:
+            row = self.uninstall_table.rowCount()
+            self.uninstall_table.insertRow(row)
+            sz = f'{app.size_mb:.1f} MB' if app.size_mb > 0 else '—'
+            src_col = {'pacman':C['cyan'],'apt':C['yellow'],'dnf':C['green'],
+                       'flatpak':C['purple'],'winget':C['cyan'],'wmic':C['dim']}.get(app.source, C['text'])
+            for i, val in enumerate([app.name, app.version, sz, app.source]):
+                ti = QTableWidgetItem(val)
+                if i == 3: ti.setForeground(QColor(src_col))
+                if i == 2 and app.size_mb > 200:
+                    ti.setForeground(QColor(C['red']))
+                self.uninstall_table.setItem(row, i, ti)
+            self.uninstall_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, app)
+
+    def _filter_uninstall(self, text):
+        if not hasattr(self, '_all_apps'): return
+        filtered = [a for a in self._all_apps if text.lower() in a.name.lower()]
+        self._populate_uninstall(filtered)
+
+    def _do_uninstall(self):
+        rows = set(i.row() for i in self.uninstall_table.selectedItems())
+        if not rows:
+            QMessageBox.information(self, 'Select', 'Select at least one app first.')
+            return
+        apps = []
+        for row in rows:
+            item = self.uninstall_table.item(row, 0)
+            if item:
+                app = item.data(Qt.ItemDataRole.UserRole)
+                if app: apps.append(app)
+        if not apps: return
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Uninstall')
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(f'Uninstall {len(apps)} app(s)?\n' +
+                    '\n'.join(f'• {a.name}' for a in apps))
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if msg.exec() != QMessageBox.StandardButton.Yes: return
+        self.uninstall_log.clear()
+        for app in apps:
+            _col_map = {'ok': C['green'], 'err': C['red']}
+            def _log_uninstall(m, l, _cm=_col_map):
+                col = _cm.get(l, C['dim'])
+                self.uninstall_log.append(f'<span style="color:{col};">{m}</span>')
+            uninstall_app(app, _log_uninstall)
+        QTimer.singleShot(1500, self._load_uninstall)
+
+    # ── PROCESS MANAGER (new _load_processes) ─────────────────
+    def _load_processes(self):
+        """Load both running processes + startup items into startup_table."""
+        self.startup_table.setRowCount(0)
+        # Section 1: Running processes
+        try:
+            import psutil
+            procs = []
+            for p in psutil.process_iter(['pid','name','cpu_percent','memory_percent','status']):
+                try:
+                    procs.append({
+                        'name': p.info['name'], 'pid': p.info['pid'],
+                        'type': f'PID {p.info["pid"]}',
+                        'enabled': p.info['status'] == 'running',
+                        'path': f'CPU:{p.info["cpu_percent"]:.1f}%  MEM:{p.info["memory_percent"]:.1f}%',
+                        'platform': 'process'
+                    })
+                except: pass
+            procs.sort(key=lambda x: x.get('cpu_percent', 0) if isinstance(x.get('cpu_percent'), (int,float)) else 0, reverse=True)
+            for item in procs[:40]:  # top 40
+                row = self.startup_table.rowCount()
+                self.startup_table.insertRow(row)
+                col = C['green'] if item['enabled'] else C['dim']
+                for i, val in enumerate([item['name'], item['type'],
+                                          'RUNNING' if item['enabled'] else item['enabled'],
+                                          item.get('path','')]):
+                    ti = QTableWidgetItem(str(val))
+                    if i == 2: ti.setForeground(QColor(col))
+                    self.startup_table.setItem(row, i, ti)
+                self.startup_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, item)
+        except ImportError: pass
+
+        # Section 2: Startup items
+        from utils.sysinfo import get_startup_items
+        for item in get_startup_items():
+            row = self.startup_table.rowCount()
+            self.startup_table.insertRow(row)
+            en_col = C['cyan'] if item['enabled'] else C['red']
+            for i, val in enumerate([item['name'], item['type'],
+                                      'AUTOSTART' if item['enabled'] else 'DISABLED',
+                                      item.get('path','')]):
+                ti = QTableWidgetItem(val)
+                if i == 2: ti.setForeground(QColor(en_col))
+                self.startup_table.setItem(row, i, ti)
+            self.startup_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, item)
 
     # ── POLKIT WARNING ─────────────────────────────────────────
     def _show_polkit_warning(self):
@@ -865,12 +1255,49 @@ class CyberCleanApp(QMainWindow):
         self.stat_vals['cpu'].setStyleSheet(f'color:{C[color_pct(s.cpu_percent)]};font-size:22px;font-weight:bold;letter-spacing:2px;')
         self.stat_vals['ram'].setText(f'{s.ram_percent:.0f}%')
         self.stat_vals['ram'].setStyleSheet(f'color:{C[color_pct(s.ram_percent)]};font-size:22px;font-weight:bold;letter-spacing:2px;')
-        self.stat_vals['swap'].setText(f'{s.swap_percent:.0f}%')
-        self.stat_vals['swap'].setStyleSheet(f'color:{C["dim"] if s.swap_percent<5 else C["yellow"]};font-size:22px;font-weight:bold;letter-spacing:2px;')
+
+        # Swap — hiện GB/MB thay vì %
+        if s.swap_total == 0:
+            self.stat_vals['swap'].setText('N/A')
+            self.stat_vals['swap'].setStyleSheet(f'color:{C["dim"]};font-size:18px;font-weight:bold;letter-spacing:2px;')
+            if hasattr(self, '_swap_sub'): self._swap_sub.setText('no swap')
+        else:
+            used_gb = s.swap_used / 1024**3; total_gb = s.swap_total / 1024**3
+            if total_gb >= 1:
+                self.stat_vals['swap'].setText(f'{used_gb:.1f} GB')
+                if hasattr(self, '_swap_sub'): self._swap_sub.setText(f'/ {total_gb:.1f} GB total')
+            else:
+                self.stat_vals['swap'].setText(f'{s.swap_used//1024//1024:.0f} MB')
+                if hasattr(self, '_swap_sub'): self._swap_sub.setText(f'/ {s.swap_total//1024//1024:.0f} MB total')
+            sc = 'red' if s.swap_percent>80 else 'yellow' if s.swap_percent>40 else 'cyan'
+            self.stat_vals['swap'].setStyleSheet(f'color:{C[sc]};font-size:22px;font-weight:bold;letter-spacing:2px;')
+
         if s.temp_max:
             tc = 'red' if s.temp_max>85 else 'yellow' if s.temp_max>75 else 'green'
             self.stat_vals['temp'].setText(f'{s.temp_max:.0f}°C')
             self.stat_vals['temp'].setStyleSheet(f'color:{C[tc]};font-size:22px;font-weight:bold;letter-spacing:2px;')
+
+        # ── Health Score ──────────────────────────────────
+        if hasattr(self, 'health_score_lbl'):
+            score = 100
+            issues = []
+            if s.cpu_percent > 85:  score -= 20; issues.append(f'CPU {s.cpu_percent:.0f}%')
+            elif s.cpu_percent > 70: score -= 10; issues.append(f'CPU high')
+            if s.ram_percent > 85:  score -= 20; issues.append(f'RAM {s.ram_percent:.0f}%')
+            elif s.ram_percent > 70: score -= 10
+            if s.disks:
+                worst = max(s.disks, key=lambda d: d.percent)
+                if worst.percent > 90:  score -= 25; issues.append(f'Disk {worst.percent:.0f}%')
+                elif worst.percent > 75: score -= 15; issues.append(f'Disk {worst.percent:.0f}%')
+            if s.temp_max and s.temp_max > 85: score -= 15; issues.append(f'Temp {s.temp_max:.0f}°C')
+            if s.swap_total > 0 and s.swap_percent > 60: score -= 10; issues.append('Swap heavy')
+            score = max(0, score)
+            col = 'green' if score >= 80 else 'yellow' if score >= 50 else 'red'
+            self.health_score_lbl.setText(f'{score}%')
+            self.health_score_lbl.setStyleSheet(f'color:{C[col]};font-size:28px;font-weight:bold;letter-spacing:2px;')
+            status = ' · '.join(issues) if issues else '✓ System healthy'
+            self.health_status_lbl.setText(status)
+            self.health_status_lbl.setStyleSheet(f'color:{C[col] if issues else C["green"]};font-size:9px;')
 
         # Charts
         self._charts['cpu'].push(s.cpu_percent)
@@ -986,15 +1413,6 @@ class CyberCleanApp(QMainWindow):
                     for e in result['rollback']: f.write(json.dumps(e)+'\n')
 
     # ── OPTIMIZER ─────────────────────────────────────────
-    def _run_optimize(self):
-        if self.opt_worker and self.opt_worker.isRunning(): return
-        self.opt_terminal.clear()
-        self.opt_btn.setEnabled(False)
-        self.opt_worker = OptimizeWorker()
-        self.opt_worker.log.connect(self._on_opt_log)
-        self.opt_worker.done.connect(lambda _: self.opt_btn.setEnabled(True))
-        self.opt_worker.start()
-
     def _on_opt_log(self, msg, level):
         cols = {'ok':C['green'],'warn':C['yellow'],'err':C['red'],'head':C['cyan'],'info':C['dim']}
         col  = cols.get(level, C['text'])
@@ -1003,7 +1421,9 @@ class CyberCleanApp(QMainWindow):
 
     # ── STARTUP ───────────────────────────────────────────
     def _load_startup(self):
-        self.startup_table.setRowCount(0)
+        self._load_processes()
+
+    def _load_startup_only(self):
         items = get_startup_items()
         for item in items:
             row = self.startup_table.rowCount()

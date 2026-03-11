@@ -34,25 +34,33 @@ _HELPER_MAP = {
 }
 
 def run_privileged(action, stdin_data=None):
-    """Polkit helper → sudo fallback. Never blocks GUI."""
-    if HAS_POLKIT and not IS_ROOT:
-        # Map full command to helper keyword
-        helper_action = _HELPER_MAP.get(action.strip(), action.split()[0])
+    """
+    Priority: IS_ROOT → sudo -n NOPASSWD → pkexec (only if agent) → fail.
+    Never blocks GUI.
+    """
+    if IS_ROOT:
+        return run(action, timeout=120)
+
+    # sudo -n first — works if NOPASSWD sudoers set up by install.sh
+    helper_action = _HELPER_MAP.get(action.strip())
+    if helper_action:
+        out, code = run(f'sudo -n /usr/local/bin/cyber-clean-helper {helper_action} 2>/dev/null', timeout=60)
+    else:
+        out, code = run(f'sudo -n {action} 2>/dev/null', timeout=60)
+    if code == 0:
+        return out, 0
+
+    # pkexec ONLY if polkit agent is actually running (never hangs)
+    if HAS_POLKIT and HAS_POLKIT_AGENT and helper_action:
         try:
             r = subprocess.run(
                 ['pkexec', '/usr/local/bin/cyber-clean-helper', helper_action],
-                input=stdin_data, capture_output=True, text=True, timeout=60)
+                input=stdin_data, capture_output=True, text=True, timeout=30)
             return r.stdout.strip(), r.returncode
         except Exception as e:
             return str(e), 1
-    elif IS_ROOT:
-        return run(action, timeout=120)
-    else:
-        # No polkit — try sudo -n (non-interactive, won't block GUI)
-        out, code = run(f'sudo -n {action} 2>/dev/null', timeout=60)
-        if code != 0:
-            return 'Need root: run install.sh to set up polkit, or run with sudo', 1
-        return out, code
+
+    return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
 
 class LinuxCleaner(BaseCleaner):
 
@@ -259,15 +267,25 @@ class LinuxCleaner(BaseCleaner):
     # ── Flatpak ───────────────────────────────────────────
     def _flatpak(self, dry):
         r = CleanResult('flatpak')
-        out, _ = run('flatpak list --runtime --columns=application 2>/dev/null | wc -l')
-        try: r.files_removed = int(out)
-        except: pass
-        # Estimate size
-        out2, _ = run('du -sb ~/.local/share/flatpak 2>/dev/null')
-        try: r.freed_bytes = int(int(out2.split()[0]) * 0.2)  # rough: ~20% is unused
-        except: pass
+        out_unused, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
+        unused = [l.strip() for l in out_unused.splitlines() if l.strip()]
+        r.files_removed = len(unused)
+        out_before, _ = run('du -sb ~/.local/share/flatpak/runtime 2>/dev/null')
+        try: size_before = int(out_before.split()[0])
+        except: size_before = 0
         if not dry:
             run('flatpak uninstall --unused -y 2>/dev/null')
+            out_after, _ = run('du -sb ~/.local/share/flatpak/runtime 2>/dev/null')
+            try: size_after = int(out_after.split()[0])
+            except: size_after = size_before
+            r.freed_bytes = max(size_before - size_after, 0)
+        else:
+            est = 0
+            for app_id in unused[:20]:
+                out_sz, _ = run(f'du -sb ~/.local/share/flatpak/runtime/{app_id} 2>/dev/null')
+                try: est += int(out_sz.split()[0])
+                except: pass
+            r.freed_bytes = est
         return r
 
     # ── Docker / Podman ───────────────────────────────────
@@ -296,25 +314,25 @@ class LinuxCleaner(BaseCleaner):
     def _journal(self, dry):
         r = CleanResult('journal')
         out, _ = run('journalctl --disk-usage 2>/dev/null')
-        m = re.search(r'([\d.]+)\s*(M|G|K)', out)
+        m = re.search(r'([\d.]+)\s*(M|G|K|B)', out)
         before = 0
         if m:
             v, u = float(m.group(1)), m.group(2)
-            before = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024))
+            before = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
         if not dry:
-            # journal vacuum cần write access — thử user trước, root nếu cần
             _, code = run(f'journalctl --vacuum-time={JOURNAL_DAYS}d 2>/dev/null')
             if code != 0:
                 run_privileged(f'journalctl --vacuum-time={JOURNAL_DAYS}d')
+            import time; time.sleep(1)
             out2, _ = run('journalctl --disk-usage 2>/dev/null')
-            m2 = re.search(r'([\d.]+)\s*(M|G|K)', out2)
+            m2 = re.search(r'([\d.]+)\s*(M|G|K|B)', out2)
             after = 0
             if m2:
                 v, u = float(m2.group(1)), m2.group(2)
-                after = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024))
+                after = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
             r.freed_bytes = max(before - after, 0)
         else:
-            r.freed_bytes = max(before - 50*1024*1024, 0)
+            r.freed_bytes = max(before - 10*1024*1024, 0)
         return r
 
     # ── User cache ────────────────────────────────────────
