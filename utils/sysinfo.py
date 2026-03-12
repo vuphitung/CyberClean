@@ -54,6 +54,145 @@ def fmt_size(n: int) -> str:
             return f'{n:.1f} {u}'
         n /= 1024
 
+_OS = platform.system()
+_temp_cache: tuple = (None, {}, 0.0)   # (max_temp, all_temps, timestamp)
+_TEMP_CACHE_TTL = 60.0   # seconds — PowerShell/WMI is expensive, don't call every 4s
+
+def _read_temperature():
+    """
+    Multi-source temperature chain with 60s cache.
+    PowerShell/WMI calls are expensive — caching prevents CPU spike every 4s.
+    Returns (all_temps: dict, max_temp: float | None)
+    """
+    global _temp_cache
+    max_cached, all_cached, ts = _temp_cache
+    if time.time() - ts < _TEMP_CACHE_TTL and (all_cached or max_cached is not None):
+        return all_cached, max_cached
+    all_temps = {}
+    max_temp  = None
+
+    # ── Source 1: psutil (works on Linux + some Windows setups) ──
+    try:
+        if HAS_PSUTIL:
+            raw = psutil.sensors_temperatures()
+            if raw:
+                for name, entries in raw.items():
+                    for e in entries:
+                        if e.current and 1 < e.current < 150:
+                            key = f'{name}/{e.label or "core"}'
+                            all_temps[key] = e.current
+                if all_temps:
+                    max_temp = max(all_temps.values())
+                    return all_temps, max_temp
+    except Exception:
+        pass
+
+    # ── Source 2: Linux /sys thermal zones ────────────────────────
+    if _OS == 'Linux':
+        try:
+            for f in sorted(Path('/sys/class/thermal').glob('thermal_zone*/temp')):
+                try:
+                    v = int(f.read_text().strip()) / 1000
+                    if 1 < v < 150:
+                        zone = f.parent.name
+                        # Try to get a friendly type label
+                        type_f = f.parent / 'type'
+                        label = type_f.read_text().strip() if type_f.exists() else zone
+                        all_temps[label] = v
+                except Exception:
+                    pass
+            if all_temps:
+                max_temp = max(all_temps.values())
+                return all_temps, max_temp
+        except Exception:
+            pass
+
+        # Linux hwmon fallback
+        try:
+            for hwmon in Path('/sys/class/hwmon').glob('hwmon*'):
+                name_f = hwmon / 'name'
+                dev_name = name_f.read_text().strip() if name_f.exists() else hwmon.name
+                for temp_f in sorted(hwmon.glob('temp*_input')):
+                    try:
+                        v = int(temp_f.read_text().strip()) / 1000
+                        if 1 < v < 150:
+                            label_f = temp_f.parent / temp_f.name.replace('_input', '_label')
+                            label = label_f.read_text().strip() if label_f.exists() else temp_f.name
+                            all_temps[f'{dev_name}/{label}'] = v
+                    except Exception:
+                        pass
+            if all_temps:
+                max_temp = max(all_temps.values())
+                return all_temps, max_temp
+        except Exception:
+            pass
+
+    # ── Source 3: Windows WMI MSAcpi (needs admin, builtin) ───────
+    if _OS == 'Windows':
+        try:
+            import wmi as _wmi
+            w = _wmi.WMI(namespace='root\\wmi')
+            zones = w.MSAcpi_ThermalZoneTemperature()
+            for i, z in enumerate(zones):
+                v = (z.CurrentTemperature / 10.0) - 273.15
+                if 1 < v < 150:
+                    all_temps[f'acpi/zone{i}'] = v
+            if all_temps:
+                max_temp = max(all_temps.values())
+                return all_temps, max_temp
+        except Exception:
+            pass
+
+        # ── Source 4: Windows WMI OpenHardwareMonitor (if running) ─
+        # OHM must be running as a service — it exposes data via WMI
+        try:
+            import wmi as _wmi
+            w = _wmi.WMI(namespace='root\\OpenHardwareMonitor')
+            sensors = w.Sensor()
+            for s in sensors:
+                if s.SensorType == 'Temperature' and s.Value is not None:
+                    v = float(s.Value)
+                    if 1 < v < 150:
+                        all_temps[f'ohm/{s.Name}'] = v
+            if all_temps:
+                max_temp = max(all_temps.values())
+                return all_temps, max_temp
+        except Exception:
+            pass
+
+        # ── Source 5: PowerShell CIM fallback (no extra modules) ───
+        try:
+            import subprocess
+            _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            ps_cmd = (
+                'Get-CimInstance -Namespace root/WMI '
+                '-ClassName MSAcpi_ThermalZoneTemperature '
+                '-ErrorAction SilentlyContinue | '
+                'Select-Object -ExpandProperty CurrentTemperature'
+            )
+            r = subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                capture_output=True, text=True, timeout=6,
+                creationflags=_NO_WIN,
+            )
+            for i, line in enumerate(r.stdout.strip().splitlines()):
+                try:
+                    v = (float(line.strip()) / 10.0) - 273.15
+                    if 1 < v < 150:
+                        all_temps[f'cim/zone{i}'] = v
+                except Exception:
+                    pass
+            if all_temps:
+                max_temp = max(all_temps.values())
+                return all_temps, max_temp
+        except Exception:
+            pass
+
+    result = (all_temps, max_temp)
+    _temp_cache = (max_temp, all_temps, time.time())
+    return result   # None → UI shows "–°C"
+
+
 def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     """Get full system snapshot. interval = CPU measurement window."""
     s = SystemSnapshot()
@@ -90,45 +229,45 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
             ))
         except: pass
 
-    # Temperature
-    try:
-        temps = psutil.sensors_temperatures()
-        all_temps = {}
-        max_temp  = 0.0
-        for name, entries in temps.items():
-            for e in entries:
-                if e.current and e.current > 0:
-                    all_temps[f'{name}/{e.label or "core"}'] = e.current
-                    if e.current > max_temp:
-                        max_temp = e.current
-        s.temp_all  = all_temps
-        s.temp_max  = max_temp if max_temp > 0 else None
-    except: pass
-
-    # Fallback temp from /sys (Linux)
-    if s.temp_max is None and platform.system() == 'Linux':
-        best = 0
-        for f in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
-            try:
-                v = int(f.read_text()) // 1000
-                if v > best: best = v
-            except: pass
-        if best > 0: s.temp_max = float(best)
+    # Temperature — multi-source fallback chain
+    s.temp_all, s.temp_max = _read_temperature()
 
     # Top processes
-    skip = {'python3','python','py.exe','ps','grep','pgrep'}
+    # Skip: our own app, shell tools, AND Windows/Linux pseudo-processes
+    _SKIP_NAMES = {
+        'python3', 'python', 'py.exe', 'ps', 'grep', 'pgrep',
+        # Windows pseudo-processes that report bogus CPU% (e.g. 370%)
+        'system idle process', 'system', 'registry', 'memory compression',
+        'secure system', 'smss.exe',
+        # Linux kernel threads (show 0% anyway but clutter the list)
+        'kthreadd', 'kworker', 'ksoftirqd', 'migration', 'rcu_sched',
+        'rcu_bh', 'watchdog', 'kswapd', 'kdevtmpfs',
+    }
+    import platform as _pf
+    _IS_WIN = _pf.system() == 'Windows'
+    _ncpus  = psutil.cpu_count() or 1
+
     procs = []
-    for p in psutil.process_iter(['pid','name','cpu_percent','memory_percent','status']):
+    for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
         try:
-            if p.info['name'].lower() in skip: continue
+            pname = p.info['name'] or ''
+            # Skip PID 0 (System Idle) and PID 4 (System) on Windows
+            if _IS_WIN and p.info['pid'] in (0, 4):
+                continue
+            if pname.lower() in _SKIP_NAMES:
+                continue
+            # Normalize: psutil returns per-core %, cap at 100%
+            raw_cpu = p.info['cpu_percent'] or 0
+            cpu_pct = min(raw_cpu / _ncpus, 100.0) if _IS_WIN else raw_cpu
             procs.append(ProcessInfo(
                 pid    = p.info['pid'],
-                name   = p.info['name'],
-                cpu    = p.info['cpu_percent'] or 0,
+                name   = pname,
+                cpu    = cpu_pct,
                 mem    = p.info['memory_percent'] or 0,
                 status = p.info['status'],
             ))
-        except: pass
+        except:
+            pass
 
     s.top_cpu_procs = sorted(procs, key=lambda x: x.cpu, reverse=True)[:8]
     s.top_mem_procs = sorted(procs, key=lambda x: x.mem, reverse=True)[:8]

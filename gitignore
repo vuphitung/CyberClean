@@ -1,0 +1,43 @@
+# ── Build outputs ─────────────────────────────────────────
+dist/
+build/
+*.spec.bak
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+
+# ── PyInstaller ───────────────────────────────────────────
+*.manifest
+*.spec.log
+
+# ── App runtime data ──────────────────────────────────────
+# User history/rollback lives in ~/.local/share/cyber-clean
+# Don't commit anyone's local data
+*.jsonl
+*.log
+
+# ── OS junk ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+
+# ── IDE ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.env
+.venv/
+venv/
+env/
+
+# ── Sensitive ─────────────────────────────────────────────
+*.pem
+*.key
+secrets.py
