@@ -145,8 +145,7 @@ HELPER_CONTENT
 chmod +x "$HELPER"
 ok "System helper → $HELPER"
 
-echo "$ALL ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
-sed -i "s/\$ALL/ALL/g" /etc/sudoers.d/cyberclean
+echo "ALL ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
 chmod 440 /etc/sudoers.d/cyberclean
 ok "Sudoers rule configured"
 

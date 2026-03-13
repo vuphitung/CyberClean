@@ -129,7 +129,9 @@ class SecurityScanner:
                         continue
 
                     # Process running from /tmp or /dev/shm (suspicious)
-                    if exe and any(exe.startswith(d) for d in ['/tmp','/dev/shm','/var/tmp']):
+                    # Whitelist: AppImage mounts into /tmp/.mount_xxx — totally normal
+                    is_appimage_mount = exe and re.search(r'/tmp/\.mount_', exe)
+                    if exe and any(exe.startswith(d) for d in ['/tmp','/dev/shm','/var/tmp']) and not is_appimage_mount:
                         r = ScanResult('high','suspicious', exe,
                             f'Process running from temp dir: {exe} (PID {p.pid})',
                             can_fix=True, fix_cmd=f'sudo -n /usr/local/bin/cyber-clean-helper kill-pid {p.pid}')
@@ -252,7 +254,12 @@ class SecurityScanner:
                                         found += 1
                                         break
                             # Executable in /tmp is suspicious even without bad content
+                            # Whitelist: PyInstaller extracts .py to /tmp/_MEIxxxx, AppImage mounts to /tmp/.mount_xxx
                             if OS == 'Linux' and str(f).startswith('/tmp'):
+                                is_pyinstaller = re.search(r'/tmp/_MEI[^/]+/', str(f))
+                                is_appimage    = re.search(r'/tmp/\.mount_', str(f))
+                                if is_pyinstaller or is_appimage:
+                                    continue
                                 self.results.append(ScanResult('medium','suspicious',str(f),
                                     f'Executable file in /tmp: {f.name}'))
                                 log_cb(f'  ~  Exec in /tmp: {f.name}', 'warn')
