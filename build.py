@@ -84,6 +84,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         f'--name {APP}',
         f'--add-data "core/*.py{sep}core"',
         f'--add-data "utils/*.py{sep}utils"',
+        f'--add-data "assets{sep}assets"',
         '--hidden-import psutil',
         '--hidden-import PyQt6',
         '--hidden-import PyQt6.QtWidgets',
@@ -172,7 +173,7 @@ def _generate_inno_script(exe: Path):
         Source: "dist\\{APP}.exe"; DestDir: "{{app}}"; Flags: ignoreversion
 
         [Icons]
-        Name: "{{group}}\\{APP}";        DestName: "{APP}"; Filename: "{{app}}\\{APP}.exe"
+        Name: "{{group}}\\{APP}"; Filename: "{{app}}\\{APP}.exe"
         Name: "{{group}}\\Uninstall {APP}"; Filename: "{{uninstallexe}}"
         Name: "{{userdesktop}}\\{APP}";   Filename: "{{app}}\\{APP}.exe"; Tasks: desktopicon
 

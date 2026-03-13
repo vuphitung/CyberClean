@@ -1146,10 +1146,10 @@ class CyberCleanApp(QMainWindow):
         vd.setStyleSheet(f'color:{C["dim"]};font-size:9px;'); vd.setWordWrap(True)
         vr = QHBoxLayout(); vr.setSpacing(6)
         for name, cb in [
-            ('Chrome',  lambda: self._vacuum_browser('chrome')),
-            ('Firefox', lambda: self._vacuum_browser('firefox')),
-            ('Edge',    lambda: self._vacuum_browser('edge')),
-            ('All',     lambda: self._vacuum_browser('all')),
+            ('Chrome',  lambda: self._vacuum_browser_async('chrome')),
+            ('Firefox', lambda: self._vacuum_browser_async('firefox')),
+            ('Edge',    lambda: self._vacuum_browser_async('edge')),
+            ('All',     lambda: self._vacuum_browser_async('all')),
         ]:
             b = _btn(name, 'green', small=True); b.clicked.connect(cb); vr.addWidget(b)
         vr.addStretch()
@@ -1779,6 +1779,20 @@ class CyberCleanApp(QMainWindow):
         self._boost_btn.setText('⚡  BOOST BROWSERS')
         self._boost_btn.setEnabled(True)
 
+    def _vacuum_browser_async(self, target):
+        """Run vacuum on background thread so UI never freezes/crashes."""
+        class _VacuumWorker(QThread):
+            log_line = pyqtSignal(str, str)
+            def __init__(self, fn, t):
+                super().__init__(); self._fn = fn; self._t = t
+            def run(self):
+                self._fn(self._t)
+
+        worker = _VacuumWorker(self._vacuum_browser, target)
+        worker.finished.connect(lambda: None)
+        self._vacuum_worker = worker  # keep reference
+        worker.start()
+
     def _vacuum_browser(self, target):
         import sqlite3, glob, os
         self._blog(f'⟳ Vacuuming {target} databases...', 'head')
@@ -1977,8 +1991,14 @@ class CyberCleanApp(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray = QSystemTrayIcon(self)
-        px = QPixmap(16, 16); px.fill(QColor(C['cyan']))
-        self.tray.setIcon(QIcon(px))
+        # Use real logo — works both in dev and PyInstaller
+        _base = getattr(sys, '_MEIPASS', Path(__file__).parent)
+        _icon_file = Path(_base) / 'assets' / 'logo.png'
+        if _icon_file.exists():
+            self.tray.setIcon(QIcon(str(_icon_file)))
+        else:
+            px = QPixmap(16, 16); px.fill(QColor(C['cyan']))
+            self.tray.setIcon(QIcon(px))
         self.tray.setToolTip('CyberClean v2.0')
 
         menu = QMenu()
@@ -2152,9 +2172,39 @@ class CyberCleanApp(QMainWindow):
 
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
+    # ── Single instance lock ──────────────────────────────
+    import socket as _sock
+    _lock = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    try:
+        _lock.bind(('127.0.0.1', 47291))  # unique port = lock
+    except OSError:
+        # Already running — bring existing window to front via tray
+        app = QApplication(sys.argv)
+        QMessageBox.information(None, 'CyberClean',
+            'CyberClean is already running.\nCheck the system tray.')
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setApplicationName('CyberClean')
     app.setApplicationVersion('2.0')
+
+    # ── Resource path helper (works both dev and PyInstaller .exe) ──
+    def _res(rel):
+        base = getattr(sys, '_MEIPASS', Path(__file__).parent)
+        return str(Path(base) / rel)
+
+    # Set app icon from bundled assets
+    _icon_path = _res('assets/logo.ico')
+    if Path(_icon_path).exists():
+        app.setWindowIcon(QIcon(_icon_path))
+
     win = CyberCleanApp()
+
+    # Fix tray icon to use real logo
+    if hasattr(win, 'tray'):
+        _tray_icon = _res('assets/logo.png')
+        if Path(_tray_icon).exists():
+            win.tray.setIcon(QIcon(_tray_icon))
+
     win.show()
     sys.exit(app.exec())
