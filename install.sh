@@ -130,7 +130,7 @@ case "$1" in
   remove-file)      [[ -z "$2" ]] && exit 1; rm -f "$2" 2>/dev/null ;;
   kill-pid)         [[ -z "$2" ]] && exit 1; kill -9 "$2" 2>/dev/null ;;
   stop-service)     [[ -z "$2" ]] && exit 1; systemctl stop "$2" 2>/dev/null ;;
-  pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "$2" 2>/dev/null ;;
+  pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "${@:2}" 2>/dev/null ;;
   apt-remove)       [[ -z "$2" ]] && exit 1; apt-get remove -y "$2" 2>/dev/null ;;
   dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;
   one-click-fix)

@@ -191,7 +191,11 @@ class LinuxCleaner(BaseCleaner):
         pkgs = [l.strip() for l in out.splitlines() if l.strip()]
         r.files_removed = len(pkgs)
         if pkgs and not dry:
-            _, code = run_privileged(f'pacman -Rns --noconfirm {" ".join(pkgs)}')
+            import subprocess as _sp
+            r2 = _sp.run(
+                ['sudo', '-n', '/usr/local/bin/cyber-clean-helper', 'pacman-remove'] + pkgs,
+                capture_output=True, text=True, timeout=120)
+            code = r2.returncode
             if code == 0:
                 r.rollback.append({
                     'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
