@@ -9,11 +9,11 @@ set -e
 VERSION="2.0.0"
 APP="CyberClean"
 REPO="vuphitung/CyberClean"
-APPIMAGE_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-x86_64.AppImage"
+TARGZ_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-linux-x86_64.tar.gz"
 ICON_URL="https://raw.githubusercontent.com/${REPO}/main/assets/logo.png"
 
 BIN="/usr/local/bin/cyberclean"
-APPIMAGE_DEST="/opt/CyberClean/CyberClean.AppImage"
+INSTALL_DIR="/opt/CyberClean"
 ICON_DEST="/usr/share/icons/hicolor/256x256/apps/cyberclean.png"
 DESKTOP_DEST="/usr/share/applications/cyberclean.desktop"
 HELPER="/usr/local/bin/cyber-clean-helper"
@@ -33,7 +33,7 @@ fi
 if [[ "$1" == "--uninstall" ]]; then
     head "Uninstalling CyberClean"
     rm -f "$BIN"           && ok "Removed $BIN"
-    rm -rf /opt/CyberClean && ok "Removed AppImage"
+    rm -rf /opt/CyberClean && ok "Removed /opt/CyberClean"
     rm -f "$ICON_DEST"     2>/dev/null || true
     rm -f "$DESKTOP_DEST"  && ok "Removed desktop entry"
     rm -f "$HELPER"        2>/dev/null || true
@@ -57,15 +57,18 @@ echo -e "${CYAN}  Smart Disk Cleaner v${VERSION} — Installing...${NC}\n"
 
 head "Downloading"
 mkdir -p /opt/CyberClean
+TARGZ_TMP="/tmp/CyberClean.tar.gz"
 if command -v curl &>/dev/null; then
-    curl -fsSL --progress-bar -o "$APPIMAGE_DEST" "$APPIMAGE_URL" || err "Download failed"
+    curl -fsSL --progress-bar -o "$TARGZ_TMP" "$TARGZ_URL" || err "Download failed — check internet connection"
 elif command -v wget &>/dev/null; then
-    wget -q --show-progress -O "$APPIMAGE_DEST" "$APPIMAGE_URL"  || err "Download failed"
+    wget -q --show-progress -O "$TARGZ_TMP" "$TARGZ_URL" || err "Download failed — check internet connection"
 else
     err "curl or wget required"
 fi
-chmod +x "$APPIMAGE_DEST"
-ok "AppImage → $APPIMAGE_DEST"
+tar -xzf "$TARGZ_TMP" -C "$INSTALL_DIR"
+rm -f "$TARGZ_TMP"
+chmod +x "$INSTALL_DIR/CyberClean/CyberClean"
+ok "Installed → $INSTALL_DIR"
 
 head "Creating command"
 cat > "$BIN" << LAUNCHER
@@ -73,7 +76,7 @@ cat > "$BIN" << LAUNCHER
 if [[ "\$1" == "--uninstall" ]]; then
     curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo bash -s -- --uninstall
 else
-    exec "$APPIMAGE_DEST" "\$@"
+    exec "$INSTALL_DIR/CyberClean/CyberClean" "\$@"
 fi
 LAUNCHER
 chmod +x "$BIN"
@@ -94,7 +97,7 @@ cat > "$DESKTOP_DEST" << DESKTOP
 Name=CyberClean
 GenericName=Disk Cleaner
 Comment=Smart Disk Cleaner v${VERSION}
-Exec=${APPIMAGE_DEST}
+Exec=${INSTALL_DIR}/CyberClean/CyberClean
 Icon=cyberclean
 Terminal=false
 Type=Application

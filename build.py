@@ -252,7 +252,7 @@ def build_linux_appimage():
         tool.chmod(0o755)
 
     out = DIST / f'{APP}-{VERSION}-x86_64.AppImage'
-    result = run(f'ARCH=x86_64 /tmp/appimagetool {appdir} {out}')
+    result = run(f'ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 /tmp/appimagetool {appdir} {out}')
     if result.returncode == 0 and out.exists():
         out.chmod(0o755)
         size_mb = out.stat().st_size / 1024 / 1024
@@ -365,6 +365,33 @@ def build_linux_deb():
     return False
 
 
+
+# ── Linux tar.gz (no FUSE, works everywhere) ─────────────
+def build_linux_targz():
+    head('Building Linux tar.gz (no FUSE required)')
+    if not _has_pyinstaller():
+        err('PyInstaller not found — python3 -m pip install pyinstaller --break-system-packages')
+        return False
+
+    cmd = _pyinstaller_cmd(onefile=False, icon=ICON_PNG)
+    result = run(cmd)
+    if result.returncode != 0:
+        err('PyInstaller step failed')
+        return False
+
+    DIST.mkdir(exist_ok=True)
+    out = DIST / f'{APP}-{VERSION}-linux-x86_64.tar.gz'
+    run(f'tar -czf {out} -C {DIST} {APP}')
+    if out.exists():
+        size_mb = out.stat().st_size / 1024 / 1024
+        ok(f'Built: {out}  ({size_mb:.1f} MB)')
+        print(f'\n  {C}Upload to GitHub Releases:{NC}')
+        print(f'  gh release create v{VERSION} {out} --title "v{VERSION}"\n')
+        return True
+    err('tar.gz build failed')
+    return False
+
+
 # ── Linux zip fallback ────────────────────────────────────
 def build_linux_zip():
     head('Building Linux source zip (fallback)')
@@ -405,14 +432,10 @@ def main():
     elif target == 'Linux':
         if make_deb:
             success = build_linux_deb()
-        elif shutil.which('appimagetool') or Path('/tmp/appimagetool').exists():
+        elif '--appimage' in args:
             success = build_linux_appimage()
         else:
-            warn('appimagetool not found — trying AppImage download first...')
-            success = build_linux_appimage()   # it auto-downloads
-            if not success:
-                warn('Falling back to source zip')
-                success = build_linux_zip()
+            success = build_linux_targz()
 
     else:
         warn(f'Platform "{target}" not recognized — use --windows or --linux')
