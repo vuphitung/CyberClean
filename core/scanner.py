@@ -29,7 +29,10 @@ class ScanResult:
 
 def run(cmd, timeout=10):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        # 0x08000000 = CREATE_NO_WINDOW — hides CMD flash on Windows
+        no_win = 0x08000000 if OS == 'Windows' else 0
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           timeout=timeout, creationflags=no_win)
         return r.stdout.strip()
     except: return ''
 
@@ -52,7 +55,8 @@ SUSPICIOUS_SCRIPTS = [
     (r'/proc/\d+/mem',                       'Direct process memory access'),
 ]
 
-DANGEROUS_EXTENSIONS = {'.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf', '.bin'}
+DANGEROUS_EXTENSIONS = {'.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf', '.bin',
+                         '.bat', '.ps1', '.vbs', '.cmd', '.dll', '.scr', '.pif'}
 SCAN_DIRS_LINUX   = ['/tmp', '/var/tmp', '/dev/shm', str(Path.home()/'.local/bin'),
                      str(Path.home()/'.config'), '/etc/cron.d', '/etc/cron.daily',
                      '/etc/cron.hourly', '/etc/cron.weekly']
@@ -253,32 +257,43 @@ class SecurityScanner:
             try:
                 for f in p.rglob('*'):
                     if not f.is_file(): continue
+                    # Skip black-hole dirs — virus never hides here, but HDD dies scanning them
+                    _fstr = str(f).lower()
+                    if any(skip in _fstr for skip in (
+                        "node_modules", "\\cache", "/cache",
+                        # NOTE: appdata\local\temp intentionally NOT skipped —
+                        # 90% of Windows malware hides here (.bat/.vbs/.ps1)
+                        ".git", "__pycache__",
+                        "\\tmp\\", "/tmp/", ".venv", "site-packages",
+                    )): continue
                     if f.stat().st_size > 50_000_000: continue  # skip large files
                     try:
                         # Check extension
                         if f.suffix.lower() in DANGEROUS_EXTENSIONS:
-                            # Check executable bit
-                            if OS == 'Linux' and (f.stat().st_mode & stat.S_IXUSR):
-                                # Scan content
+                            # Scan content on ALL platforms — .bat/.ps1/.vbs are Windows-only threats
+                            try:
                                 txt = f.read_text(errors='ignore')[:4096]
                                 for pattern, desc in SUSPICIOUS_SCRIPTS:
                                     if re.search(pattern, txt, re.I):
+                                        fix_cmd = (
+                                            f'sudo -n {HELPER} remove-file "{f}"'
+                                            if OS == 'Linux' else f'del /f /q "{f}"'
+                                        )
                                         self.results.append(ScanResult('critical','malware',str(f),
-                                            f'{desc}', can_fix=True, fix_cmd=f'sudo -n {HELPER} remove-file "{f}"'))
+                                            f'{desc}', can_fix=True, fix_cmd=fix_cmd))
                                         log_cb(f'  ⛔  Malicious script: {f.name} — {desc}', 'err')
                                         found += 1
                                         break
-                            # Executable in /tmp is suspicious even without bad content
-                            # Whitelist: PyInstaller extracts .py to /tmp/_MEIxxxx, AppImage mounts to /tmp/.mount_xxx
-                            if OS == 'Linux' and str(f).startswith('/tmp'):
+                            except: pass
+                            # Linux-only: flag executable files in /tmp
+                            if OS == 'Linux' and str(f).startswith('/tmp') and (f.stat().st_mode & stat.S_IXUSR):
                                 is_pyinstaller = re.search(r'/tmp/_MEI[^/]+/', str(f))
                                 is_appimage    = re.search(r'/tmp/\.mount_', str(f))
-                                if is_pyinstaller or is_appimage:
-                                    continue
-                                self.results.append(ScanResult('medium','suspicious',str(f),
-                                    f'Executable file in /tmp: {f.name}'))
-                                log_cb(f'  ~  Exec in /tmp: {f.name}', 'warn')
-                                found += 1
+                                if not (is_pyinstaller or is_appimage):
+                                    self.results.append(ScanResult('medium','suspicious',str(f),
+                                        f'Executable file in /tmp: {f.name}'))
+                                    log_cb(f'  ~  Exec in /tmp: {f.name}', 'warn')
+                                    found += 1
                     except: pass
             except: pass
         if found == 0:
@@ -366,7 +381,9 @@ class SecurityScanner:
         if OS == 'Linux':
             hosts_path = Path('/etc/hosts')
         else:
-            hosts_path = Path('C:/Windows/System32/drivers/etc/hosts')
+            # Use WINDIR env var — handles installs on D:\ or E:\ drives
+            windir = os.environ.get('WINDIR', 'C:/Windows')
+            hosts_path = Path(f'{windir}/System32/drivers/etc/hosts')
         if not hosts_path.exists():
             log_cb('  ~ hosts file not found', 'dim'); return
         suspicious_domains = ['google.com','facebook.com','github.com','microsoft.com',

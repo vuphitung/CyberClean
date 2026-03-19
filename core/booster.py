@@ -21,6 +21,47 @@ except ImportError:
 HELPER = "/usr/local/bin/cyber-clean-helper"
 CURRENT_UID = os.getuid() if IS_LINUX else -1
 
+# ══════════════════════════════════════════════════════════════
+# LAYER 1: CROSS-PLATFORM OS FIREWALL
+# Never touch these — causes black screen, mouse freeze, audio dropout
+# ══════════════════════════════════════════════════════════════
+SAFE_SYSTEM_PROCS = {
+    # Windows core & UI — kill = black screen / no taskbar
+    "explorer", "dwm", "taskmgr", "csrss", "lsass", "winlogon", "smss",
+    "sihost", "taskhostw", "runtimebroker", "svchost", "services",
+    "audiodg", "spoolsv", "fontdrvhost", "ctfmon", "registry",
+    "startmenuexperiencehost", "shellexperiencehost",
+    "textinputhost", "applicationframehost",
+    # Linux core & display — kill = X/Wayland crash
+    "systemd", "init", "kwin_x11", "kwin_wayland", "hyprland",
+    "sway", "i3", "openbox", "xfwm4", "plasmashell", "gnome-shell",
+    "xorg", "xwayland", "dbus-daemon", "dbus-broker",
+    # Linux audio — kill = no sound
+    "pipewire", "wireplumber", "pulseaudio", "jackd",
+    # Display managers
+    "sddm", "gdm", "lightdm",
+    # CyberClean itself
+    "python", "python3", "cyberclean",
+}
+
+# GPU-related keywords — never throttle, kills FPS/display
+GPU_KEYWORDS = {"gpu", "nvidia", "amd", "radeon", "intel_gpu",
+                "nvd", "amdgpu", "vgaswitcheroo", "renderer"}
+
+
+def _is_protected(proc_name: str) -> bool:
+    """Check if a process is protected by the OS Firewall.
+    Returns True for system/GPU processes that must never be throttled or jailed.
+    """
+    name = proc_name.lower().replace(".exe", "")
+    if name in SAFE_SYSTEM_PROCS:
+        return True
+    for kw in GPU_KEYWORDS:
+        if kw in name:
+            return True
+    return False
+
+
 
 @dataclass
 class BoostResult:
@@ -91,13 +132,14 @@ def free_ram(log):
                 'conhost.exe', 'taskhostw.exe', 'sihost.exe',
             }
             count = 0
-            for p in psutil.process_iter(["pid", "name", "status"]):
+            # psutil on Windows reports ALL processes as STATUS_RUNNING —
+            # checking status here would skip the entire system and free zero RAM!
+            # SKIP_RAM + skip_pid already protect what matters.
+            for p in psutil.process_iter(["pid", "name"]):
                 try:
                     if p.pid == skip_pid: continue
                     if p.info["name"].lower() in SKIP_RAM: continue
-                    if p.info["status"] == psutil.STATUS_RUNNING: continue
                     # 0x0500 = QUERY_INFORMATION|SET_QUOTA — minimum needed for EmptyWorkingSet
-                    # 0x1F0FFF (ALL_ACCESS) triggers Defender & gets denied on most processes
                     h = ctypes.windll.kernel32.OpenProcess(0x0500, False, p.pid)
                     if h:
                         ctypes.windll.psapi.EmptyWorkingSet(h)
@@ -236,6 +278,7 @@ def kill_bloat(log):
 
     log("Scanning for background bloat...", "head")
     SAFE_SKIP = {
+        # OS core — never kill
         "python", "python3", "cyberclean", "systemd", "init",
         "kwin_wayland", "kwin_x11", "hyprland", "sway", "i3",
         "openbox", "xfwm4", "plasmashell", "gnome-shell",
@@ -243,6 +286,17 @@ def kill_bloat(log):
         "sddm", "gdm", "lightdm", "dbus-daemon", "dbus-broker",
         "explorer", "dwm", "csrss", "smss", "wininit",
         "services", "lsass", "winlogon", "fontdrvhost", "svchost",
+        # User productivity apps — minimized = cpu 0%, but NOT bloat!
+        # Killing these = data loss (unsaved Excel) or dropped calls (Discord)
+        "chrome", "msedge", "firefox", "brave", "opera", "vivaldi",
+        "discord", "zalo", "telegram", "slack", "teams", "zoom", "skype",
+        "excel", "winword", "powerpnt", "onenote", "outlook",
+        "code", "idea", "pycharm", "eclipse", "datagrip", "rider",
+        "spotify", "vlc", "obs", "obs32", "obs64",
+        # Game launchers — steamwebhelper uses 600-800MB RAM idle; killing = game crashes
+        "steam", "steamwebhelper", "epicgameslauncher", "riotclientux",
+        "battle.net", "upc", "origin", "vgc", "leagueclient", "riotclientservices",
+        "gog galaxy", "bethesdanetlauncher", "ea app", "playnite",
     }
 
     killed = 0
@@ -407,52 +461,6 @@ def _restore_kernel_performance(method, log):
         log("  + Windows Power Plan: original restored", "ok")
 
 
-def _apply_cpu_affinity(log):
-    """
-    CPU Affinity jail (Process Lasso style):
-    Locks background apps to last 1-2 cores, freeing faster cores for game.
-    """
-    if not HAS_PSUTIL: return {}
-    cores = psutil.cpu_count(logical=True) or 1
-    if cores < 4:
-        log("  ~ CPU affinity skipped (< 4 cores)", "warn")
-        return {}
-
-    # Jail logic: sacrifice 1 core on weak machines, 2 on strong ones
-    if cores <= 4:
-        jail_cores = [cores - 1]        # 4-core: only last 1 core — keep 75% for game
-    else:
-        jail_cores = list(range(cores - 2, cores))  # 8+ cores: last 2 cores
-    bg_apps = BACKGROUND_APPS_WIN if IS_WINDOWS else BACKGROUND_APPS_LX
-    saved_affinity = {}
-
-    for p in psutil.process_iter():
-        try:
-            with p.oneshot():
-                nm = p.name().lower().replace(".exe", "")
-                if not any(app in nm for app in bg_apps): continue
-                orig = p.cpu_affinity()
-                p.cpu_affinity(jail_cores)
-                saved_affinity[p.pid] = orig
-                log(f"  v Jailed: {p.name()} → cores {jail_cores}", "warn")
-        except (psutil.NoSuchProcess, psutil.AccessDenied, NotImplementedError):
-            pass
-
-    log(f"  + CPU affinity: {len(saved_affinity)} apps jailed to cores {jail_cores}", "ok")
-    return saved_affinity
-
-
-def _restore_cpu_affinity(saved_affinity, log):
-    if not HAS_PSUTIL: return
-    restored = 0
-    for pid, orig in saved_affinity.items():
-        try:
-            psutil.Process(pid).cpu_affinity(orig)
-            restored += 1
-        except: pass
-    log(f"  + CPU affinity restored for {restored} processes", "ok")
-
-
 def _freeze_windows_services(log):
     """Stop non-critical Windows services during gaming (Razer Cortex style)."""
     stopped = []
@@ -483,27 +491,90 @@ def _restore_windows_services(stopped_services, log):
 
 def game_mode_on(log):
     """
-    Ultimate Game Mode — 3-layer optimization:
-    1. Kernel governor → performance power plan
-    2. CPU affinity jail → background apps locked to last cores
-    3. Windows service freeze → stops Update/Superfetch/Search
+    Ultimate Game Mode — 3-tier CPU Matrix + kernel boost + service freeze.
+
+    CPU Matrix tiers (scale by core count):
+      Tier 1 — STREAM_APPS (Discord/OBS): 50% last cores — need decent perf for audio/video
+      Tier 2 — MEDIA_APPS (Chrome/Firefox/Spotify): 1 last core — medium priority
+      Tier 3 — TRASH_APPS (OneDrive/Dropbox): 1 last core + lowest priority
+    Game gets ALL prime cores by default — no need to list games.
     """
+    if not HAS_PSUTIL: return {}
     log("⚡ CYBER BOOST — ULTIMATE GAME MODE", "head")
-    saved = {"affinity": {}, "services": [], "power": None}
+    saved = {"affinity": {}, "nice": {}, "services": [], "power": None}
 
     # Layer 1: Kernel performance
     saved["power"] = _enable_kernel_performance(log)
 
-    # Layer 2: CPU affinity jail
-    if HAS_PSUTIL:
-        saved["affinity"] = _apply_cpu_affinity(log)
+    # Layer 2: CPU Matrix — 3 separate tiers, not 1 jail
+    cores = psutil.cpu_count(logical=True) or 1
+    jailed = 0
 
-    # Layer 3: Freeze Windows services (Windows only, needs admin)
+    if cores > 2:
+        # Scale jail zones by core count
+        if cores <= 4:
+            # 4-core: stream gets last 1 core, trash gets last 1 core
+            stream_cores = [cores - 1]
+            trash_cores  = [cores - 1]
+        else:
+            # 6+ cores: stream gets last 2 cores, trash gets last 1 core
+            stream_cores = list(range(max(1, cores // 2), cores))
+            trash_cores  = [cores - 1]
+
+        # Tier 1: Comms/stream — need decent cores for audio/video encoding
+        STREAM_APPS = {"discord", "obs32", "obs64", "obs", "telegram",
+                       "skype", "teams", "mumble", "teamspeak"}
+        # Tier 2: Browsers/media — 1 core + below normal priority
+        MEDIA_APPS  = {"chrome", "msedge", "firefox", "brave", "opera",
+                       "spotify", "zalo", "vivaldi"}
+        # Tier 3: Pure background trash — 1 core + idle/max-nice priority
+        TRASH_APPS  = {"onedrive", "dropbox", "googledrive",
+                       "winword", "excel", "powerpnt",
+                       "microsoftedgeupdate", "googleupdate"}
+
+        for p in psutil.process_iter(["pid", "name"]):
+            try:
+                nm = (p.info["name"] or "").lower().replace(".exe", "")
+                if _is_protected(nm): continue
+
+                with p.oneshot():
+                    if nm in STREAM_APPS:
+                        saved["affinity"][p.pid] = p.cpu_affinity()
+                        p.cpu_affinity(stream_cores)
+                        jailed += 1
+                        log(f"  v Comms: {nm} → cores {stream_cores}", "warn")
+
+                    elif nm in MEDIA_APPS:
+                        saved["affinity"][p.pid] = p.cpu_affinity()
+                        p.cpu_affinity(trash_cores)
+                        saved["nice"][p.pid] = p.nice()
+                        if IS_WINDOWS: p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                        elif IS_LINUX: p.nice(10)
+                        jailed += 1
+                        log(f"  v Media: {nm} → core {trash_cores}", "warn")
+
+                    elif nm in TRASH_APPS:
+                        saved["affinity"][p.pid] = p.cpu_affinity()
+                        p.cpu_affinity(trash_cores)
+                        saved["nice"][p.pid] = p.nice()
+                        if IS_WINDOWS: p.nice(psutil.IDLE_PRIORITY_CLASS)
+                        elif IS_LINUX: p.nice(19)
+                        jailed += 1
+                        log(f"  v Trash: {nm} → core {trash_cores} + lowest prio", "warn")
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied,
+                    NotImplementedError, AttributeError): pass
+
+        log(f"  + CPU Matrix: {jailed} apps isolated across 3 tiers", "ok")
+    else:
+        log("  ~ CPU ≤2 cores — CPU jail skipped (too few cores)", "warn")
+
+    # Layer 3: Freeze Windows services
     if IS_WINDOWS:
         saved["services"] = _freeze_windows_services(log)
 
-    count = len(saved["affinity"]) + len(saved["services"])
-    log(f"✓ GAME MODE ON — {count} optimizations applied", "ok")
+    total = jailed + len(saved.get("services", []))
+    log(f"✓ GAME MODE ON — {total} optimizations applied", "ok")
     return saved
 
 
@@ -511,76 +582,93 @@ def game_mode_off(saved, log):
     """Restore everything to normal state."""
     log("↺ Restoring system to normal...", "head")
 
-    # Restore Windows services
+    # Restore Windows services first
     if IS_WINDOWS and saved.get("services"):
         _restore_windows_services(saved["services"], log)
 
+    # Restore nice/priority
+    for pid, orig in saved.get("nice", {}).items():
+        try: psutil.Process(pid).nice(orig)
+        except: pass
+
     # Restore CPU affinity
-    if saved.get("affinity"):
-        _restore_cpu_affinity(saved["affinity"], log)
+    restored = 0
+    for pid, orig in saved.get("affinity", {}).items():
+        try: psutil.Process(pid).cpu_affinity(orig); restored += 1
+        except: pass
+    if restored:
+        log(f"  + CPU affinity restored for {restored} processes", "ok")
 
     # Restore power plan/governor
     if saved.get("power") is not None:
         _restore_kernel_performance(saved["power"], log)
 
+
     log("✓ GAME MODE OFF — system restored", "ok")
 
 
 def eco_mode_on(log):
+    """
+    Soft throttle background apps — yield mode, not brutal IDLE.
+    Windows: BELOW_NORMAL (not IDLE) — no stutter. Windows Quantum Boosting
+             handles foreground automatically — no need to manually boost it.
+    Linux:   nice(5) gentle yield — not brutal nice(19).
+    Never throttle: system procs, GPU, browsers, chat apps (user switches often).
+    """
     if not HAS_PSUTIL: return {}
     SKIP = {
-        # Linux
+        # Linux core
         "python", "python3", "cyberclean", "systemd", "kwin",
         "hyprland", "plasmashell", "gnome-shell", "Xorg", "pipewire",
         "wireplumber", "dbus-daemon", "dbus-broker",
-        # Windows UI/mouse/audio — never throttle
+        # Windows UI/mouse/audio
         "dwm", "explorer", "csrss", "lsass", "winlogon",
         "audiodg", "system", "registry", "smss",
         "sihost", "taskhostw", "ctfmon", "fontdrvhost",
         "startmenuexperiencehost", "shellexperiencehost",
         "textinputhost", "applicationframehost", "runtimebroker",
-        # Service hosts — svchost runs HID/mouse/keyboard/audio services
         "svchost", "services", "spoolsv",
-        # Gaming peripherals — Logitech/Razer/Corsair
+        # Gaming peripherals
         "lghub", "rzsynapse", "icue", "logioptionsplus",
-        # Browsers & chat — user may switch to them anytime; throttling causes visible lag
+        # Browsers & chat — user switches to these constantly
         "chrome", "msedge", "firefox", "brave", "opera", "vivaldi",
-        "discord", "telegram", "zalo", "slack", "teams", "zoom",
+        "discord", "telegram", "zalo", "slack", "teams", "zoom", "skype",
+        # IDEs — may run heavy background tasks (compile, index, terminal)
+        "code", "idea", "pycharm", "eclipse", "datagrip", "rider",
+        "webstorm", "clion", "goland", "rubymine",
+        # Office — may have unsaved work
+        "excel", "winword", "powerpnt", "onenote", "outlook",
     }
-
-    # Protect foreground app on Windows — don't throttle what user is actively using
-    skip_pid = -1
-    if IS_WINDOWS:
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            fg_pid = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(fg_pid))
-            skip_pid = fg_pid.value
-        except: pass
-
+    # NOTE: No fg_pid / ABOVE_NORMAL logic here.
+    # Windows Quantum Boosting already handles foreground priority automatically.
+    # Manually setting ABOVE_NORMAL on CyberClean would persist after alt-tab,
+    # causing Excel/Word to lag while CyberClean sits idle in tray.
     saved = {}
-    for p in psutil.process_iter():
+    throttled = 0
+    for p in psutil.process_iter(["pid", "name"]):
         try:
+            nm = (p.info["name"] or "").lower().replace(".exe", "")
+            if nm in SKIP: continue
+            if _is_protected(nm): continue  # GPU drivers, display, audio — never throttle
             with p.oneshot():
-                if p.pid == skip_pid: continue  # Never throttle foreground app
-                nm = p.name().lower().replace(".exe", "")
-                if nm in SKIP: continue
                 if IS_LINUX:
                     try:
                         if p.uids().real != CURRENT_UID: continue
                     except: continue
                 cur = p.nice()
                 if IS_WINDOWS:
-                    if cur not in (psutil.IDLE_PRIORITY_CLASS, psutil.BELOW_NORMAL_PRIORITY_CLASS):
+                    # BELOW_NORMAL = yield without freezing; IDLE causes mouse stutter
+                    if cur not in (psutil.BELOW_NORMAL_PRIORITY_CLASS, psutil.IDLE_PRIORITY_CLASS):
                         saved[p.pid] = cur
-                        p.nice(psutil.IDLE_PRIORITY_CLASS)
-                else:
-                    if cur <= 10:
+                        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                        throttled += 1
+                elif IS_LINUX:
+                    if cur < 5:
                         saved[p.pid] = cur
-                        p.nice(19)
-        except: pass
-    log(f"ECO MODE ON -- {len(saved)} processes set to IDLE priority", "ok")
+                        p.nice(5)  # gentle, not brutal 19
+                        throttled += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied): pass
+    log(f"ECO MODE ON -- {throttled} background tasks soft-throttled (yield mode)", "ok")
     return saved
 
 

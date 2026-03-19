@@ -1392,6 +1392,11 @@ class CyberCleanApp(QMainWindow):
                         r = _sp.run(cmd, shell=True, capture_output=True,
                                     text=True, timeout=30, creationflags=0x08000000)
                         results.append((label, r.returncode == 0))
+                # Free RAM on both platforms — instant visible effect for user
+                try:
+                    free_ram(lambda m, l: None)  # silent log
+                    results.append(('Smart RAM Free', True))
+                except: pass
                 ok_count = sum(1 for _, ok in results if ok)
                 summary = f'✓ {ok_count}/{len(results)}  ' + \
                           '  ·  '.join(f'{"✓" if ok else "~"}{n}' for n, ok in results)
@@ -1682,6 +1687,7 @@ class CyberCleanApp(QMainWindow):
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if msg.exec() != QMessageBox.StandardButton.Yes: return
         self.uninstall_log.clear()
+        ui_opened = False
         for app in apps:
             _col_map = {'ok': C['green'], 'err': C['red']}
             def _log_u(m, l, _cm=_col_map):
@@ -1689,9 +1695,10 @@ class CyberCleanApp(QMainWindow):
                 self.uninstall_log.append(f'<span style="color:{col};">{m}</span>')
             result = uninstall_app(app, _log_u)
             if result == 'UI_OPENED':
-                # User needs to complete uninstall manually — do not auto-refresh
-                return
-        QTimer.singleShot(1500, self._load_uninstall)
+                ui_opened = True  # Mark but continue loop — uninstall remaining apps
+        # Only auto-refresh if no manual UI is waiting for user interaction
+        if not ui_opened:
+            QTimer.singleShot(1500, self._load_uninstall)
 
     # ─────────────────────────────────────────────────────────
     # LOG / ROLLBACK
@@ -1935,7 +1942,15 @@ class CyberCleanApp(QMainWindow):
             msg.exec()
 
     def _shutdown(self):
-        """Clean shutdown — stop all background threads and timers."""
+        """Clean shutdown — restore modes first, then stop all threads."""
+        # Restore Game Mode first — releases CPU affinity + unfreezes services
+        # Critical: wuauserv stays frozen forever if we skip this on force-quit
+        if hasattr(self, '_game_btn') and self._game_btn.isChecked():
+            try: self._toggle_game_mode()
+            except: pass
+        if hasattr(self, '_eco_btn') and self._eco_btn.isChecked():
+            try: self._toggle_eco_mode()
+            except: pass
         if hasattr(self, '_si_worker'):
             self._si_worker.stop()
             self._si_worker.quit()

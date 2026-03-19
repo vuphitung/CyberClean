@@ -310,12 +310,10 @@ class LinuxCleaner(BaseCleaner):
                             r.freed_bytes += int(v * mult)
                         except: pass
         if not dry:
-            # SAFE: only prune dangling images (unreferenced layers)
-            # NEVER use system prune — it kills stopped containers (e.g. paused DB)!
-            # NEVER use volume prune — stopped DB volumes would lose all data!
+            # SAFE: only prune dangling images (unreferenced, orphan layers)
+            # NEVER prune containers — dev may have stopped DB containers overnight!
+            # NEVER prune volumes — stopped MySQL/Postgres data lives here!
             run(f'{tool} image prune -f 2>/dev/null')
-            # Only remove containers that have been stopped for >24h
-            run(f'{tool} container prune --filter "until=24h" -f 2>/dev/null')
         return r
 
     # ── Journal ───────────────────────────────────────────
