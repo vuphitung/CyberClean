@@ -1,0 +1,25 @@
+<svg width="128" height="128" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="uninst-bg" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#150a0a"/><stop offset="100%" stop-color="#0a0505"/></radialGradient>
+    <radialGradient id="uninst-glow" cx="50%" cy="50%" r="55%"><stop offset="0%" stop-color="#f03050" stop-opacity=".22"/><stop offset="100%" stop-color="#f03050" stop-opacity="0"/></radialGradient>
+  </defs>
+  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#uninst-bg)" stroke="#f0305028" stroke-width="1"/>
+  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#uninst-glow)"/>
+  <!-- App grid 2x2 -->
+  <rect x="18" y="22" width="14" height="14" rx="3" fill="#1a0808" stroke="#f0305070" stroke-width="1"/>
+  <rect x="36" y="22" width="14" height="14" rx="3" fill="#1a0808" stroke="#f0305070" stroke-width="1"/>
+  <rect x="18" y="40" width="14" height="14" rx="3" fill="#1a0808" stroke="#f0305070" stroke-width="1"/>
+  <!-- 4th app (faded, being removed) -->
+  <rect x="36" y="40" width="14" height="14" rx="3" fill="#1a0808" stroke="#f0305025" stroke-width="1" stroke-dasharray="3 2"/>
+  <!-- App dots -->
+  <circle cx="25" cy="29" r="3.5" fill="#f03050" opacity=".6"/>
+  <circle cx="43" cy="29" r="3.5" fill="#00c8e0" opacity=".6"/>
+  <circle cx="25" cy="47" r="3.5" fill="#f0c040" opacity=".6"/>
+  <!-- X on 4th -->
+  <line x1="39" y1="43" x2="47" y2="51" stroke="#f03050" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="47" y1="43" x2="39" y2="51" stroke="#f03050" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- Erase sparks -->
+  <circle cx="54" cy="38" r="1.5" fill="#f03050" opacity=".7"/>
+  <circle cx="57" cy="44" r="1"   fill="#f03050" opacity=".5"/>
+  <circle cx="52" cy="42" r="1.2" fill="#f03050" opacity=".4"/>
+</svg>

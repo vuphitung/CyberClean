@@ -3,6 +3,9 @@ CyberClean v2.0 — System Booster
 Cross-platform performance optimizer.
 Fixed: safe kill logic, throttle instead of suspend,
        smart RAM free, Flatpak cache, helper fallback.
+v2.1 fixes: cpu_percent warm-up (no false-positive kills),
+            memory_tune saves originals + restore on exit,
+            game/eco mode thread safety.
 """
 import os, sys, shutil, subprocess, glob, platform
 from pathlib import Path
@@ -161,22 +164,30 @@ def free_ram(log):
 
 
 def memory_tune(log):
+    """
+    Tune kernel memory params.
+    Returns a dict of {param: original_value} so caller can restore on exit.
+    On Windows: no kernel params to tune — returns empty dict.
+    """
     result = BoostResult("memory_tune")
     log("Tuning memory settings...", "head")
+    # FIX: Save original values before writing — callers MUST call memory_tune_restore() on exit
+    _originals: dict = {}
 
     if IS_LINUX:
-        for param, val, label in [
-            ("swappiness", "10", "swappiness = 10"),
-            ("dirty_ratio", "10", "dirty_ratio = 10"),
-            ("dirty_background_ratio", "5", "dirty_background_ratio = 5"),
+        for param, val, label, helper_key in [
+            ("swappiness",             "10", "swappiness = 10",             "swappiness"),
+            ("dirty_ratio",            "10", "dirty_ratio = 10",            "dirty-ratio"),
+            ("dirty_background_ratio", "5",  "dirty_background_ratio = 5",  "dirty-background-ratio"),
         ]:
             try:
                 p = Path(f"/proc/sys/vm/{param}")
-                cur = p.read_text().strip()
+                orig = p.read_text().strip()
                 p.write_text(val)
-                log(f"  + {label}  [{cur} -> {val}]", "ok")
+                _originals[param] = orig
+                log(f"  + {label}  [{orig} → {val}]", "ok")
             except:
-                _, code = _run_helper(param.replace("_", "-"), timeout=10)
+                _, code = _run_helper(helper_key, timeout=10)
                 if code == 0:
                     log(f"  + {label} (via helper)", "ok")
                 else:
@@ -186,15 +197,28 @@ def memory_tune(log):
             log("  + Memory compacted", "ok")
 
     elif IS_WINDOWS:
-        # EmptyWorkingSet is done by free_ram — no need to repeat it here
-        # (duplicating it causes mouse stutter without extra benefit)
         import gc; gc.collect()
         log("  + Python GC collected", "ok")
 
     if HAS_PSUTIL:
         mem = psutil.virtual_memory()
         log(f"+ Memory tune done -- {mem.percent:.1f}% used, {mem.available//1024//1024} MB free", "ok")
+
+    result.rollback = [{"originals": _originals}]   # stash for restore
     return result
+
+
+def memory_tune_restore(originals: dict, log):
+    """Restore kernel vm params to their pre-tune values. Call on app exit."""
+    if not IS_LINUX or not originals:
+        return
+    for param, orig_val in originals.items():
+        try:
+            p = Path(f"/proc/sys/vm/{param}")
+            p.write_text(orig_val)
+            log(f"  + Restored vm.{param} = {orig_val}", "ok")
+        except:
+            pass
 
 
 def clear_disk_cache(log):
@@ -299,6 +323,19 @@ def kill_bloat(log):
         "gog galaxy", "bethesdanetlauncher", "ea app", "playnite",
     }
 
+    # FIX #2: psutil.cpu_percent(interval=0) ALWAYS returns 0.0 on the FIRST call per process
+    # (psutil limitation — it needs two samples to calculate a delta).
+    # Warm-up pass: call cpu_percent(interval=0) on all processes once and discard,
+    # then sleep briefly so the second call returns real values.
+    log("  . Sampling CPU usage (warm-up)...", "text")
+    _warmup_pids = set()
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            p.cpu_percent(interval=0)
+            _warmup_pids.add(p.pid)
+        except: pass
+    import time as _time; _time.sleep(0.6)   # 600ms window — enough for accurate delta
+
     killed = 0
     for p in psutil.process_iter():
         try:
@@ -306,6 +343,8 @@ def kill_bloat(log):
                 nm = p.name().lower().replace(".exe", "")
                 if nm in SAFE_SKIP: continue
                 if p.pid <= 10: continue
+                # Only scan processes we warmed up — fresh ones have no valid CPU sample yet
+                if p.pid not in _warmup_pids: continue
 
                 if IS_LINUX:
                     try:
@@ -315,18 +354,18 @@ def kill_bloat(log):
                     if oom < 200: continue
                     if _has_active_children(p.pid): continue
                     status  = p.status()
-                    cpu_pct = p.cpu_percent(interval=0)
+                    cpu_pct = p.cpu_percent(interval=0)   # real value on 2nd call
                     mem_pct = p.memory_percent()
                     is_zombie = (status == psutil.STATUS_ZOMBIE)
                     is_bloat  = (oom >= 300 and
                                  status in (psutil.STATUS_SLEEPING, psutil.STATUS_IDLE) and
-                                 cpu_pct < 0.1 and mem_pct > 3.0)
+                                 cpu_pct < 0.5 and mem_pct > 3.0)
                 elif IS_WINDOWS:
-                    cpu_pct = p.cpu_percent(interval=0)
+                    cpu_pct = p.cpu_percent(interval=0)   # real value on 2nd call
                     mem_pct = p.memory_percent()
                     is_zombie = False
-                    # Windows doesn't reliably report SLEEPING — trust CPU+RAM only
-                    is_bloat  = (cpu_pct < 0.1 and mem_pct > 4.0 and
+                    # Windows: use cpu < 0.5% (not 0.1%) to avoid fp from measurement jitter
+                    is_bloat  = (cpu_pct < 0.5 and mem_pct > 4.0 and
                                  not _has_active_children(p.pid))
                 else:
                     continue
@@ -548,8 +587,13 @@ def game_mode_on(log):
                         saved["affinity"][p.pid] = p.cpu_affinity()
                         p.cpu_affinity(trash_cores)
                         saved["nice"][p.pid] = p.nice()
-                        if IS_WINDOWS: p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-                        elif IS_LINUX: p.nice(10)
+                        if IS_WINDOWS:
+                            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                        elif IS_LINUX and os.geteuid() == 0:
+                            # FIX: Linux kernel blocks nice() restore for non-root users
+                            # (can lower priority but CANNOT raise it back — one-way street)
+                            # Only set nice if root so we can guarantee restore on exit
+                            p.nice(10)
                         jailed += 1
                         log(f"  v Media: {nm} → core {trash_cores}", "warn")
 
@@ -557,8 +601,11 @@ def game_mode_on(log):
                         saved["affinity"][p.pid] = p.cpu_affinity()
                         p.cpu_affinity(trash_cores)
                         saved["nice"][p.pid] = p.nice()
-                        if IS_WINDOWS: p.nice(psutil.IDLE_PRIORITY_CLASS)
-                        elif IS_LINUX: p.nice(19)
+                        if IS_WINDOWS:
+                            p.nice(psutil.IDLE_PRIORITY_CLASS)
+                        elif IS_LINUX and os.geteuid() == 0:
+                            # FIX: same root-only guard — see MEDIA_APPS comment above
+                            p.nice(19)
                         jailed += 1
                         log(f"  v Trash: {nm} → core {trash_cores} + lowest prio", "warn")
 
@@ -663,9 +710,13 @@ def eco_mode_on(log):
                         p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
                         throttled += 1
                 elif IS_LINUX:
-                    if cur < 5:
+                    # FIX: Linux kernel security rule — non-root can LOWER nice (slow down)
+                    # but CANNOT RAISE it back (restore to original). This is a one-way street.
+                    # If we set nice(5) without root, eco_mode_off silently fails → apps stay
+                    # throttled forever until reboot. Only throttle if we can guarantee restore.
+                    if os.geteuid() == 0 and cur < 5:
                         saved[p.pid] = cur
-                        p.nice(5)  # gentle, not brutal 19
+                        p.nice(5)  # gentle yield, not brutal 19
                         throttled += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied): pass
     log(f"ECO MODE ON -- {throttled} background tasks soft-throttled (yield mode)", "ok")

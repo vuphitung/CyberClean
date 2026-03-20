@@ -22,43 +22,44 @@ def run(cmd, timeout=30):
     except Exception as e:
         return str(e), 1
 
-# Map: full command → helper action keyword
-_HELPER_MAP = {
-    f'paccache -rk{PACMAN_KEEP}':     'paccache',
-    'find /var/cache/pacman/pkg -name "download-*" -delete': 'broken-downloads',
-    f'journalctl --vacuum-time={JOURNAL_DAYS}d': 'journal',
-    'apt-get clean':       'apt-clean',
-    'apt-get autoremove -y': 'apt-autoremove',
-    'dnf clean all':       'dnf-clean',
-    'zypper clean --all':  'zypper-clean',
-}
-
-def run_privileged(action, stdin_data=None):
+def run_privileged(action_key, raw_cmd=None, stdin_data=None):
     """
-    Priority: IS_ROOT → sudo -n NOPASSWD → pkexec (only if agent) → fail.
+    Execute a privileged action via the NOPASSWD helper.
+
+    FIX #5: previously mapped full command strings → helper keywords with f-string
+    interpolation, causing silent fallback if constants (JOURNAL_DAYS, PACMAN_KEEP)
+    changed. Now callers pass the helper keyword directly — no string coupling.
+
+    action_key  — keyword for cyber-clean-helper (e.g. 'journal', 'apt-clean')
+    raw_cmd     — fallback raw command when action_key is None (for non-helper ops)
+    Priority: IS_ROOT → sudo -n NOPASSWD helper → pkexec (only if agent) → fail
     Never blocks GUI.
     """
     if IS_ROOT:
-        return run(action, timeout=120)
+        cmd = raw_cmd or action_key
+        return run(cmd, timeout=120)
 
-    # sudo -n first — works if NOPASSWD sudoers set up by install.sh
-    helper_action = _HELPER_MAP.get(action.strip())
-    if helper_action:
-        out, code = run(f'sudo -n /usr/local/bin/cyber-clean-helper {helper_action} 2>/dev/null', timeout=60)
-    else:
-        out, code = run(f'sudo -n {action} 2>/dev/null', timeout=60)
-    if code == 0:
-        return out, 0
+    if action_key:
+        out, code = run(
+            f'sudo -n /usr/local/bin/cyber-clean-helper {action_key} 2>/dev/null',
+            timeout=60)
+        if code == 0:
+            return out, 0
 
-    # pkexec ONLY if polkit agent is actually running (never hangs)
-    if HAS_POLKIT and HAS_POLKIT_AGENT and helper_action:
-        try:
-            r = subprocess.run(
-                ['pkexec', '/usr/local/bin/cyber-clean-helper', helper_action],
-                input=stdin_data, capture_output=True, text=True, timeout=30)
-            return r.stdout.strip(), r.returncode
-        except Exception as e:
-            return str(e), 1
+        # pkexec ONLY if polkit agent is actually running (never hangs)
+        if HAS_POLKIT and HAS_POLKIT_AGENT:
+            try:
+                r = subprocess.run(
+                    ['pkexec', '/usr/local/bin/cyber-clean-helper', action_key],
+                    input=stdin_data, capture_output=True, text=True, timeout=30)
+                return r.stdout.strip(), r.returncode
+            except Exception as e:
+                return str(e), 1
+
+    elif raw_cmd:
+        out, code = run(f'sudo -n {raw_cmd} 2>/dev/null', timeout=60)
+        if code == 0:
+            return out, 0
 
     return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
 
@@ -171,7 +172,7 @@ class LinuxCleaner(BaseCleaner):
             v, u = float(m.group(1)), m.group(2)
             r.freed_bytes = int(v * (1024**2 if 'MiB' in u else 1024**3 if 'GiB' in u else 1024))
         if not dry:
-            out2, code = run_privileged(f'paccache -rk{PACMAN_KEEP}')
+            out2, code = run_privileged('paccache')
             if code != 0: r.error = out2
         return r
 
@@ -181,7 +182,7 @@ class LinuxCleaner(BaseCleaner):
         r.freed_bytes = sum(f.stat().st_size for f in broken if f.exists())
         r.files_removed = len(broken)
         if not dry:
-            _, code = run_privileged('find /var/cache/pacman/pkg -name "download-*" -delete')
+            _, code = run_privileged('broken-downloads')
             if code != 0: r.error = 'Need root'
         return r
 
@@ -213,7 +214,7 @@ class LinuxCleaner(BaseCleaner):
         try: r.freed_bytes = int(out.split()[0])
         except: pass
         if not dry:
-            _, code = run_privileged('apt-get clean')
+            _, code = run_privileged('apt-clean')
             if code != 0: r.error = 'Need root'
         return r
 
@@ -223,7 +224,7 @@ class LinuxCleaner(BaseCleaner):
         try: r.files_removed = int(out)
         except: pass
         if not dry:
-            _, code = run_privileged('apt-get autoremove -y')
+            _, code = run_privileged('apt-autoremove')
             if code != 0: r.error = 'Need root'
         return r
 
@@ -234,7 +235,7 @@ class LinuxCleaner(BaseCleaner):
         try: r.freed_bytes = int(out.split()[0])
         except: pass
         if not dry:
-            _, code = run_privileged('dnf clean all')
+            _, code = run_privileged('dnf-clean')
             if code != 0: r.error = 'Need root'
         return r
 
@@ -245,7 +246,7 @@ class LinuxCleaner(BaseCleaner):
         try: r.freed_bytes = int(out.split()[0])
         except: pass
         if not dry:
-            _, code = run_privileged('zypper clean --all')
+            _, code = run_privileged('zypper-clean')
             if code != 0: r.error = 'Need root'
         return r
 
@@ -271,25 +272,32 @@ class LinuxCleaner(BaseCleaner):
     # ── Flatpak ───────────────────────────────────────────
     def _flatpak(self, dry):
         r = CleanResult('flatpak')
-        out_unused, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
-        unused = [l.strip() for l in out_unused.splitlines() if l.strip()]
+        # FIX #8: `flatpak list --runtime` lists ALL runtimes (installed + used).
+        # Must use `flatpak uninstall --unused --dry-run` to get only UNUSED refs.
+        # This fixes estimate showing 3 GB when only 200 MB will actually be freed.
+        out_dry, _ = run('flatpak uninstall --unused --dry-run 2>/dev/null')
+        # Output lines look like: "  org.gnome.Platform/x86_64/44" — count them
+        unused = [l.strip() for l in out_dry.splitlines()
+                  if l.strip() and not l.strip().startswith('Nothing')]
         r.files_removed = len(unused)
-        out_before, _ = run('du -sb ~/.local/share/flatpak/runtime 2>/dev/null')
-        try: size_before = int(out_before.split()[0])
-        except: size_before = 0
+
+        # Measure total runtime dir size before — use as upper bound for estimate
+        runtime_dir = Path.home() / '.local/share/flatpak/runtime'
+        size_before = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
+
         if not dry:
-            run('flatpak uninstall --unused -y 2>/dev/null')
-            out_after, _ = run('du -sb ~/.local/share/flatpak/runtime 2>/dev/null')
-            try: size_after = int(out_after.split()[0])
-            except: size_after = size_before
+            run('flatpak uninstall --unused -y 2>/dev/null', timeout=120)
+            size_after = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
             r.freed_bytes = max(size_before - size_after, 0)
         else:
-            est = 0
-            for app_id in unused[:20]:
-                out_sz, _ = run(f'du -sb ~/.local/share/flatpak/runtime/{app_id} 2>/dev/null')
-                try: est += int(out_sz.split()[0])
-                except: pass
-            r.freed_bytes = est
+            # Estimate: if nothing unused found, report 0 (not the full runtime dir size)
+            if not unused:
+                r.freed_bytes = 0
+            else:
+                # Rough per-ref estimate: total_runtime / total_refs * unused_count
+                out_all, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
+                total_refs = max(len([l for l in out_all.splitlines() if l.strip()]), 1)
+                r.freed_bytes = int((size_before / total_refs) * len(unused))
         return r
 
     # ── Docker / Podman ───────────────────────────────────
@@ -328,7 +336,7 @@ class LinuxCleaner(BaseCleaner):
         if not dry:
             _, code = run(f'journalctl --vacuum-time={JOURNAL_DAYS}d 2>/dev/null')
             if code != 0:
-                run_privileged(f'journalctl --vacuum-time={JOURNAL_DAYS}d')
+                run_privileged('journal')
             import time; time.sleep(1)
             out2, _ = run('journalctl --disk-usage 2>/dev/null')
             m2 = re.search(r'([\d.]+)\s*(M|G|K|B)', out2)

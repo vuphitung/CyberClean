@@ -124,6 +124,8 @@ case "$1" in
   drop-cache)       sync && echo 1 > /proc/sys/vm/drop_caches ;;
   compact-memory)   echo 1 > /proc/sys/vm/compact_memory ;;
   swappiness)       echo 10 > /proc/sys/vm/swappiness ;;
+  dirty-ratio)      echo 10 > /proc/sys/vm/dirty_ratio ;;
+  dirty-background-ratio) echo 5 > /proc/sys/vm/dirty_background_ratio ;;
   optimizer)
     sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
     echo 10 > /proc/sys/vm/swappiness 2>/dev/null

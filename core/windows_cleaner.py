@@ -194,17 +194,21 @@ class WindowsCleaner(BaseCleaner):
             # Stop both wuauserv AND bits — bits also locks files in SoftwareDistribution
             run_win('net stop wuauserv /y', timeout=20)
             run_win('net stop bits /y', timeout=20)
-            for item in list(sd.iterdir()):
-                try:
-                    sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                    r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                       'type': 'win_updates', 'path': str(item),
-                                       'size': sz, 'note': 're-downloads when needed'})
-                    if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
-                    else:             item.unlink(missing_ok=True)
-                except: pass
-            run_win('net start bits', timeout=20)
-            run_win('net start wuauserv', timeout=20)
+            try:
+                for item in list(sd.iterdir()):
+                    try:
+                        sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
+                        r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                                           'type': 'win_updates', 'path': str(item),
+                                           'size': sz, 'note': 're-downloads when needed'})
+                        if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
+                        else:             item.unlink(missing_ok=True)
+                    except: pass
+            finally:
+                # FIX: ALWAYS restart services — even if deletion loop crashes mid-way.
+                # Without finally, wuauserv+bits stay stopped until next reboot.
+                run_win('net start bits', timeout=20)
+                run_win('net start wuauserv', timeout=20)
             r.freed_bytes = _real_freed(size_before, sd)
         elif not dry and not is_admin():
             r.error = 'Needs admin'

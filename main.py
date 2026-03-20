@@ -33,6 +33,31 @@ from PyQt6.QtGui import (
     QFont, QColor, QPalette, QTextCursor, QPainter, QBrush,
     QPen, QLinearGradient, QIcon, QAction, QPolygonF, QPixmap
 )
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+    HAS_SVG = True
+except ImportError:
+    HAS_SVG = False
+
+# ── SVG Icon loader ───────────────────────────────────────────
+_ICON_DIR = Path(__file__).parent / 'assets' / 'icons'
+
+def _svg_icon(name: str, size: int = 20) -> QIcon:
+    """Load an SVG from assets/icons/<name>.svg and return a QIcon.
+    Falls back to an empty QIcon if SVG support or file is missing.
+    """
+    if not HAS_SVG:
+        return QIcon()
+    svg_path = _ICON_DIR / f'{name}.svg'
+    if not svg_path.exists():
+        return QIcon()
+    renderer = QSvgRenderer(str(svg_path))
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    renderer.render(p)
+    p.end()
+    return QIcon(pix)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from core.os_detect  import (IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info,
@@ -42,7 +67,8 @@ from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linu
 from core.scanner    import SecurityScanner
 from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
-from core.booster import (free_ram, memory_tune, clear_disk_cache, kill_bloat,
+from core.booster import (free_ram, memory_tune, memory_tune_restore,
+                          clear_disk_cache, kill_bloat,
                           game_mode_on, game_mode_off, eco_mode_on, eco_mode_off)
 
 if IS_WINDOWS and not is_windows_admin():
@@ -358,13 +384,13 @@ class CyberCleanApp(QMainWindow):
     @property
     def NAV_ITEMS(self):
         return [
-            ('dashboard', '◈', _t('nav_dashboard', 'DASHBOARD')),
-            ('clean',     '⚡', _t('nav_clean',     'CLEAN')),
-            ('scanner',   '⬡', _t('nav_scanner',   'SCANNER')),
-            ('uninstall', '✕', _t('nav_uninstall', 'UNINSTALL')),
-            ('log',       '▤', _t('nav_history',   'HISTORY')),
-            ('rollback',  '↺', _t('nav_rollback',  'ROLLBACK')),
-            ('browser',   '⊕', _t('nav_booster',   'SYS BOOSTER')),
+            ('dashboard', 'dashboard',   _t('nav_dashboard', 'DASHBOARD')),
+            ('clean',     'smart_clean', _t('nav_clean',     'CLEAN')),
+            ('scanner',   'scanner',     _t('nav_scanner',   'SCANNER')),
+            ('uninstall', 'uninstaller', _t('nav_uninstall', 'UNINSTALL')),
+            ('log',       'dashboard',   _t('nav_history',   'HISTORY')),
+            ('rollback',  'smart_clean', _t('nav_rollback',  'ROLLBACK')),
+            ('browser',   'ram_booster', _t('nav_booster',   'SYS BOOSTER')),
         ]
 
     def __init__(self):
@@ -592,9 +618,14 @@ class CyberCleanApp(QMainWindow):
         lay.setSpacing(1)
 
         self.nav_btns = {}
-        for pid, icon, label in self.NAV_ITEMS:
-            btn = QPushButton(f'  {icon}  {label}')
+        for pid, icon_name, label in self.NAV_ITEMS:
+            btn = QPushButton(f'  {label}')
             btn.setCheckable(True)
+            # Load SVG icon — falls back gracefully if PyQt6.QtSvg not installed
+            ico = _svg_icon(icon_name, size=18)
+            if not ico.isNull():
+                btn.setIcon(ico)
+                btn.setIconSize(__import__('PyQt6.QtCore', fromlist=['QSize']).QSize(18, 18))
             btn.setStyleSheet(f"""
                 QPushButton {{
                     color:{C['dim']}; background:transparent;
@@ -1181,11 +1212,16 @@ class CyberCleanApp(QMainWindow):
         d_cpu.setStyleSheet(f'color:{C["text2"]};font-size:11px;'); d_cpu.setWordWrap(True)
         vl_cpu.addWidget(t_cpu); vl_cpu.addWidget(d_cpu)
         btn_row_cpu = QHBoxLayout(); btn_row_cpu.setSpacing(8)
-        self._game_btn = _btn(f"🎮  {_t('btn_game_mode','GAME MODE')}", 'red', small=True)
+        self._game_btn = _btn(f"  {_t('btn_game_mode','GAME MODE')}", 'red', small=True)
+        self._game_btn.setIcon(_svg_icon('game_mode', size=16))
+        from PyQt6.QtCore import QSize as _QS
+        self._game_btn.setIconSize(_QS(16, 16))
         self._game_btn.setCheckable(True)
         self._game_btn.setToolTip(_t('game_tooltip','Throttle background bloat — no suspend, no deadlock'))
         self._game_btn.clicked.connect(self._toggle_game_mode)
-        self._eco_btn = _btn(f"🌿  {_t('btn_eco_mode','ECO MODE')}", 'green', small=True)
+        self._eco_btn = _btn(f"  {_t('btn_eco_mode','ECO MODE')}", 'green', small=True)
+        self._eco_btn.setIcon(_svg_icon('eco_mode', size=16))
+        self._eco_btn.setIconSize(_QS(16, 16))
         self._eco_btn.setCheckable(True)
         self._eco_btn.setToolTip(_t('eco_tooltip','Lower all background task priority to IDLE'))
         self._eco_btn.clicked.connect(self._toggle_eco_mode)
@@ -1761,20 +1797,24 @@ class CyberCleanApp(QMainWindow):
     # SYSTEM BOOSTER ACTIONS
     # ─────────────────────────────────────────────────────────
     class BoosterWorker(QThread):
-        log_signal = pyqtSignal(str, str)
+        log_signal  = pyqtSignal(str, str)
+        done_signal = pyqtSignal(object)   # carries return value (saved state dict or None)
         def __init__(self, action_func):
             super().__init__()
             self.action_func = action_func
         def run(self):
-            self.action_func(lambda msg, level='text': self.log_signal.emit(msg, level))
+            result = self.action_func(lambda msg, level='text': self.log_signal.emit(msg, level))
+            self.done_signal.emit(result)
 
-    def _run_booster_action(self, func):
+    def _run_booster_action(self, func, on_done=None):
         """Safe booster runner: uses pyqtSignal so UI is only touched from main thread."""
         if getattr(self, '_booster_worker', None) and self._booster_worker.isRunning():
             self._blog('  ! Please wait for the current task to finish...', 'warn')
             return
         self._booster_worker = self.BoosterWorker(func)
         self._booster_worker.log_signal.connect(self._blog)
+        if on_done:
+            self._booster_worker.done_signal.connect(on_done)
         self._booster_worker.start()
 
     def _blog(self, msg, col='text'):
@@ -1788,34 +1828,104 @@ class CyberCleanApp(QMainWindow):
         self._run_booster_action(clear_disk_cache)
 
     def _toggle_game_mode(self):
-        if not hasattr(self, '_game_frozen_pids'): self._game_frozen_pids = []
+        # FIX #1: run on background thread — psutil affinity loop can take 2–5s on busy systems
+        # FIX #10: _game_active is the authoritative state — not widget.isChecked()
+        # FIX Bug2: _game_transitioning guard — chặn double-click race condition
+        if not hasattr(self, '_game_frozen_pids'):   self._game_frozen_pids   = {}
+        if not hasattr(self, '_game_active'):        self._game_active        = False
+        if not hasattr(self, '_game_transitioning'): self._game_transitioning = False
+
+        if self._game_transitioning:
+            self._game_btn.setChecked(self._game_active)
+            return
+
+        self._game_transitioning = True
+
         if self._game_btn.isChecked():
             self._game_btn.setText(f"■  {_t('btn_active_restore','ACTIVE — CLICK TO RESTORE')}")
             self._eco_btn.setEnabled(False)
-            self._game_frozen_pids = game_mode_on(self._blog)
+            self._game_btn.setEnabled(False)
+            self._game_active = True
+
+            def _on_game_on(saved):
+                self._game_frozen_pids   = saved or {}
+                self._game_transitioning = False
+                self._game_btn.setEnabled(True)
+
+            self._run_booster_action(game_mode_on, on_done=_on_game_on)
         else:
             self._game_btn.setText(f"▶  {_t('btn_activate','ACTIVATE')}")
             self._eco_btn.setEnabled(True)
-            game_mode_off(self._game_frozen_pids, self._blog)
-            self._game_frozen_pids = []
+            self._game_btn.setEnabled(False)
+            self._game_active = False
+
+            saved = self._game_frozen_pids
+            def _do_off(log): game_mode_off(saved, log)
+            def _on_game_off(_):
+                self._game_frozen_pids   = {}
+                self._game_transitioning = False
+                self._game_btn.setEnabled(True)
+
+            self._run_booster_action(_do_off, on_done=_on_game_off)
 
     def _toggle_eco_mode(self):
-        if not hasattr(self, '_eco_saved'): self._eco_saved = {}
+        # FIX #1: run on background thread
+        # FIX #10: _eco_active is the authoritative state
+        # FIX Bug2: _eco_transitioning guard — chặn click liên tục trong lúc worker đang chạy
+        if not hasattr(self, '_eco_saved'):        self._eco_saved        = {}
+        if not hasattr(self, '_eco_active'):       self._eco_active       = False
+        if not hasattr(self, '_eco_transitioning'): self._eco_transitioning = False
+
+        if self._eco_transitioning:
+            # Worker chưa xong — revert button state về như cũ, không làm gì thêm
+            self._eco_btn.setChecked(self._eco_active)
+            return
+
+        self._eco_transitioning = True
+
         if self._eco_btn.isChecked():
             self._eco_btn.setText(f"■  {_t('btn_active_restore','ACTIVE — CLICK TO RESTORE')}")
             self._game_btn.setEnabled(False)
-            self._eco_saved = eco_mode_on(self._blog)
+            self._eco_btn.setEnabled(False)
+            self._eco_active = True
+
+            def _on_eco_on(saved):
+                self._eco_saved        = saved or {}
+                self._eco_transitioning = False
+                self._eco_btn.setEnabled(True)
+                if not saved:
+                    # Linux non-root: eco_mode_on thành công nhưng không throttle được gì
+                    # → hiện thông báo thay vì để button stuck ở ACTIVE
+                    self._blog("  ~ Eco Mode: Linux non-root — CPU affinity only, nice() skipped", "warn")
+
+            self._run_booster_action(eco_mode_on, on_done=_on_eco_on)
         else:
             self._eco_btn.setText(f"▶  {_t('btn_activate','ACTIVATE')}")
             self._game_btn.setEnabled(True)
-            eco_mode_off(self._eco_saved, self._blog)
-            self._eco_saved = {}
+            self._eco_btn.setEnabled(False)
+            self._eco_active = False
+
+            saved = self._eco_saved
+            def _do_off(log): eco_mode_off(saved, log)
+            def _on_eco_off(_):
+                self._eco_saved        = {}
+                self._eco_transitioning = False
+                self._eco_btn.setEnabled(True)
+
+            self._run_booster_action(_do_off, on_done=_on_eco_off)
 
     def _boost_free_ram(self):
         self._run_booster_action(free_ram)
 
     def _boost_memory_tune(self):
-        self._run_booster_action(memory_tune)
+        # FIX #3: capture originals from result.rollback so we can restore on exit
+        def _on_tune_done(result):
+            if result and result.rollback:
+                orig = result.rollback[0].get("originals", {})
+                if orig:
+                    self._mem_tune_originals = orig
+                    self._blog("  i Kernel params will be restored on app exit", "ok")
+        self._run_booster_action(memory_tune, on_done=_on_tune_done)
 
     def _boost_kill_bloat(self):
         self._run_booster_action(kill_bloat)
@@ -1943,14 +2053,34 @@ class CyberCleanApp(QMainWindow):
 
     def _shutdown(self):
         """Clean shutdown — restore modes first, then stop all threads."""
-        # Restore Game Mode first — releases CPU affinity + unfreezes services
+        # FIX #10: use _game_active/_eco_active (authoritative state) instead of
+        # widget.isChecked() — widgets may be destroyed before _shutdown runs on
+        # force-quit (race condition), causing modes to stay active forever.
+
+        # Restore Game Mode — releases CPU affinity, restores power plan, unfreezes services
         # Critical: wuauserv stays frozen forever if we skip this on force-quit
-        if hasattr(self, '_game_btn') and self._game_btn.isChecked():
-            try: self._toggle_game_mode()
+        if getattr(self, '_game_active', False):
+            try:
+                saved = getattr(self, '_game_frozen_pids', {})
+                game_mode_off(saved, lambda m, l='text': None)  # silent restore
+                self._game_active = False
             except: pass
-        if hasattr(self, '_eco_btn') and self._eco_btn.isChecked():
-            try: self._toggle_eco_mode()
+
+        # Restore Eco Mode — un-nice all throttled processes
+        if getattr(self, '_eco_active', False):
+            try:
+                saved = getattr(self, '_eco_saved', {})
+                eco_mode_off(saved, lambda m, l='text': None)
+                self._eco_active = False
             except: pass
+
+        # FIX #3: restore kernel vm params if memory_tune was used
+        if hasattr(self, '_mem_tune_originals') and self._mem_tune_originals:
+            try:
+                memory_tune_restore(self._mem_tune_originals,
+                                    lambda m, l='text': None)
+            except: pass
+
         if hasattr(self, '_si_worker'):
             self._si_worker.stop()
             self._si_worker.quit()
@@ -1977,7 +2107,7 @@ class CyberCleanApp(QMainWindow):
         if self.isVisible():
             return   # user has app open, skip silent auto-clean
         # Never auto-clean while Game Mode is active — kills FPS
-        if hasattr(self, '_game_btn') and self._game_btn.isChecked():
+        if getattr(self, '_game_active', False):
             if hasattr(self, 'tray'):
                 self.tray.showMessage('CyberClean',
                     'Game Mode active — auto-clean postponed.',

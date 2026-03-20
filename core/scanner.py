@@ -183,7 +183,9 @@ class SecurityScanner:
             '/usr/bin/fusermount', '/usr/bin/fusermount3',
             '/usr/lib/dbus-1.0/dbus-daemon-launch-helper',
         }
-        out = run('find /usr /bin /sbin /tmp /home -perm /4000 -type f 2>/dev/null', timeout=15)
+        # FIX #4: removed /home — NFS/network mounts can hang 15s+ with no progress UI.
+        # /home SUID binaries are extremely rare; suspicious-files scan covers ~/.local/bin.
+        out = run('find /usr /bin /sbin /tmp -perm /4000 -type f 2>/dev/null', timeout=15)
         found = 0
         for line in out.splitlines():
             f = line.strip()
@@ -255,7 +257,10 @@ class SecurityScanner:
             p = Path(d)
             if not p.exists(): continue
             try:
+                # FIX #4: follow_symlinks=False prevents infinite loops from circular symlinks
+                # (e.g. ~/.config/app -> /tmp -> ~/.config creates an infinite rglob cycle)
                 for f in p.rglob('*'):
+                    if f.is_symlink(): continue   # never follow symlinks during scan
                     if not f.is_file(): continue
                     # Skip black-hole dirs — virus never hides here, but HDD dies scanning them
                     _fstr = str(f).lower()
@@ -264,7 +269,11 @@ class SecurityScanner:
                         # NOTE: appdata\local\temp intentionally NOT skipped —
                         # 90% of Windows malware hides here (.bat/.vbs/.ps1)
                         ".git", "__pycache__",
-                        "\\tmp\\", "/tmp/", ".venv", "site-packages",
+                        # FIX #9: was "\\tmp\\" and "/tmp/" — these matched /tmp/evil.sh
+                        # because "/tmp/" IS in "/tmp/evil.sh". Now only skip subdirs of /tmp,
+                        # not files directly in /tmp (that's where malware hides!).
+                        "\\tmp\\subdir", "/tmp/subdir",
+                        ".venv", "site-packages",
                     )): continue
                     if f.stat().st_size > 50_000_000: continue  # skip large files
                     try:
