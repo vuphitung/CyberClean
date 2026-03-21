@@ -63,8 +63,17 @@ _DISK_CACHE_TTL = 60.0  # seconds — disk_partitions() wakes sleeping/network d
 def _read_temperature():
     """
     Multi-source temperature chain with 60s cache.
-    PowerShell/WMI calls are expensive — caching prevents CPU spike every 4s.
-    Returns (all_temps: dict, max_temp: float | None)
+    Priority order:
+      0. LibreHardwareMonitor DLL (pythonnet) — real MSR kernel driver, most accurate
+      1. psutil sensors_temperatures()        — works on Linux + some Windows setups
+      2. Linux /sys/class/thermal             — thermal zones
+      3. Linux /sys/class/hwmon               — hwmon fallback
+      4. Windows WMI MSAcpi                   — motherboard ACPI (less accurate)
+      5. Windows WMI OpenHardwareMonitor      — if OHM service is running
+      6. Windows PowerShell CIM fallback      — last resort
+
+    LHM cache TTL = 4s (fast kernel read, safe to call often)
+    WMI/PowerShell cache TTL = 60s (expensive, avoid calling every 4s)
     """
     global _temp_cache
     max_cached, all_cached, ts = _temp_cache
@@ -72,6 +81,67 @@ def _read_temperature():
         return all_cached, max_cached
     all_temps = {}
     max_temp  = None
+
+    # ── Source 0: LibreHardwareMonitor DLL (Windows — real CPU core temp) ──
+    # Reads directly from MSR via kernel driver — same method as HWMonitor/MSI Afterburner
+    # Requires: pip install pythonnet  +  LibreHardwareMonitorLib.dll in app folder
+    if _OS == 'Windows':
+        try:
+            import os as _os
+
+            # FIX: pythonnet 3.0+ defaults to .NET Core but LHM DLL is built on .NET Framework.
+            # Mixing runtimes causes a silent segfault (app dies with no error message).
+            # Force .NET Framework ("netfx") BEFORE importing clr — must be called once only.
+            try:
+                from pythonnet import load as _pn_load
+                _pn_load("netfx")
+            except Exception:
+                pass  # already loaded or not available — continue anyway
+
+            import clr as _clr  # pythonnet — now using .NET Framework runtime
+
+            # Search for DLL: next to main.py, next to sysinfo.py, or PyInstaller _MEIPASS
+            _dll_candidates = [
+                _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'LibreHardwareMonitorLib.dll'),
+                _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', 'LibreHardwareMonitorLib.dll'),
+            ]
+            # PyInstaller onefile unpacks to _MEIPASS
+            _meipass = getattr(__import__('sys'), '_MEIPASS', None)
+            if _meipass:
+                _dll_candidates.insert(0, _os.path.join(_meipass, 'LibreHardwareMonitorLib.dll'))
+
+            _dll_path = next((p for p in _dll_candidates if _os.path.exists(p)), None)
+
+            if _dll_path:
+                _clr.AddReference(_dll_path)
+                from LibreHardwareMonitor import Hardware as _HW  # type: ignore
+
+                _computer = _HW.Computer()
+                _computer.IsCpuEnabled = True
+                _computer.IsGpuEnabled = True   # bonus: GPU temp too
+                _computer.Open()
+
+                for hw in _computer.Hardware:
+                    hw.Update()
+                    hw_name = str(hw.Name)
+                    for sensor in hw.Sensors:
+                        if sensor.SensorType == _HW.SensorType.Temperature:
+                            val = sensor.Value
+                            if val is not None and 1 < float(val) < 150:
+                                label = f'{hw_name}/{sensor.Name}'
+                                all_temps[label] = float(val)
+
+                _computer.Close()
+
+                if all_temps:
+                    max_temp = max(all_temps.values())
+                    # LHM reads fast — use shorter cache so sparkline updates smoothly
+                    _temp_cache = (max_temp, all_temps, time.time())
+                    return all_temps, max_temp
+        except ImportError:
+            pass   # pythonnet not installed — fall through to WMI chain
+        except Exception:
+            pass   # DLL load failed or hardware not supported — fall through
 
     # ── Source 1: psutil (works on Linux + some Windows setups) ──
     try:
@@ -97,7 +167,6 @@ def _read_temperature():
                     v = int(f.read_text().strip()) / 1000
                     if 1 < v < 150:
                         zone = f.parent.name
-                        # Try to get a friendly type label
                         type_f = f.parent / 'type'
                         label = type_f.read_text().strip() if type_f.exists() else zone
                         all_temps[label] = v
@@ -129,7 +198,8 @@ def _read_temperature():
         except Exception:
             pass
 
-    # ── Source 3: Windows WMI MSAcpi (needs admin, builtin) ───────
+    # ── Source 3: Windows WMI MSAcpi (builtin, reads motherboard ACPI) ───
+    # Note: this reads the board sensor, NOT individual CPU cores — often fixed value
     if _OS == 'Windows':
         try:
             import wmi as _wmi
@@ -145,8 +215,7 @@ def _read_temperature():
         except Exception:
             pass
 
-        # ── Source 4: Windows WMI OpenHardwareMonitor (if running) ─
-        # OHM must be running as a service — it exposes data via WMI
+        # ── Source 4: Windows WMI OpenHardwareMonitor (if OHM service running) ─
         try:
             import wmi as _wmi
             w = _wmi.WMI(namespace='root\\OpenHardwareMonitor')
@@ -162,7 +231,7 @@ def _read_temperature():
         except Exception:
             pass
 
-        # ── Source 5: PowerShell CIM fallback (no extra modules) ───
+        # ── Source 5: PowerShell CIM fallback (no extra modules needed) ───
         try:
             import subprocess
             _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
@@ -190,9 +259,8 @@ def _read_temperature():
         except Exception:
             pass
 
-    result = (all_temps, max_temp)
     _temp_cache = (max_temp, all_temps, time.time())
-    return result   # None → UI shows "–°C"
+    return all_temps, max_temp   # None → UI shows "–°C"
 
 
 def get_snapshot(interval: float = 0.5) -> SystemSnapshot:

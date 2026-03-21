@@ -79,17 +79,35 @@ def check_deps():
 def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     sep   = ';' if OS == 'Windows' else ':'
     mode  = '--onefile' if onefile else '--onedir'
+
+    # Check for LibreHardwareMonitorLib.dll (Windows real CPU temp)
+    dll = ROOT / 'LibreHardwareMonitorLib.dll'
+    if OS == 'Windows' and not dll.exists():
+        warn('LibreHardwareMonitorLib.dll not found — temperature will use WMI fallback')
+        warn('Download: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases')
+        warn('Place DLL next to main.py for real CPU temp readings')
+
     parts = [
         f'{_pyinstaller_bin()} {mode} --noconsole',
         f'--name {APP}',
         f'--add-data "core/*.py{sep}core"',
         f'--add-data "utils/*.py{sep}utils"',
         f'--add-data "assets{sep}assets"',
+    ]
+
+    # Bundle DLL if present
+    if dll.exists():
+        parts.append(f'--add-data "LibreHardwareMonitorLib.dll{sep}."')
+        ok('Bundling LibreHardwareMonitorLib.dll — real CPU temp enabled')
+
+    parts += [
         '--hidden-import psutil',
         '--hidden-import PyQt6',
         '--hidden-import PyQt6.QtWidgets',
         '--hidden-import PyQt6.QtCore',
         '--hidden-import PyQt6.QtGui',
+        '--hidden-import clr',        # pythonnet — LibreHardwareMonitor bridge
+        '--hidden-import clr._extra',
         '--exclude-module tkinter',
         '--exclude-module matplotlib',
         '--exclude-module numpy',
