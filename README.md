@@ -84,7 +84,9 @@ sudo cyberclean --uninstall
 
 **[⬇ Download CyberClean Setup v2.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-> UAC elevation on first launch · No background services · Uninstall via `Settings → Apps → CyberClean`
+> UAC elevation on **first install only** · No background services · Uninstall via `Settings → Apps → CyberClean`
+
+> 💡 **Tip:** Always launch CyberClean from the **Desktop or Start Menu shortcut** to avoid UAC prompts. Pinning the running app directly to the Taskbar bypasses the Auto-Admin rule and will trigger UAC on next launch — this is a Windows limitation shared by apps like MSI Afterburner and Rufus.
 
 ---
 
@@ -201,8 +203,10 @@ Built-in translations: English · Tiếng Việt · 中文 · Español · Franç
 - **No background service** — only runs when you open it (or auto-clean from tray)
 - **Scoped privilege** — Linux sudoers rule grants access only to `/usr/local/bin/cyber-clean-helper`, not blanket sudo
 - **Helper script** — all privileged operations go through a tightly scoped shell script you can read and audit
-- **Windows UAC** — standard elevation prompt, no service installation
+- **Windows UAC — ask once, never again** — installer creates a hidden Task Scheduler entry (`CyberClean_AutoAdmin`) with highest privilege at install time. Every subsequent launch via Desktop/Start Menu shortcut runs silently with no UAC prompt, even after reboot. The task is removed cleanly on uninstall.
 - **Microsoft Security Intelligence verified** — submitted and cleared, Submission ID `b632c14c-aff3-4ef6-97ab-4058309bc4cd`
+
+> ⚠️ **Taskbar pin note:** If you pin CyberClean to the Taskbar by right-clicking the running app, Windows pins the `.exe` directly instead of the shortcut — this bypasses the Auto-Admin task and UAC will reappear. This is a Windows-level limitation (same behavior in MSI Afterburner, Rufus, etc.). Always use the **Desktop or Start Menu shortcut** for a prompt-free experience.
 
 ---
 

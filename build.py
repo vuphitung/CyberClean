@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CyberClean v2.0 — Build Script
+CyberClean v2.0 - Build Script
 Packages the app into distributable formats.
 
 Usage:
@@ -23,7 +23,7 @@ APP     = 'CyberClean'
 AUTHOR  = 'vuphitung'
 URL     = f'https://github.com/{AUTHOR}/{APP}'
 
-# Icon paths — drop your logo here after generating it
+# Icon paths - drop your logo here after generating it
 ICON_ICO = ROOT / 'assets' / 'logo.ico'    # Windows
 ICON_PNG = ROOT / 'assets' / 'logo.png'    # Linux
 
@@ -40,7 +40,7 @@ def run(cmd, **kw):
     return subprocess.run(cmd, shell=True, **kw)
 
 def _pyinstaller_bin() -> str:
-    """Return pyinstaller command — handles ~/.local/bin not in PATH (common on Arch)."""
+    """Return pyinstaller command - handles ~/.local/bin not in PATH (common on Arch)."""
     if shutil.which('pyinstaller'):
         return 'pyinstaller'
     local = Path.home() / '.local/bin/pyinstaller'
@@ -66,12 +66,12 @@ def check_deps():
         try:
             __import__(pkg); ok(pkg)
         except ImportError:
-            err(f'{pkg} missing — {hint}'); ok_all = False
+            err(f'{pkg} missing - {hint}'); ok_all = False
 
     if _has_pyinstaller():
         ok(f'PyInstaller  ({_pyinstaller_bin()})')
     else:
-        err('PyInstaller missing — python3 -m pip install pyinstaller --break-system-packages')
+        err('PyInstaller missing - python3 -m pip install pyinstaller --break-system-packages')
         ok_all = False
     return ok_all
 
@@ -83,7 +83,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     # Check for LibreHardwareMonitorLib.dll (Windows real CPU temp)
     dll = ROOT / 'LibreHardwareMonitorLib.dll'
     if OS == 'Windows' and not dll.exists():
-        warn('LibreHardwareMonitorLib.dll not found — temperature will use WMI fallback')
+        warn('LibreHardwareMonitorLib.dll not found - temperature will use WMI fallback')
         warn('Download: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases')
         warn('Place DLL next to main.py for real CPU temp readings')
 
@@ -98,7 +98,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     # Bundle DLL if present
     if dll.exists():
         parts.append(f'--add-data "LibreHardwareMonitorLib.dll{sep}."')
-        ok('Bundling LibreHardwareMonitorLib.dll — real CPU temp enabled')
+        ok('Bundling LibreHardwareMonitorLib.dll - real CPU temp enabled')
 
     parts += [
         '--hidden-import psutil',
@@ -106,7 +106,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         '--hidden-import PyQt6.QtWidgets',
         '--hidden-import PyQt6.QtCore',
         '--hidden-import PyQt6.QtGui',
-        '--hidden-import clr',        # pythonnet — LibreHardwareMonitor bridge
+        '--hidden-import clr',        # pythonnet - LibreHardwareMonitor bridge
         '--hidden-import clr._extra',
         '--exclude-module tkinter',
         '--exclude-module matplotlib',
@@ -116,7 +116,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         parts.append(f'--icon "{icon}"')
         ok(f'Using icon: {icon.name}')
     else:
-        warn(f'No icon found at {icon} — building without icon')
+        warn(f'No icon found at {icon} - building without icon')
         warn('Drop your logo.ico / logo.png into assets/ to add it')
     parts.append('main.py')
     return ' '.join(parts)
@@ -125,14 +125,14 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
 def build_windows(make_inno: bool = False):
     head('Building Windows .exe')
     if not _has_pyinstaller():
-        err('PyInstaller not found — python3 -m pip install pyinstaller --break-system-packages')
+        err('PyInstaller not found - python3 -m pip install pyinstaller --break-system-packages')
         return False
 
     DIST.mkdir(exist_ok=True)
     cmd = _pyinstaller_cmd(onefile=True, icon=ICON_ICO)
     result = run(cmd)
     if result.returncode != 0:
-        err('Build failed — check output above')
+        err('Build failed - check output above')
         return False
 
     exe = DIST / f'{APP}.exe'
@@ -154,56 +154,68 @@ def _generate_inno_script(exe: Path):
     head('Generating Inno Setup script')
     icon_line = f'SetupIconFile={ICON_ICO}' if ICON_ICO.exists() else '; SetupIconFile=assets\\logo.ico'
 
-    iss_content = textwrap.dedent(f"""\
-        ; CyberClean v{VERSION} — Inno Setup Script
-        ; Build: Open this file in Inno Setup Compiler and press Compile
-        ; Download Inno Setup: https://jrsoftware.org/isinfo.php
+    # Build ISS content as a list to avoid triple-quote / double-quote conflicts
+    # Inno Setup uses "" to escape a literal " inside a quoted string value
+    QQ = '""'   # Inno escaped double-quote
+    Q  = "'"    # single quote used as outer wrapper in schtasks /tr argument
 
-        [Setup]
-        AppName={APP}
-        AppVersion={VERSION}
-        AppPublisher={AUTHOR}
-        AppPublisherURL={URL}
-        AppSupportURL={URL}/issues
-        AppUpdatesURL={URL}/releases
-        DefaultDirName={{autopf}}\\{APP}
-        DefaultGroupName={APP}
-        AllowNoIcons=yes
-        OutputDir=dist
-        OutputBaseFilename={APP}_Setup_v{VERSION}
-        {icon_line}
-        Compression=lzma
-        SolidCompression=yes
-        WizardStyle=modern
-        PrivilegesRequired=admin
-        UninstallDisplayName={APP}
-        UninstallDisplayIcon={{app}}\\{APP}.exe
-        VersionInfoVersion={VERSION}
-        VersionInfoDescription=Smart Disk Cleaner
-
-        [Languages]
-        Name: "english"; MessagesFile: "compiler:Default.isl"
-
-        [Tasks]
-        Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
-
-        [Files]
-        Source: "dist\\{APP}.exe"; DestDir: "{{app}}"; Flags: ignoreversion
-
-        [Icons]
-        Name: "{{group}}\\{APP}"; Filename: "{{app}}\\{APP}.exe"
-        Name: "{{group}}\\Uninstall {APP}"; Filename: "{{uninstallexe}}"
-        Name: "{{userdesktop}}\\{APP}";   Filename: "{{app}}\\{APP}.exe"; Tasks: desktopicon
-
-        [Run]
-        Filename: "{{app}}\\{APP}.exe"; Description: "Launch {APP}"; \\
-            Flags: nowait postinstall skipifsilent runascurrentuser
-
-        [UninstallDelete]
-        ; Clean up app data on uninstall
-        Type: filesandordirs; Name: "{{localappdata}}\\{APP}"
-        Type: filesandordirs; Name: "{{userappdata}}\\{APP}"
-    """)
+    iss_lines = [
+        f'; CyberClean v{VERSION} - Inno Setup Script',
+        '; Build: Open in Inno Setup Compiler and press Compile (F9)',
+        '; Download: https://jrsoftware.org/isinfo.php',
+        '',
+        '[Setup]',
+        f'AppName={APP}',
+        f'AppVersion={VERSION}',
+        f'AppPublisher={AUTHOR}',
+        f'AppPublisherURL={URL}',
+        f'AppSupportURL={URL}/issues',
+        f'AppUpdatesURL={URL}/releases',
+        r'DefaultDirName={autopf}' + f'\\{APP}',
+        f'DefaultGroupName={APP}',
+        'AllowNoIcons=yes',
+        'OutputDir=dist',
+        f'OutputBaseFilename={APP}_Setup_v{VERSION}',
+        icon_line,
+        'Compression=lzma',
+        'SolidCompression=yes',
+        'WizardStyle=modern',
+        'PrivilegesRequired=admin',
+        f'UninstallDisplayName={APP}',
+        r'UninstallDisplayIcon={app}' + f'\\{APP}.exe',
+        f'VersionInfoVersion={VERSION}',
+        'VersionInfoDescription=Smart Disk Cleaner',
+        '',
+        '[Languages]',
+        'Name: "english"; MessagesFile: "compiler:Default.isl"',
+        '',
+        '[Tasks]',
+        'Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"',
+        '',
+        '[Files]',
+        f'Source: "dist\\{APP}.exe"; DestDir: "{{app}}"; Flags: ignoreversion',
+        '',
+        '[Icons]',
+        '; Shortcuts call schtasks to run the hidden Task - no UAC prompt on launch',
+        f'Name: "{{group}}\\{APP}"; Filename: "schtasks"; Parameters: "/run /tn {QQ}{APP}_AutoAdmin{QQ}"; IconFilename: "{{app}}\\{APP}.exe"',
+        f'Name: "{{group}}\\Uninstall {APP}"; Filename: "{{uninstallexe}}"',
+        f'Name: "{{userdesktop}}\\{APP}"; Filename: "schtasks"; Parameters: "/run /tn {QQ}{APP}_AutoAdmin{QQ}"; IconFilename: "{{app}}\\{APP}.exe"; Tasks: desktopicon',
+        '',
+        '[Run]',
+        '; Create hidden Task with highest privilege - this is the ONE-TIME UAC moment',
+        f'Filename: "schtasks"; Parameters: "/create /tn {QQ}{APP}_AutoAdmin{QQ} /tr {QQ}{Q}{{app}}\\{APP}.exe{Q}{QQ} /sc onlogon /rl highest /f"; Flags: runhidden waituntilterminated',
+        '; Launch via Task right after install (no UAC)',
+        f'Filename: "schtasks"; Parameters: "/run /tn {QQ}{APP}_AutoAdmin{QQ}"; Description: "Launch {APP}"; Flags: nowait postinstall skipifsilent runhidden',
+        '',
+        '[UninstallRun]',
+        '; Remove the hidden Task on uninstall',
+        f'Filename: "schtasks"; Parameters: "/delete /tn {QQ}{APP}_AutoAdmin{QQ} /f"; Flags: runhidden waituntilterminated',
+        '',
+        '[UninstallDelete]',
+        f'Type: filesandordirs; Name: "{{localappdata}}\\{APP}"',
+        f'Type: filesandordirs; Name: "{{userappdata}}\\{APP}"',
+    ]
+    iss_content = '\n'.join(iss_lines) + '\n'
 
     iss_path = ROOT / f'{APP}.iss'
     iss_path.write_text(iss_content, encoding='utf-8')
@@ -219,10 +231,10 @@ def _generate_inno_script(exe: Path):
 def build_linux_appimage():
     head('Building Linux AppImage')
     if not _has_pyinstaller():
-        err('PyInstaller not found — python3 -m pip install pyinstaller --break-system-packages')
+        err('PyInstaller not found - python3 -m pip install pyinstaller --break-system-packages')
         return False
 
-    # PyInstaller onedir — AppImage wraps the directory
+    # PyInstaller onedir - AppImage wraps the directory
     cmd = _pyinstaller_cmd(onefile=False, icon=ICON_PNG)
     result = run(cmd)
     if result.returncode != 0:
@@ -259,7 +271,7 @@ def build_linux_appimage():
     if ICON_PNG.exists():
         shutil.copy(ICON_PNG, appdir / f'{APP}.png')
     else:
-        warn(f'No icon at {ICON_PNG} — AppImage will have no icon')
+        warn(f'No icon at {ICON_PNG} - AppImage will have no icon')
 
     # Download appimagetool if needed
     # Validate size: real tool is ~20-30MB; 0-byte or text error page = bad download
@@ -270,9 +282,9 @@ def build_linux_appimage():
         run('wget -q -O /tmp/appimagetool '
             '"https://github.com/AppImage/AppImageKit/releases/download/continuous/'
             'appimagetool-x86_64.AppImage"')
-        # Validate download — wget may create a 0-byte or HTML error file
+        # Validate download - wget may create a 0-byte or HTML error file
         if not tool.exists() or tool.stat().st_size < MIN_SIZE:
-            err('appimagetool download failed or incomplete — check internet / GitHub status')
+            err('appimagetool download failed or incomplete - check internet / GitHub status')
             return False
         tool.chmod(0o755)
 
@@ -304,7 +316,7 @@ def build_linux_deb():
     """
     head('Building Linux .deb')
     if not _has_pyinstaller():
-        err('PyInstaller not found — python3 -m pip install pyinstaller --break-system-packages')
+        err('PyInstaller not found - python3 -m pip install pyinstaller --break-system-packages')
         return False
 
     # Step 1: PyInstaller onedir
@@ -351,13 +363,13 @@ def build_linux_deb():
         f'Architecture: amd64\n'
         f'Maintainer: {AUTHOR} <{AUTHOR}@users.noreply.github.com>\n'
         f'Description: Smart Disk Cleaner\n'
-        f' CyberClean — safe, fast disk cleaning for Linux.\n'
+        f' CyberClean - safe, fast disk cleaning for Linux.\n'
         f'Homepage: {URL}\n'
         f'Section: utils\n'
         f'Priority: optional\n'
     )
 
-    # postinst — fix permissions
+    # postinst - fix permissions
     postinst = debian_dir / 'postinst'
     postinst.write_text(
         '#!/bin/bash\n'
@@ -366,7 +378,7 @@ def build_linux_deb():
     )
     postinst.chmod(0o755)
 
-    # postrm — cleanup on apt remove
+    # postrm - cleanup on apt remove
     postrm = debian_dir / 'postrm'
     postrm.write_text(
         '#!/bin/bash\n'
@@ -386,7 +398,7 @@ def build_linux_deb():
         print(f'  {C}Remove:{NC}   sudo apt remove {pkg_name}\n')
         return True
 
-    err('.deb build failed — is dpkg-deb installed?  (sudo apt install dpkg)')
+    err('.deb build failed - is dpkg-deb installed?  (sudo apt install dpkg)')
     return False
 
 
@@ -395,7 +407,7 @@ def build_linux_deb():
 def build_linux_targz():
     head('Building Linux tar.gz (no FUSE required)')
     if not _has_pyinstaller():
-        err('PyInstaller not found — python3 -m pip install pyinstaller --break-system-packages')
+        err('PyInstaller not found - python3 -m pip install pyinstaller --break-system-packages')
         return False
 
     cmd = _pyinstaller_cmd(onefile=False, icon=ICON_PNG)
@@ -431,7 +443,7 @@ def build_linux_zip():
 
 # ── Main ──────────────────────────────────────────────────
 def main():
-    print(f'\n{C}  ⚡ {APP} v{VERSION} — Build Tool{NC}\n')
+    print(f'\n{C}  ⚡ {APP} v{VERSION} - Build Tool{NC}\n')
     args = sys.argv[1:]
 
     if '--check' in args:
@@ -463,7 +475,7 @@ def main():
             success = build_linux_targz()
 
     else:
-        warn(f'Platform "{target}" not recognized — use --windows or --linux')
+        warn(f'Platform "{target}" not recognized - use --windows or --linux')
 
     status = f'{G}✅ Build complete! → {DIST}{NC}' if success else f'{R}✗ Build failed{NC}'
     print(f'\n  {status}\n')

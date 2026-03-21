@@ -82,7 +82,9 @@ sudo cyberclean --uninstall
 
 **[⬇ Tải CyberClean Setup v2.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-> Yêu cầu UAC khi chạy lần đầu · Không cài service nền · Gỡ qua `Cài đặt → Ứng dụng → CyberClean`
+> Chỉ hỏi UAC **đúng 1 lần khi cài đặt** · Không cài service nền · Gỡ qua `Cài đặt → Ứng dụng → CyberClean`
+
+> 💡 **Mẹo:** Luôn mở CyberClean bằng **shortcut trên Desktop hoặc Start Menu** để không bị hỏi UAC. Nếu ghim app đang chạy thẳng vào Taskbar, Windows sẽ ghim file `.exe` thay vì shortcut — UAC sẽ xuất hiện lại ở lần mở sau. Đây là giới hạn của Windows, các app như MSI Afterburner hay Rufus cũng bị tương tự.
 
 ---
 
@@ -200,8 +202,10 @@ Hỗ trợ sẵn: Tiếng Việt · English · 中文 · Español · Français �
 - **Không cài service nền** — chỉ chạy khi bạn mở app (hoặc auto-clean từ tray)
 - **Quyền hạn được giới hạn chặt** — sudoers rule trên Linux chỉ cấp quyền cho `/usr/local/bin/cyber-clean-helper`, không phải sudo toàn bộ
 - **Helper script minh bạch** — mọi thao tác cần quyền đều đi qua script shell bạn có thể đọc và kiểm tra
-- **Windows UAC** — yêu cầu xác nhận nâng quyền chuẩn, không cài service
+- **Windows UAC — hỏi 1 lần, không hỏi lại** — installer tạo một Task ẩn (`CyberClean_AutoAdmin`) với quyền cao nhất ngay khi cài. Mọi lần mở sau qua shortcut Desktop/Start Menu đều chạy thẳng, không hỏi UAC, kể cả sau khi khởi động lại máy. Task bị xóa sạch khi gỡ cài đặt.
 - **Được Microsoft Security Intelligence xác minh** — đã nộp và được xác nhận sạch, Mã submission `b632c14c-aff3-4ef6-97ab-4058309bc4cd`
+
+> ⚠️ **Lưu ý khi ghim Taskbar:** Nếu bạn click chuột phải vào app đang chạy và chọn "Pin to taskbar", Windows sẽ ghim thẳng file `.exe` thay vì shortcut — UAC sẽ xuất hiện lại. Đây là giới hạn của Windows (MSI Afterburner, Rufus cũng bị như vậy). Hãy dùng **shortcut Desktop hoặc Start Menu** để mở app không bị hỏi quyền.
 
 ---
 

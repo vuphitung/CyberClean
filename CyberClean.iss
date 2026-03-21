@@ -1,6 +1,6 @@
-; CyberClean v2.0.0 — Inno Setup Script
-; Build: Open this file in Inno Setup Compiler and press Compile
-; Download Inno Setup: https://jrsoftware.org/isinfo.php
+; CyberClean v2.0.0 - Inno Setup Script
+; Build: Open in Inno Setup Compiler and press Compile (F9)
+; Download: https://jrsoftware.org/isinfo.php
 
 [Setup]
 AppName=CyberClean
@@ -34,15 +34,21 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Source: "dist\CyberClean.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\CyberClean"; Filename: "{app}\CyberClean.exe"
+; Shortcuts call schtasks to run the hidden Task - no UAC prompt on launch
+Name: "{group}\CyberClean"; Filename: "schtasks"; Parameters: "/run /tn ""CyberClean_AutoAdmin"""; IconFilename: "{app}\CyberClean.exe"
 Name: "{group}\Uninstall CyberClean"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\CyberClean";   Filename: "{app}\CyberClean.exe"; Tasks: desktopicon
+Name: "{userdesktop}\CyberClean"; Filename: "schtasks"; Parameters: "/run /tn ""CyberClean_AutoAdmin"""; IconFilename: "{app}\CyberClean.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\CyberClean.exe"; Description: "Launch CyberClean"; \
-    Flags: nowait postinstall skipifsilent runascurrentuser
+; Create hidden Task with highest privilege - this is the ONE-TIME UAC moment
+Filename: "schtasks"; Parameters: "/create /tn ""CyberClean_AutoAdmin"" /tr ""'{app}\CyberClean.exe'"" /sc onlogon /rl highest /f"; Flags: runhidden waituntilterminated
+; Launch via Task right after install (no UAC)
+Filename: "schtasks"; Parameters: "/run /tn ""CyberClean_AutoAdmin"""; Description: "Launch CyberClean"; Flags: nowait postinstall skipifsilent runhidden
+
+[UninstallRun]
+; Remove the hidden Task on uninstall
+Filename: "schtasks"; Parameters: "/delete /tn ""CyberClean_AutoAdmin"" /f"; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
-; Clean up app data on uninstall
 Type: filesandordirs; Name: "{localappdata}\CyberClean"
 Type: filesandordirs; Name: "{userappdata}\CyberClean"
