@@ -1,2 +1,8 @@
 dist/
 build/
+
+$null
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
