@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CyberClean v2.0 - Build Script
+CyberClean v2.1.0 - Build Script
 Packages the app into distributable formats.
 
 Usage:
@@ -18,7 +18,7 @@ OS      = platform.system()
 ROOT    = Path(__file__).parent
 DIST    = ROOT / 'dist'
 BUILD   = ROOT / 'build'
-VERSION = '2.0.0'
+VERSION = '2.1.0'
 APP     = 'CyberClean'
 AUTHOR  = 'vuphitung'
 URL     = f'https://github.com/{AUTHOR}/{APP}'

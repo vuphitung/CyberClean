@@ -1,12 +1,12 @@
 #!/bin/bash
-# CyberClean v2.0 — Installer
+# CyberClean v2.1.0 — Installer
 # Usage:
 #   Install:   curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 #   Uninstall: sudo cyberclean --uninstall
 
 set -e
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 APP="CyberClean"
 REPO="vuphitung/CyberClean"
 TARGZ_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-linux-x86_64.tar.gz"

@@ -1,21 +1,12 @@
-<svg width="128" height="128" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <radialGradient id="eco-bg" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#0a1f14"/><stop offset="100%" stop-color="#061009"/></radialGradient>
-    <radialGradient id="eco-glow" cx="50%" cy="50%" r="55%"><stop offset="0%" stop-color="#40d080" stop-opacity=".3"/><stop offset="100%" stop-color="#40d080" stop-opacity="0"/></radialGradient>
-  </defs>
-  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#eco-bg)" stroke="#40d08030" stroke-width="1"/>
-  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#eco-glow)"/>
-  <path d="M36 52 C24 44 20 30 32 18 C42 26 48 40 36 52Z" fill="#40d080" opacity=".18" stroke="#40d080" stroke-width="1.2"/>
-  <path d="M36 52 C48 44 52 30 40 18" fill="none" stroke="#40d08060" stroke-width="1" stroke-dasharray="3 3"/>
-  <path d="M36 50 C34 44 31 36 32 22" stroke="#40d080" stroke-width=".8" opacity=".6" fill="none"/>
-  <path d="M36 46 C33 41 30 36 35 30" stroke="#40d080" stroke-width=".6" opacity=".4" fill="none"/>
-  <path d="M36 46 C39 41 42 36 37 30" stroke="#40d080" stroke-width=".6" opacity=".4" fill="none"/>
-  <circle cx="36" cy="5"  r="2" fill="#40d080" opacity=".7"/>
-  <circle cx="63" cy="20" r="2" fill="#40d080" opacity=".5"/>
-  <circle cx="63" cy="52" r="2" fill="#40d080" opacity=".5"/>
-  <circle cx="36" cy="67" r="2" fill="#40d080" opacity=".7"/>
-  <circle cx="9"  cy="52" r="2" fill="#40d080" opacity=".5"/>
-  <circle cx="9"  cy="20" r="2" fill="#40d080" opacity=".5"/>
-  <circle cx="36" cy="18" r="2.5" fill="#40d080" opacity=".9"/>
-  <circle cx="36" cy="18" r="4.5" fill="#40d080" opacity=".18"/>
+<svg width="128" height="128" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Leaf shape -->
+  <path d="M24 6 C24 6 40 8 40 26 C40 34 34 40 24 42 C24 42 14 38 12 28 C10 18 16 8 24 6 Z"
+    fill="#00e67614" stroke="#00e676" stroke-width="1.7" stroke-linejoin="round"/>
+  <!-- Center vein -->
+  <path d="M24 40 C24 40 22 30 22 22 C22 14 24 8 24 8"
+    stroke="#00e676" stroke-width="1.4" stroke-linecap="round" fill="none" opacity=".7"/>
+  <!-- Side veins -->
+  <path d="M22 28 C18 25 14 24 12 24" stroke="#00e676" stroke-width="1.2" stroke-linecap="round" fill="none" opacity=".5"/>
+  <path d="M22 22 C19 18 16 16 14 16" stroke="#00e676" stroke-width="1.2" stroke-linecap="round" fill="none" opacity=".5"/>
+  <path d="M23 17 C26 13 30 11 33 11" stroke="#00e676" stroke-width="1.2" stroke-linecap="round" fill="none" opacity=".5"/>
 </svg>

@@ -1,20 +1,13 @@
-<svg width="128" height="128" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <radialGradient id="game-bg" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#1a0e2e"/><stop offset="100%" stop-color="#0c0618"/></radialGradient>
-    <radialGradient id="game-glow" cx="50%" cy="45%" r="55%"><stop offset="0%" stop-color="#c060f0" stop-opacity=".35"/><stop offset="100%" stop-color="#c060f0" stop-opacity="0"/></radialGradient>
-  </defs>
-  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#game-bg)" stroke="#c060f030" stroke-width="1"/>
-  <polygon points="36,4 64,20 64,52 36,68 8,52 8,20" fill="url(#game-glow)"/>
-  <rect x="16" y="26" width="40" height="22" rx="7" fill="#1a0930" stroke="#c060f0" stroke-width="1.2"/>
-  <rect x="21" y="34" width="8" height="2.5" rx="1" fill="#c060f0" opacity=".9"/>
-  <rect x="23.75" y="31.5" width="2.5" height="7.5" rx="1" fill="#c060f0" opacity=".9"/>
-  <circle cx="47" cy="33" r="1.8" fill="#00c8e0" opacity=".85"/>
-  <circle cx="51" cy="36" r="1.8" fill="#f03050" opacity=".85"/>
-  <circle cx="47" cy="39" r="1.8" fill="#f0c040" opacity=".85"/>
-  <circle cx="43" cy="36" r="1.8" fill="#40d080" opacity=".85"/>
-  <polygon points="36,32.5 38.5,36.5 33.5,36.5" fill="#c060f0" opacity=".9"/>
-  <rect x="18" y="22.5" width="10" height="4" rx="2" fill="#c060f0" opacity=".6"/>
-  <rect x="44" y="22.5" width="10" height="4" rx="2" fill="#c060f0" opacity=".6"/>
-  <line x1="8" y1="36" x2="16" y2="36" stroke="#c060f040" stroke-width=".8"/>
-  <line x1="56" y1="36" x2="64" y2="36" stroke="#c060f040" stroke-width=".8"/>
+<svg width="128" height="128" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Controller body -->
+  <path d="M10 20 C10 16 14 13 18 13 L30 13 C34 13 38 16 38 20 L40 30 C41 35 38 38 35 38 C33 38 31 36 30 34 L18 34 C17 36 15 38 13 38 C10 38 7 35 8 30 Z"
+    fill="#d050ff14" stroke="#d050ff" stroke-width="1.7" stroke-linejoin="round"/>
+  <!-- D-pad left side: + -->
+  <rect x="13" y="21" width="8"  height="2.5" rx="1.2" fill="#d050ff"/>
+  <rect x="16" y="19" width="2.5" height="8"  rx="1.2" fill="#d050ff"/>
+  <!-- Right side: ABXY circles -->
+  <circle cx="31" cy="20" r="2" fill="#d050ff" opacity=".9"/>
+  <circle cx="35" cy="24" r="2" fill="#d050ff" opacity=".6"/>
+  <circle cx="27" cy="24" r="2" fill="#d050ff" opacity=".6"/>
+  <circle cx="31" cy="28" r="2" fill="#d050ff" opacity=".7"/>
 </svg>

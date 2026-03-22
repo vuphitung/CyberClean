@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\WIN10\\Desktop\\CyberClean\\assets\\logo.ico'],
+    icon=['C:\\CyberClean\\assets\\logo.ico'],
 )

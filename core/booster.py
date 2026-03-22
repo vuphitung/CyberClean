@@ -321,6 +321,9 @@ def kill_bloat(log):
         "steam", "steamwebhelper", "epicgameslauncher", "riotclientux",
         "battle.net", "upc", "origin", "vgc", "leagueclient", "riotclientservices",
         "gog galaxy", "bethesdanetlauncher", "ea app", "playnite",
+        # Game clients & anti-cheat — NEVER kill (causes crash/ban)
+        "robloxplayerbeta", "roblox", "league of legends",
+        "valorant-win64-shipping", "vgctray",
     }
 
     # FIX #2: psutil.cpu_percent(interval=0) ALWAYS returns 0.0 on the FIRST call per process
@@ -730,3 +733,146 @@ def eco_mode_off(saved, log):
         try: psutil.Process(pid).nice(orig); restored += 1
         except: pass
     log(f"ECO MODE OFF -- {restored} processes restored", "ok")
+
+
+# ══════════════════════════════════════════════════════════════
+# SMART BOOST — Tự động nhận diện cấu hình, tối ưu phù hợp
+# ══════════════════════════════════════════════════════════════
+
+def detect_pc_tier() -> str:
+    """
+    Phân loại máy tính dựa trên RAM và số nhân CPU thật (physical cores).
+    Returns: 'high' | 'mid' | 'low'
+    - high: RAM > 16GB VÀ CPU > 6 nhân  → Chiến thần / Streamer
+    - mid:  RAM > 8GB  VÀ CPU > 4 nhân  → Máy ổn
+    - low:  Còn lại                      → Khoai tây
+    """
+    if not HAS_PSUTIL:
+        return 'mid'
+    try:
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        cores  = psutil.cpu_count(logical=False) or 2
+        if ram_gb > 16 and cores > 6:
+            return 'high'
+        elif ram_gb > 8 and cores > 4:
+            return 'mid'
+        else:
+            return 'low'
+    except:
+        return 'mid'
+
+
+def _tweak_windows_visuals(low_end: bool, log):
+    """
+    Tắt/bật hiệu ứng trong suốt (Transparency/Acrylic) của Windows.
+    - Chỉ tắt Transparency — KHÔNG tắt ClearType, font smoothing, shadow chuột.
+    - Cần khởi động lại Explorer để áp dụng hoàn toàn (nhưng app vẫn nhận ngay).
+    - Lưu giá trị gốc để restore khi tắt Game Mode.
+    """
+    if not IS_WINDOWS:
+        return None
+    try:
+        import winreg
+        key_path = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+        # Lưu giá trị gốc trước
+        try:
+            orig_val, _ = winreg.QueryValueEx(key, 'EnableTransparency')
+        except Exception:
+            orig_val = 1  # mặc định Windows = bật trong suốt
+        # Set giá trị mới
+        new_val = 0 if low_end else 1
+        winreg.SetValueEx(key, 'EnableTransparency', 0, winreg.REG_DWORD, new_val)
+        winreg.CloseKey(key)
+        if low_end:
+            log('  + Windows transparency disabled (saves GPU)', 'ok')
+        else:
+            log('  + Windows transparency kept (high-end machine)', 'ok')
+        return orig_val  # trả về để restore sau
+    except Exception as e:
+        log(f'  ~ Transparency tweak skipped: {e}', 'warn')
+        return None
+
+
+def _restore_windows_visuals(orig_val, log):
+    """Khôi phục giá trị Transparency về trạng thái ban đầu."""
+    if not IS_WINDOWS or orig_val is None:
+        return
+    try:
+        import winreg
+        key_path = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, 'EnableTransparency', 0, winreg.REG_DWORD, int(orig_val))
+        winreg.CloseKey(key)
+        log('  + Windows transparency restored', 'ok')
+    except Exception as e:
+        log(f'  ~ Transparency restore skipped: {e}', 'warn')
+
+
+def smart_boost_on(log) -> dict:
+    """
+    Smart Boost — tự phân tích cấu hình rồi áp chiến lược phù hợp.
+
+    HIGH-END (RAM>16GB, CPU>6 cores):
+      → Giữ nguyên đồ họa Windows
+      → Game Mode đầy đủ (CPU jail 3 tầng + power plan)
+      → Eco Mode KHÔNG bật (Discord/Spotify cần chạy tốt cho streamer)
+
+    MID (RAM>8GB, CPU>4 cores):
+      → Giữ nguyên đồ họa Windows
+      → Game Mode đầy đủ
+      → Eco Mode nhẹ (BELOW_NORMAL cho app nền)
+
+    LOW (còn lại):
+      → Tắt Windows Transparency (nhường GPU)
+      → Game Mode đầy đủ
+      → Eco Mode mạnh + Free RAM ngay
+
+    Returns dict saved state để smart_boost_off() restore.
+    """
+    tier = detect_pc_tier()
+    saved = {'tier': tier, 'game': {}, 'eco': {}, 'visuals_orig': None, 'freed_mb': 0}
+
+    tier_labels = {'high': '👑 HIGH-END — Streamer/Gaming rig', 'mid': '💪 MID — Solid machine', 'low': '🥔 LOW-END — Potato mode'}
+    log(f'Smart Boost ON  [{tier_labels.get(tier, tier)}]', 'head')
+
+    # Layer 1: Visual tweak (chỉ máy yếu)
+    if tier == 'low' and IS_WINDOWS:
+        saved['visuals_orig'] = _tweak_windows_visuals(low_end=True, log=log)
+
+    # Layer 2: Game Mode (tất cả tier)
+    saved['game'] = game_mode_on(log)
+
+    # Layer 3: Eco Mode (mid + low)
+    if tier in ('mid', 'low'):
+        saved['eco'] = eco_mode_on(log)
+
+    # Layer 4: Free RAM ngay (chỉ máy yếu)
+    if tier == 'low':
+        result = free_ram(log)
+        saved['freed_mb'] = getattr(result, 'mb_freed', 0)
+
+    log(f'✓ Smart Boost ON [{tier}] — all layers applied', 'ok')
+    return saved
+
+
+def smart_boost_off(saved: dict, log):
+    """Restore tất cả về trạng thái ban đầu."""
+    if not saved:
+        return
+    tier = saved.get('tier', 'mid')
+    log(f'Smart Boost OFF — restoring [{tier}]...', 'head')
+
+    # Restore eco mode
+    if saved.get('eco'):
+        eco_mode_off(saved['eco'], log)
+
+    # Restore game mode
+    if saved.get('game') is not None:
+        game_mode_off(saved['game'], log)
+
+    # Restore visuals
+    if saved.get('visuals_orig') is not None:
+        _restore_windows_visuals(saved['visuals_orig'], log)
+
+    log('✓ Smart Boost OFF — system restored', 'ok')
