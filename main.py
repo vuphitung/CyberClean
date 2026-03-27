@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from urllib.request import urlopen
 from urllib.error import URLError
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland*=false"
 
 # ── Dependency check ──────────────────────────────────────────
 _missing = []
@@ -2981,7 +2982,7 @@ class CyberCleanApp(QMainWindow):
                 )
 
     GITHUB_LATEST = 'https://api.github.com/repos/vuphitung/CyberClean/releases/latest'
-    CURRENT_VER   = '2.1.0'
+    CURRENT_VER   = '2.2.0'
 
     def _check_update_async(self):
         threading.Thread(target=self._fetch_update, daemon=True).start()
