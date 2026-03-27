@@ -1,8 +1,10 @@
 """
-CyberClean v2.0 — System Info (psutil-based, cross-platform)
+CyberClean v2.2 — System Info (psutil-based, cross-platform)
 Provides CPU, RAM, Disk, Temp, Network, Processes
+FIX: _temp_cache and _disk_cache are now protected by threading.Lock
+     to prevent race conditions when GUI timer and user refresh hit simultaneously.
 """
-import time, platform
+import time, platform, threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -56,8 +58,10 @@ def fmt_size(n: int) -> str:
 
 _OS = platform.system()
 _temp_cache: tuple = (None, {}, 0.0)   # (max_temp, all_temps, timestamp)
+_temp_lock  = threading.Lock()          # FIX: protects _temp_cache from race conditions
 _TEMP_CACHE_TTL = 60.0   # seconds — PowerShell/WMI is expensive, don't call every 4s
 _disk_cache: tuple = ([], 0.0)          # (disks, timestamp)
+_disk_lock  = threading.Lock()          # FIX: protects _disk_cache from race conditions
 _DISK_CACHE_TTL = 60.0  # seconds — disk_partitions() wakes sleeping/network drives!
 
 def _read_temperature():
@@ -74,11 +78,13 @@ def _read_temperature():
 
     LHM cache TTL = 4s (fast kernel read, safe to call often)
     WMI/PowerShell cache TTL = 60s (expensive, avoid calling every 4s)
+    FIX: _temp_lock prevents race condition when GUI timer + user refresh run concurrently.
     """
     global _temp_cache
-    max_cached, all_cached, ts = _temp_cache
-    if time.time() - ts < _TEMP_CACHE_TTL and (all_cached or max_cached is not None):
-        return all_cached, max_cached
+    with _temp_lock:
+        max_cached, all_cached, ts = _temp_cache
+        if time.time() - ts < _TEMP_CACHE_TTL and (all_cached or max_cached is not None):
+            return all_cached, max_cached
     all_temps = {}
     max_temp  = None
 
@@ -136,7 +142,8 @@ def _read_temperature():
                 if all_temps:
                     max_temp = max(all_temps.values())
                     # LHM reads fast — use shorter cache so sparkline updates smoothly
-                    _temp_cache = (max_temp, all_temps, time.time())
+                    with _temp_lock:
+                        _temp_cache = (max_temp, all_temps, time.time())
                     return all_temps, max_temp
         except ImportError:
             pass   # pythonnet not installed — fall through to WMI chain
@@ -259,7 +266,8 @@ def _read_temperature():
         except Exception:
             pass
 
-    _temp_cache = (max_temp, all_temps, time.time())
+    with _temp_lock:
+        _temp_cache = (max_temp, all_temps, time.time())
     return all_temps, max_temp   # None → UI shows "–°C"
 
 
@@ -288,7 +296,8 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     #   disk_partitions() cached 60s (wakes sleeping HDDs — expensive)
     #   disk_usage()      called every tick (fast, no HDD wakeup)
     global _disk_cache
-    _cached_parts, _part_ts = _disk_cache
+    with _disk_lock:
+        _cached_parts, _part_ts = _disk_cache
     now_ts = time.time()
     IGNORE_FS = {'tmpfs', 'squashfs', 'devtmpfs', 'overlay', 'aufs'}
     if not _cached_parts or (now_ts - _part_ts) > _DISK_CACHE_TTL:
@@ -299,7 +308,8 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
             and 'loop' not in p.device
             and 'snap' not in p.mountpoint
         ]
-        _disk_cache = (_cached_parts, now_ts)
+        with _disk_lock:
+            _disk_cache = (_cached_parts, now_ts)
     fresh_disks = []
     for part in _cached_parts:
         try:

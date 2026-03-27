@@ -1,6 +1,7 @@
 """
-CyberClean v2.0 — OS Detection & Abstraction Layer
-Detects OS, distro, package manager, polkit agent, privilege status.
+CyberClean v2.2 — OS Detection & Abstraction Layer
+FIX: HAS_POLKIT no longer requires policy file (install.sh removed it).
+     Now only checks helper binary existence — pkexec fallback works correctly.
 """
 import os, sys, platform, shutil, subprocess
 from pathlib import Path
@@ -43,9 +44,13 @@ if IS_LINUX:
                 PKG_MANAGER = pm.split('-')[0]; break
 
 # ── Polkit ────────────────────────────────────────────────
+# BUG FIX: install.sh v2.1+ uses NOPASSWD sudoers rule only — no policy file.
+# Old code checked POLKIT_POLICY which doesn't exist → HAS_POLKIT always False
+# → pkexec fallback in linux_cleaner.py never triggered.
+# Fix: only require the helper binary to exist.
 POLKIT_HELPER  = '/usr/local/bin/cyber-clean-helper'
 POLKIT_POLICY  = '/usr/share/polkit-1/actions/com.nc2077.cyberclean.policy'
-HAS_POLKIT     = IS_LINUX and Path(POLKIT_HELPER).exists() and Path(POLKIT_POLICY).exists()
+HAS_POLKIT     = IS_LINUX and Path(POLKIT_HELPER).exists()   # <-- FIXED: removed policy check
 SUDO           = '' if IS_ROOT else 'sudo '
 
 def _polkit_agent_running() -> bool:
@@ -80,7 +85,14 @@ def request_windows_admin():
 
 # ── Optional features ─────────────────────────────────────
 HAS_FLATPAK    = IS_LINUX and bool(shutil.which('flatpak'))
-HAS_DOCKER     = bool(shutil.which('docker') or shutil.which('podman'))
+# FIX: Split Docker and Podman into separate flags so linux_cleaner._docker()
+# can use the same logic as os_detect — previously HAS_DOCKER was True for either,
+# but the tool selection in _docker() used the opposite priority order (podman first).
+# Now both use: prefer podman if available, fall back to docker.
+HAS_PODMAN     = IS_LINUX and bool(shutil.which('podman'))
+HAS_DOCKER_BIN = IS_LINUX and bool(shutil.which('docker'))
+HAS_DOCKER     = HAS_PODMAN or HAS_DOCKER_BIN   # backward compat — True if either installed
+CONTAINER_TOOL = 'podman' if HAS_PODMAN else ('docker' if HAS_DOCKER_BIN else '')
 HAS_YAY        = IS_LINUX and bool(shutil.which('yay'))
 HAS_PARU       = IS_LINUX and bool(shutil.which('paru'))
 

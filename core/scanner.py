@@ -1,10 +1,13 @@
 """
-CyberClean v2.0 — Security Scanner
-Quét malware, suspicious files, SUID/SGID, world-writable, cron backdoors.
-Cross-platform: Linux + Windows
-KHÔNG tự xóa — chỉ báo cáo để người dùng quyết định.
+CyberClean v2.2 — Security Scanner
+FIX #3: rglob → os.walk(followlinks=False) to prevent infinite loops
+        from circular symlinks (e.g. ~/.config/app -> /tmp -> ~/.config).
+        rglob skips symlinked *files* but still DESCENDS INTO symlinked *directories*.
+        os.walk(followlinks=False) stops at the symlink directory boundary entirely.
+FIX (cron): /var/spool/cron usually requires root — now logs "permission denied"
+            instead of silently skipping, so user knows scan was partial.
 """
-import os, subprocess, hashlib, platform, stat, re
+import os, subprocess, platform, stat, re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Callable
@@ -13,15 +16,14 @@ OS     = platform.system()
 HELPER = '/usr/local/bin/cyber-clean-helper'
 
 def _h(action: str, target: str = '') -> str:
-    """Build sudo -n helper command. Never prompts password."""
     if target:
         return f'sudo -n {HELPER} {action} "{target}"'
     return f'sudo -n {HELPER} {action}'
 
 @dataclass
 class ScanResult:
-    severity:  str       # 'critical' | 'high' | 'medium' | 'info'
-    category:  str       # 'malware' | 'suspicious' | 'suid' | 'writable' | 'cron' | 'network'
+    severity:  str
+    category:  str
     path:      str
     detail:    str
     can_fix:   bool = False
@@ -29,28 +31,22 @@ class ScanResult:
 
 def run(cmd, timeout=10):
     try:
-        # 0x08000000 = CREATE_NO_WINDOW — hides CMD flash on Windows
         no_win = 0x08000000 if OS == 'Windows' else 0
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                            timeout=timeout, creationflags=no_win)
         return r.stdout.strip()
     except: return ''
 
-# ── Suspicious patterns ───────────────────────────────────────
 SUSPICIOUS_SCRIPTS = [
-    # Reverse shells
     (r'bash\s+-i\s+>&\s*/dev/tcp',          'Reverse bash shell'),
     (r'nc\s+-e\s+/bin/(bash|sh)',            'Netcat reverse shell'),
     (r'python.*socket.*connect.*subprocess', 'Python reverse shell'),
-    # Credential harvesting
     (r'curl\s+.*\|\s*(bash|sh)',             'Remote code execution via curl|bash'),
     (r'wget\s+.*-O-\s*\|',                  'Remote code execution via wget|pipe'),
     (r'eval\s*\(\s*base64_decode',           'PHP base64 eval (webshell pattern)'),
     (r'eval\s*\(\s*gzinflate',               'PHP obfuscated eval (webshell)'),
-    # Miners
     (r'(xmrig|minerd|cpuminer)',             'Crypto miner binary/reference'),
     (r'stratum\+tcp://',                     'Mining pool connection string'),
-    # Rootkit indicators
     (r'LD_PRELOAD.*=',                       'LD_PRELOAD manipulation'),
     (r'/proc/\d+/mem',                       'Direct process memory access'),
 ]
@@ -67,6 +63,31 @@ SCAN_DIRS_WINDOWS = [
 
 KNOWN_MINERS = {'xmrig','xmrig-notls','minerd','cpuminer-multi','nbminer',
                 'teamredminer','lolminer','gminer','t-rex','nanominer'}
+
+
+def _safe_walk(root: Path):
+    """
+    FIX #3: Walk directory tree WITHOUT following symlinks.
+    os.walk(followlinks=False) stops at symlinked directory boundaries,
+    preventing infinite loops from circular symlinks like:
+      ~/.config/app -> /tmp -> ~/.config  (creates infinite recursion with rglob)
+    Yields Path objects for regular files only.
+    """
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+            # Remove symlinked subdirs from dirnames to prevent descent
+            dirnames[:] = [
+                d for d in dirnames
+                if not os.path.islink(os.path.join(dirpath, d))
+            ]
+            for fname in filenames:
+                fpath = Path(dirpath) / fname
+                if fpath.is_symlink():
+                    continue   # skip symlinked files too
+                yield fpath
+    except (PermissionError, OSError):
+        pass
+
 
 class SecurityScanner:
 
@@ -96,7 +117,6 @@ class SecurityScanner:
             self._scan_network_windows(log_cb)
             self._scan_hosts_file(log_cb)
 
-        # Summary
         crits = [r for r in self.results if r.severity == 'critical']
         highs = [r for r in self.results if r.severity == 'high']
         log_cb('', 'info')
@@ -123,7 +143,6 @@ class SecurityScanner:
                     exe  = p.info['exe'] or ''
                     cmd  = ' '.join(p.info['cmdline'] or []).lower()
 
-                    # Known miners
                     if name in KNOWN_MINERS:
                         r = ScanResult('critical','malware', exe or name,
                             f'Crypto miner running: {name} (PID {p.pid})',
@@ -132,8 +151,6 @@ class SecurityScanner:
                         log_cb(f'  ⛔  MINER: {name} PID={p.pid}', 'err')
                         continue
 
-                    # Process running from /tmp or /dev/shm (suspicious)
-                    # Whitelist: AppImage mounts into /tmp/.mount_xxx — totally normal
                     is_appimage_mount = exe and re.search(r'/tmp/\.mount_', exe)
                     if exe and any(exe.startswith(d) for d in ['/tmp','/dev/shm','/var/tmp']) and not is_appimage_mount:
                         r = ScanResult('high','suspicious', exe,
@@ -142,7 +159,6 @@ class SecurityScanner:
                         self.results.append(r)
                         log_cb(f'  ⚠  Suspicious exec from tmp: {exe}', 'warn')
 
-                    # Reverse shell patterns in cmdline
                     for pattern, desc in SUSPICIOUS_SCRIPTS:
                         if re.search(pattern, cmd, re.I):
                             r = ScanResult('critical','malware', exe or name,
@@ -151,7 +167,8 @@ class SecurityScanner:
                             self.results.append(r)
                             log_cb(f'  ⛔  {desc}: PID {p.pid}', 'err')
                             break
-                except: pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass   # process exited during scan iteration
         except ImportError:
             log_cb('  ~ psutil not available — process scan skipped', 'dim')
 
@@ -163,28 +180,20 @@ class SecurityScanner:
     def _scan_suid_sgid(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Scanning SUID/SGID binaries...', 'info')
-        # Known legitimate SUID binaries
         known_suid = {
-            # Core auth & privilege tools — always legitimate
             '/usr/bin/sudo', '/usr/bin/su', '/usr/bin/passwd', '/usr/bin/newgrp',
+            '/usr/bin/suexec',
             '/usr/bin/chsh', '/usr/bin/chfn', '/usr/bin/gpasswd',
             '/usr/bin/pkexec', '/usr/lib/polkit-1/polkit-agent-helper-1',
-            # Network tools
             '/bin/ping', '/usr/bin/ping', '/usr/bin/traceroute',
-            # Disk/mount tools
             '/usr/bin/mount', '/usr/bin/umount', '/usr/sbin/unix_chkpwd',
-            # Display/screen lock
             '/usr/bin/Xorg', '/usr/lib/xorg/Xorg',
             '/usr/lib/xorg-server/Xorg.wrap',
-            # Systemd helpers
             '/usr/lib/systemd/systemd-logind',
             '/usr/lib/systemd/systemd-user-sessions',
-            # Package manager helpers
             '/usr/bin/fusermount', '/usr/bin/fusermount3',
             '/usr/lib/dbus-1.0/dbus-daemon-launch-helper',
         }
-        # FIX #4: removed /home — NFS/network mounts can hang 15s+ with no progress UI.
-        # /home SUID binaries are extremely rare; suspicious-files scan covers ~/.local/bin.
         out = run('find /usr /bin /sbin /tmp -perm /4000 -type f 2>/dev/null', timeout=15)
         found = 0
         for line in out.splitlines():
@@ -220,23 +229,35 @@ class SecurityScanner:
         log_cb('', 'info')
         log_cb('◆ Scanning cron jobs for backdoors...', 'info')
         cron_dirs = ['/etc/cron.d','/etc/cron.daily','/etc/cron.hourly',
-                     '/var/spool/cron',str(Path.home()/'.local/share/cron')]
+                     '/var/spool/cron', str(Path.home()/'.local/share/cron')]
         found = 0
+        partial = False
+
         for d in cron_dirs:
             p = Path(d)
-            if not p.exists(): continue
-            for f in p.rglob('*'):
-                if not f.is_file(): continue
-                try:
-                    txt = f.read_text(errors='ignore')
-                    for pattern, desc in SUSPICIOUS_SCRIPTS:
-                        if re.search(pattern, txt, re.I):
-                            self.results.append(ScanResult('critical','cron', str(f),
-                                f'Suspicious cron: {desc} in {f.name}'))
-                            log_cb(f'  ⛔  Cron backdoor: {desc} in {f}', 'err')
-                            found += 1
-                            break
-                except: pass
+            if not p.exists():
+                continue
+            try:
+                # FIX #3: use _safe_walk instead of rglob — stops at symlinked dirs
+                for f in _safe_walk(p):
+                    try:
+                        txt = f.read_text(errors='ignore')
+                        for pattern, desc in SUSPICIOUS_SCRIPTS:
+                            if re.search(pattern, txt, re.I):
+                                self.results.append(ScanResult('critical','cron', str(f),
+                                    f'Suspicious cron: {desc} in {f.name}'))
+                                log_cb(f'  ⛔  Cron backdoor: {desc} in {f}', 'err')
+                                found += 1
+                                break
+                    except (PermissionError, OSError):
+                        # FIX: log partial scan instead of silently skipping
+                        log_cb(f'  ~ {f.name}: permission denied — run as root for full scan', 'dim')
+                        partial = True
+            except PermissionError:
+                # Directory itself not readable (e.g. /var/spool/cron without root)
+                log_cb(f'  ~ {d}: permission denied — run as root for full cron scan', 'dim')
+                partial = True
+
         # User crontab
         crontab = run('crontab -l 2>/dev/null')
         for pattern, desc in SUSPICIOUS_SCRIPTS:
@@ -245,8 +266,12 @@ class SecurityScanner:
                     f'Suspicious user crontab: {desc}'))
                 log_cb(f'  ⛔  Cron backdoor in user crontab: {desc}', 'err')
                 found += 1
+
         if found == 0:
-            log_cb('  ✓  No cron backdoors found', 'ok')
+            if partial:
+                log_cb('  ✓  No backdoors found in accessible cron dirs (partial scan)', 'ok')
+            else:
+                log_cb('  ✓  No cron backdoors found', 'ok')
 
     # ── Suspicious files ─────────────────────────────────
     def _scan_suspicious_files(self, log_cb, dirs):
@@ -257,29 +282,23 @@ class SecurityScanner:
             p = Path(d)
             if not p.exists(): continue
             try:
-                # FIX #4: follow_symlinks=False prevents infinite loops from circular symlinks
-                # (e.g. ~/.config/app -> /tmp -> ~/.config creates an infinite rglob cycle)
-                for f in p.rglob('*'):
-                    if f.is_symlink(): continue   # never follow symlinks during scan
-                    if not f.is_file(): continue
-                    # Skip black-hole dirs — virus never hides here, but HDD dies scanning them
+                # FIX #3: use _safe_walk instead of rglob
+                # rglob with f.is_symlink() guard skips symlinked files but STILL
+                # descends INTO symlinked directories → infinite loop on circular symlinks.
+                # os.walk(followlinks=False) stops at the symlinked directory boundary.
+                for f in _safe_walk(p):
                     _fstr = str(f).lower()
                     if any(skip in _fstr for skip in (
                         "node_modules", "\\cache", "/cache",
-                        # NOTE: appdata\local\temp intentionally NOT skipped —
-                        # 90% of Windows malware hides here (.bat/.vbs/.ps1)
                         ".git", "__pycache__",
-                        # FIX #9: was "\\tmp\\" and "/tmp/" — these matched /tmp/evil.sh
-                        # because "/tmp/" IS in "/tmp/evil.sh". Now only skip subdirs of /tmp,
-                        # not files directly in /tmp (that's where malware hides!).
                         "\\tmp\\subdir", "/tmp/subdir",
                         ".venv", "site-packages",
                     )): continue
-                    if f.stat().st_size > 50_000_000: continue  # skip large files
                     try:
-                        # Check extension
+                        if f.stat().st_size > 50_000_000: continue
+                    except: continue
+                    try:
                         if f.suffix.lower() in DANGEROUS_EXTENSIONS:
-                            # Scan content on ALL platforms — .bat/.ps1/.vbs are Windows-only threats
                             try:
                                 txt = f.read_text(errors='ignore')[:4096]
                                 for pattern, desc in SUSPICIOUS_SCRIPTS:
@@ -293,8 +312,8 @@ class SecurityScanner:
                                         log_cb(f'  ⛔  Malicious script: {f.name} — {desc}', 'err')
                                         found += 1
                                         break
-                            except: pass
-                            # Linux-only: flag executable files in /tmp
+                            except (OSError, PermissionError, UnicodeDecodeError):
+                                pass   # binary file or no read permission — skip
                             if OS == 'Linux' and str(f).startswith('/tmp') and (f.stat().st_mode & stat.S_IXUSR):
                                 is_pyinstaller = re.search(r'/tmp/_MEI[^/]+/', str(f))
                                 is_appimage    = re.search(r'/tmp/\.mount_', str(f))
@@ -303,8 +322,10 @@ class SecurityScanner:
                                         f'Executable file in /tmp: {f.name}'))
                                     log_cb(f'  ~  Exec in /tmp: {f.name}', 'warn')
                                     found += 1
-                    except: pass
-            except: pass
+                    except (OSError, PermissionError):
+                        pass   # file deleted or no stat permission between walk and stat
+            except (OSError, PermissionError):
+                pass   # scan root dir inaccessible
         if found == 0:
             log_cb('  ✓  No suspicious files found', 'ok')
 
@@ -374,14 +395,35 @@ class SecurityScanner:
             return
         lines = [l.strip() for l in ak.read_text(errors='ignore').splitlines()
                  if l.strip() and not l.startswith('#')]
-        if lines:
-            self.results.append(ScanResult('medium','suspicious',str(ak),
-                f'{len(lines)} SSH authorized key(s) — review if unexpected'))
-            log_cb(f'  ~  {len(lines)} SSH authorized key(s) in ~/.ssh/authorized_keys', 'warn')
-            for i, line in enumerate(lines[:3]):
-                log_cb(f'     key {i+1}: ...{line[-40:]}', 'dim')
-        else:
+        if not lines:
             log_cb('  ✓  No SSH authorized keys', 'ok')
+            return
+
+        # FIX: Having authorized_keys is NORMAL for any developer (GitHub, servers).
+        # Only flag genuinely suspicious patterns — command= overrides (can force
+        # arbitrary execution), and lines with no key-type prefix (malformed/obfuscated).
+        KNOWN_KEY_TYPES = ('ssh-rsa', 'ssh-ed25519', 'ecdsa-sha2-nistp256',
+                           'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
+                           'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com')
+        suspicious = []
+        for line in lines:
+            # command= option before the key type = forced command execution (unusual on personal machines)
+            if re.match(r'command\s*=', line, re.I):
+                suspicious.append(('high', f'Forced-command key (remote code exec risk): ...{line[-50:]}'))
+            # Line doesn't start with a known key type or an option keyword
+            elif not any(line.startswith(kt) for kt in KNOWN_KEY_TYPES) and \
+                 not re.match(r'(no-|from=|environment=|permitopen=|restrict)', line, re.I):
+                suspicious.append(('medium', f'Unrecognised key format (may be obfuscated): ...{line[-50:]}'))
+
+        # Always log a neutral info line so user knows the scan ran
+        log_cb(f'  ✓  {len(lines)} SSH authorized key(s) found — looks normal', 'ok')
+        for i, line in enumerate(lines[:3]):
+            log_cb(f'     key {i+1}: ...{line[-40:]}', 'dim')
+
+        for severity, detail in suspicious:
+            self.results.append(ScanResult(severity, 'suspicious', str(ak), detail))
+            level = 'err' if severity == 'high' else 'warn'
+            log_cb(f'  {"⛔" if severity == "high" else "⚠"}  {detail}', level)
 
     # ── /etc/hosts tampering ─────────────────────────────
     def _scan_hosts_file(self, log_cb):
@@ -390,7 +432,6 @@ class SecurityScanner:
         if OS == 'Linux':
             hosts_path = Path('/etc/hosts')
         else:
-            # Use WINDIR env var — handles installs on D:\ or E:\ drives
             windir = os.environ.get('WINDIR', 'C:/Windows')
             hosts_path = Path(f'{windir}/System32/drivers/etc/hosts')
         if not hosts_path.exists():
@@ -404,7 +445,7 @@ class SecurityScanner:
             parts = line.split()
             if len(parts) < 2: continue
             ip, *domains = parts
-            if ip in ('127.0.0.1','::1','0.0.0.0'): continue  # localhost entries OK
+            if ip in ('127.0.0.1','::1','0.0.0.0'): continue
             for d in domains:
                 if any(sd in d for sd in suspicious_domains):
                     self.results.append(ScanResult('high','malware', str(hosts_path),
@@ -447,7 +488,8 @@ class SecurityScanner:
                             i += 1
                         except OSError: break
                     winreg.CloseKey(key)
-                except: pass
+                except (OSError, PermissionError):
+                    pass   # registry key inaccessible (e.g. 32/64-bit redirect)
             if found == 0:
                 log_cb('  ✓  No suspicious autoruns', 'ok')
         except ImportError:

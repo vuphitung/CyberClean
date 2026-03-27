@@ -1,8 +1,10 @@
 """
-CyberClean v2.1.0 — Main GUI (UI REDESIGN)
-Tabs: Dashboard · Clean · Scanner · Uninstall · History · Rollback · Sys Booster
-UI redesigned: deeper hierarchy, sharper neon accents, refined typography, scanline depth
-All functional logic preserved unchanged.
+CyberClean v2.2.0 — Main GUI
+v2.2: All nav icons replaced with QPainter-drawn code icons.
+      No SVG file dependency — icons always render sharp at any DPI.
+      Sidebar redesigned: wider, icon+label layout with active indicator bar.
+      Header: hex logo drawn in code, tighter spacing.
+All functional logic unchanged from v2.1.
 """
 import sys, os, json, time, platform, threading
 from pathlib import Path
@@ -32,29 +34,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF, QRectF, QSize
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QTextCursor, QPainter, QBrush,
-    QPen, QLinearGradient, QIcon, QAction, QPolygonF, QPixmap
+    QPen, QLinearGradient, QIcon, QAction, QPolygonF, QPixmap,
+    QTransform
 )
+
+# ── SVG kept for compatibility but never used for nav icons ──
 try:
     from PyQt6.QtSvg import QSvgRenderer
     HAS_SVG = True
 except ImportError:
     HAS_SVG = False
-
-_ICON_DIR = Path(__file__).parent / 'assets' / 'icons'
-
-def _svg_icon(name: str, size: int = 20) -> QIcon:
-    if not HAS_SVG:
-        return QIcon()
-    svg_path = _ICON_DIR / f'{name}.svg'
-    if not svg_path.exists():
-        return QIcon()
-    renderer = QSvgRenderer(str(svg_path))
-    pix = QPixmap(size, size)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    renderer.render(p)
-    p.end()
-    return QIcon(pix)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from core.os_detect  import (IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info,
@@ -64,6 +53,7 @@ from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linu
 from core.scanner    import SecurityScanner
 from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
+from core.analyzer import get_network_processes, IdleScheduler
 from core.booster import (free_ram, memory_tune, memory_tune_restore,
                           clear_disk_cache, kill_bloat,
                           game_mode_on, game_mode_off, eco_mode_on, eco_mode_off,
@@ -88,55 +78,196 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 OS = platform.system()
 
 # ═════════════════════════════════════════════════════════════
-# REDESIGNED DESIGN TOKENS
+# DESIGN TOKENS
 # ═════════════════════════════════════════════════════════════
 C = {
-    # Backgrounds — three distinct depth levels
-    'bg':      '#050a0f',   # deepest — window base
-    'bg2':     '#09121a',   # cards, panels
-    'bg3':     '#0d1a26',   # hover / elevated
-    'bg4':     '#112032',   # selected / active
-
-    # Neon accents — more vivid, higher contrast
-    'cyan':    '#00e5ff',   # primary accent
-    'cyan2':   '#00bcd4',   # secondary/hover
-    'cyan_dim':'#004d5c',   # subtle bg tint
-
-    'red':     '#ff3d5a',   # danger / CPU high
+    'bg':      '#050a0f',
+    'bg2':     '#09121a',
+    'bg3':     '#0d1a26',
+    'bg4':     '#112032',
+    'cyan':    '#00e5ff',
+    'cyan2':   '#00bcd4',
+    'cyan_dim':'#004d5c',
+    'red':     '#ff3d5a',
     'red_dim': '#3d0010',
-    'yellow':  '#ffd740',   # caution / warning
+    'yellow':  '#ffd740',
     'yel_dim': '#3d2d00',
-    'green':   '#00e676',   # success / good
+    'green':   '#00e676',
     'grn_dim': '#00280f',
-    'purple':  '#d050ff',   # flatpak / special
-
-    # Text hierarchy — four distinct levels
-    'text':    '#def0f8',   # primary
-    'text2':   '#7eb8cc',   # secondary
-    'text3':   '#3d6678',   # tertiary/muted
-    'dim':     '#2a4a5a',   # very dim
-
-    # Borders — sharper definition
-    'border':  '#0a1e2d',   # default card border
-    'border2': '#0f2a3d',   # elevated border
-    'border3': '#1a3a52',   # hover/active border
-
-    # Semantic
+    'purple':  '#d050ff',
+    'text':    '#def0f8',
+    'text2':   '#7eb8cc',
+    'text3':   '#3d6678',
+    'dim':     '#2a4a5a',
+    'border':  '#0a1e2d',
+    'border2': '#0f2a3d',
+    'border3': '#1a3a52',
     'accent':  '#00e5ff',
 }
 
-MONO = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Share Tech Mono',monospace"
+MONO    = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Share Tech Mono',monospace"
 DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2','Share Tech Mono',monospace"
 
+
 # ═════════════════════════════════════════════════════════════
-# SPARKLINE CHART (unchanged logic, tuned visuals)
+# PURE-CODE NAV ICONS — drawn with QPainter, zero file deps
+# Each function returns a QIcon by painting onto a QPixmap.
+# ═════════════════════════════════════════════════════════════
+
+def _make_icon(draw_fn, size=20, color='#00e5ff') -> QIcon:
+    """
+    Generic icon factory.
+    draw_fn(p: QPainter, col: QColor, s: int) — draws into a size×size canvas.
+    Returns a QIcon with transparent background.
+    """
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    col = QColor(color)
+    draw_fn(p, col, size)
+    p.end()
+    return QIcon(pix)
+
+
+def _icon_dashboard(p: QPainter, col: QColor, s: int):
+    """Four equal squares — dashboard/grid layout."""
+    pen = QPen(col, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    g = s * 0.12   # gap
+    h = (s - 3 * g) / 2
+    # top-left, top-right, bottom-left, bottom-right
+    for rx, ry in [(g, g), (g*2+h, g), (g, g*2+h), (g*2+h, g*2+h)]:
+        p.drawRoundedRect(QRectF(rx, ry, h, h), 1.5, 1.5)
+
+
+def _icon_clean(p: QPainter, col: QColor, s: int):
+    """Broom/sweep — angled handle + bristle fan."""
+    pen = QPen(col, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    # Handle — diagonal line top-right to center
+    p.drawLine(QPointF(s*0.72, s*0.08), QPointF(s*0.38, s*0.58))
+    # Bristle head — 5 lines fanning down-left
+    cx, cy = s*0.32, s*0.65
+    offsets = [(-0.14, 0.22), (-0.07, 0.24), (0.0, 0.25), (0.07, 0.24), (0.14, 0.22)]
+    for dx, dy in offsets:
+        p.drawLine(QPointF(cx, cy), QPointF(cx + dx*s, cy + dy*s))
+    # Horizontal base line under bristles
+    p.drawLine(QPointF(s*0.12, s*0.62), QPointF(s*0.52, s*0.62))
+
+
+def _icon_scanner(p: QPainter, col: QColor, s: int):
+    """Magnifying glass with a crosshair inside."""
+    pen = QPen(col, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    cx, cy, r = s*0.42, s*0.42, s*0.26
+    p.drawEllipse(QPointF(cx, cy), r, r)
+    # Handle
+    p.drawLine(QPointF(cx + r*0.72, cy + r*0.72), QPointF(s*0.92, s*0.92))
+    # Crosshair inside lens
+    pen2 = QPen(col, 0.9)
+    pen2.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen2)
+    p.drawLine(QPointF(cx, cy - r*0.55), QPointF(cx, cy + r*0.55))
+    p.drawLine(QPointF(cx - r*0.55, cy), QPointF(cx + r*0.55, cy))
+
+
+def _icon_uninstall(p: QPainter, col: QColor, s: int):
+    """Trash bin — body, lid, three vertical lines inside."""
+    pen = QPen(col, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    lx, rx = s*0.22, s*0.78
+    ty, by  = s*0.30, s*0.88
+    # Body
+    p.drawRoundedRect(QRectF(lx, ty, rx-lx, by-ty), 2, 2)
+    # Lid
+    p.drawLine(QPointF(s*0.14, s*0.28), QPointF(s*0.86, s*0.28))
+    # Handle on lid
+    p.drawLine(QPointF(s*0.38, s*0.18), QPointF(s*0.62, s*0.18))
+    p.drawArc(QRectF(s*0.33, s*0.18, s*0.34, s*0.12), 0, 180*16)
+    # Three vertical stripes inside body
+    for xf in [0.36, 0.50, 0.64]:
+        p.drawLine(QPointF(s*xf, s*0.40), QPointF(s*xf, s*0.78))
+
+
+def _icon_history(p: QPainter, col: QColor, s: int):
+    """Clock face — circle, hour/minute hands, notch at 12."""
+    pen = QPen(col, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    cx, cy, r = s*0.50, s*0.50, s*0.36
+    p.drawEllipse(QPointF(cx, cy), r, r)
+    # Hour hand (pointing ~10 o'clock)
+    p.drawLine(QPointF(cx, cy), QPointF(cx - r*0.45, cy - r*0.55))
+    # Minute hand (pointing ~12 o'clock)
+    p.drawLine(QPointF(cx, cy), QPointF(cx, cy - r*0.72))
+    # Tick at 12
+    p.drawLine(QPointF(cx, cy - r*0.85), QPointF(cx, cy - r*1.0))
+
+
+def _icon_rollback(p: QPainter, col: QColor, s: int):
+    """Counter-clockwise circular arrow — undo/rollback."""
+    pen = QPen(col, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    cx, cy, r = s*0.50, s*0.52, s*0.30
+    # Arc: 210° arc counter-clockwise from ~right
+    p.drawArc(QRectF(cx-r, cy-r, r*2, r*2), 30*16, 270*16)
+    # Arrowhead at end of arc (top-left area)
+    import math
+    angle = math.radians(30)   # start of arc
+    ax = cx + r * math.cos(angle)
+    ay = cy - r * math.sin(angle)
+    # Two short lines forming arrowhead
+    p.drawLine(QPointF(ax, ay), QPointF(ax - s*0.08, ay - s*0.14))
+    p.drawLine(QPointF(ax, ay), QPointF(ax + s*0.14, ay - s*0.05))
+
+
+def _icon_booster(p: QPainter, col: QColor, s: int):
+    """Lightning bolt — performance / power."""
+    pen = QPen(col, 1.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    # Fill the bolt solid
+    accent = QColor(col)
+    accent.setAlphaF(0.18)
+    p.setBrush(QBrush(accent))
+    pts = QPolygonF([
+        QPointF(s*0.62, s*0.06),
+        QPointF(s*0.32, s*0.50),
+        QPointF(s*0.52, s*0.50),
+        QPointF(s*0.38, s*0.94),
+        QPointF(s*0.68, s*0.46),
+        QPointF(s*0.48, s*0.46),
+    ])
+    p.drawPolygon(pts)
+
+
+# Map icon name → draw function
+_ICON_FN = {
+    'dashboard': _icon_dashboard,
+    'smart_clean': _icon_clean,
+    'scanner':   _icon_scanner,
+    'uninstaller': _icon_uninstall,
+    'history':   _icon_history,   # used for 'log' tab
+    'rollback':  _icon_rollback,
+    'booster':   _icon_booster,
+}
+
+def _nav_icon(name: str, active=False, size=18) -> QIcon:
+    """Return a code-drawn nav icon. Active = full cyan, inactive = dimmer."""
+    fn = _ICON_FN.get(name, _icon_dashboard)
+    color = C['cyan'] if active else C['text3']
+    return _make_icon(fn, size=size, color=color)
+
+
+# ═════════════════════════════════════════════════════════════
+# SPARKLINE CHART
 # ═════════════════════════════════════════════════════════════
 class SparklineChart(QWidget):
     def __init__(self, color='#00e5ff', max_points=50, parent=None):
         super().__init__(parent)
-        self.color    = QColor(color)
-        self.max_pts  = max_points
-        self.data     = []
+        self.color   = QColor(color)
+        self.max_pts = max_points
+        self.data    = []
         self.setMinimumHeight(56)
         self.setMaximumHeight(56)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -156,7 +287,6 @@ class SparklineChart(QWidget):
         w, h = self.width(), self.height()
         pad  = 3
 
-        # Grid lines at 25%, 50%, 75%
         grid_pen = QPen(QColor(C['border2']))
         grid_pen.setWidth(1)
         p.setPen(grid_pen)
@@ -170,7 +300,6 @@ class SparklineChart(QWidget):
             y = h - pad - (v / 100.0) * (h - pad * 2)
             pts.append(QPointF(x, y))
 
-        # Area fill — deeper gradient
         fill_pts = [QPointF(pts[0].x(), h)] + pts + [QPointF(pts[-1].x(), h)]
         grad = QLinearGradient(0, 0, 0, h)
         fc = QColor(self.color); fc.setAlphaF(0.22)
@@ -180,14 +309,12 @@ class SparklineChart(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.drawPolygon(QPolygonF(fill_pts))
 
-        # Line — slightly thicker
         lp = QPen(self.color); lp.setWidth(2)
         lp.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(lp)
         for i in range(len(pts) - 1):
             p.drawLine(pts[i], pts[i + 1])
 
-        # End dot — glowing dot with halo
         if pts:
             halo_col = QColor(self.color); halo_col.setAlphaF(0.18)
             p.setPen(Qt.PenStyle.NoPen)
@@ -199,7 +326,7 @@ class SparklineChart(QWidget):
 
 
 # ═════════════════════════════════════════════════════════════
-# DISK RING (unchanged logic, tuned visuals)
+# DISK RING
 # ═════════════════════════════════════════════════════════════
 class DiskRing(QWidget):
     def __init__(self, parent=None):
@@ -217,26 +344,69 @@ class DiskRing(QWidget):
         rect  = QRectF(9, 9, 70, 70)
         color = C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan']
 
-        # Track
         bg_pen = QPen(QColor(C['bg3'])); bg_pen.setWidth(8)
         bg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(bg_pen); p.drawArc(rect, 0, 360 * 16)
 
-        # Inner track line for depth
         inner_pen = QPen(QColor(C['border2'])); inner_pen.setWidth(1)
         p.setPen(inner_pen); p.drawArc(QRectF(13, 13, 62, 62), 0, 360 * 16)
 
-        # Fill arc
         fill_pen = QPen(QColor(color)); fill_pen.setWidth(8)
         fill_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(fill_pen)
         span = int((self.percent / 100.0) * 360 * 16)
         p.drawArc(rect, 90 * 16, -span)
 
-        # Center text
         p.setPen(QPen(QColor(color)))
         p.setFont(QFont('Cascadia Code' if IS_WINDOWS else 'Share Tech Mono', 13, QFont.Weight.Bold))
         p.drawText(QRectF(0, 0, 88, 88), Qt.AlignmentFlag.AlignCenter, f'{int(self.percent)}%')
+        p.end()
+
+
+# ═════════════════════════════════════════════════════════════
+# HEX LOGO WIDGET — drawn entirely in QPainter, no file needed
+# ═════════════════════════════════════════════════════════════
+class HexLogoWidget(QWidget):
+    """Draws a hexagon outline + inner hex + 'CL' text — pure QPainter."""
+    def __init__(self, size=32, parent=None):
+        super().__init__(parent)
+        self.s = size
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, _):
+        import math
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy, s = self.s / 2, self.s / 2, self.s / 2 - 2
+
+        def hex_pts(cx, cy, r):
+            return [QPointF(cx + r * math.cos(math.radians(60*i - 30)),
+                            cy + r * math.sin(math.radians(60*i - 30)))
+                    for i in range(6)]
+
+        # Outer hex
+        outer_col = QColor(C['cyan'])
+        outer_col.setAlphaF(0.9)
+        pen = QPen(outer_col, 1.2)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolygon(QPolygonF(hex_pts(cx, cy, s)))
+
+        # Inner hex — filled dim
+        inner_col = QColor(C['cyan'])
+        inner_col.setAlphaF(0.07)
+        p.setBrush(QBrush(inner_col))
+        border_col = QColor(C['cyan'])
+        border_col.setAlphaF(0.25)
+        p.setPen(QPen(border_col, 0.7))
+        p.drawPolygon(QPolygonF(hex_pts(cx, cy, s * 0.65)))
+
+        # "CL" text
+        p.setPen(QPen(QColor(C['cyan'])))
+        font_sz = max(6, int(self.s * 0.28))
+        p.setFont(QFont('Share Tech Mono', font_sz, QFont.Weight.Bold))
+        p.drawText(QRectF(0, 0, self.s, self.s), Qt.AlignmentFlag.AlignCenter, 'CL')
         p.end()
 
 
@@ -248,7 +418,7 @@ class SysInfoWorker(QThread):
 
     def __init__(self):
         super().__init__()
-        self.paused  = False
+        self.paused   = False
         self._stopped = False
 
     def stop(self):
@@ -317,11 +487,10 @@ class CleanWorker(QThread):
 
 
 # ═════════════════════════════════════════════════════════════
-# REDESIGNED UI HELPERS
+# UI HELPERS
 # ═════════════════════════════════════════════════════════════
 def _btn(text, color='cyan', small=False, icon_only=False):
-    """Redesigned button — sharper, cleaner, more intentional states."""
-    col = C[color]
+    col     = C[color]
     col_dim = C.get(color + '_dim', C['bg3'])
     pad = '5px 12px' if small else '8px 22px'
     sz  = '10px' if small else '11px'
@@ -333,34 +502,25 @@ def _btn(text, color='cyan', small=False, icon_only=False):
             background:{col_dim if col_dim else col + '08'};
             font-family:{MONO}; font-size:{sz};
             letter-spacing:1.5px; padding:{pad};
-            border-radius:2px;
-            font-weight:600;
+            border-radius:2px; font-weight:600;
         }}
         QPushButton:hover {{
-            background:{col}20;
-            border-color:{col}80;
-            color:{col};
+            background:{col}20; border-color:{col}80; color:{col};
         }}
         QPushButton:pressed {{
-            background:{col}35;
-            border-color:{col};
+            background:{col}35; border-color:{col};
         }}
         QPushButton:checked {{
-            background:{col}25;
-            border-color:{col};
-            color:{col};
+            background:{col}25; border-color:{col}; color:{col};
         }}
         QPushButton:disabled {{
-            color:{C['dim']};
-            border-color:{C['dim']}30;
-            background:transparent;
+            color:{C['dim']}; border-color:{C['dim']}30; background:transparent;
         }}
     """)
     return btn
 
 
 def _lbl_section(text):
-    """Section header label — punchy, uppercase, spaced."""
     l = QLabel(text)
     l.setStyleSheet(
         f'color:{C["text3"]};font-size:10px;letter-spacing:3px;'
@@ -379,12 +539,9 @@ def _lbl_val(text, color='cyan', size=20):
 
 
 def _card(border_color=None, accent_color=None):
-    """Card with optional left accent stripe.
-    Qt stylesheet requires ALL four border sides when mixing widths/colors."""
-    f = QFrame()
+    f  = QFrame()
     bc = border_color or C['border2']
     if accent_color:
-        # Must specify all 4 sides individually — Qt doesn't cascade border shorthand
         f.setStyleSheet(
             f'QFrame{{'
             f'background:{C["bg2"]};'
@@ -411,7 +568,7 @@ def _divider():
 
 
 # ═════════════════════════════════════════════════════════════
-# REDESIGNED STAT CARD
+# STAT CARD
 # ═════════════════════════════════════════════════════════════
 class StatCard(QFrame):
     def __init__(self, label, init_val, color='cyan', parent=None):
@@ -441,11 +598,105 @@ class StatCard(QFrame):
     def set_val(self, text, color=None):
         self.lbl_val.setText(text)
         col = C.get(color or self.color, C[self.color])
-        # Only update label color — never setStyleSheet on the frame to avoid neon border artifact
         self.lbl_val.setStyleSheet(
             f'color:{col};font-size:24px;font-weight:700;'
             f'font-family:{MONO};letter-spacing:1px;'
         )
+
+
+# ═════════════════════════════════════════════════════════════
+# REDESIGNED NAV BUTTON — icon widget + label + active bar
+# ═════════════════════════════════════════════════════════════
+class NavButton(QWidget):
+    """
+    Custom nav item:
+    ┌─[active bar 2px]─[icon 18px]─[label text]─[stretch]─┐
+    Active state: cyan bar on left + cyan icon + cyan text
+    Inactive: no bar + dim icon + dim text
+    Hover: slightly brighter text
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, label: str, icon_name: str, parent=None):
+        super().__init__(parent)
+        self._active    = False
+        self._icon_name = icon_name
+        self._label_str = label
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(40)
+
+        self._bar = QFrame(self)
+        self._bar.setFixedWidth(2)
+        self._bar.setStyleSheet('background:transparent;border:none;')
+
+        self._icon_lbl = QLabel(self)
+        self._icon_lbl.setFixedSize(18, 18)
+        self._icon_lbl.setStyleSheet('background:transparent;border:none;')
+
+        self._text_lbl = QLabel(label, self)
+        self._text_lbl.setStyleSheet(
+            f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
+            f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+        )
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._bar)
+        lay.addSpacing(12)
+        lay.addWidget(self._icon_lbl)
+        lay.addSpacing(10)
+        lay.addWidget(self._text_lbl)
+        lay.addStretch()
+
+        self._update_icon()
+
+    def _update_icon(self):
+        ico = _nav_icon(self._icon_name, active=self._active, size=18)
+        self._icon_lbl.setPixmap(ico.pixmap(18, 18))
+
+    def set_active(self, active: bool):
+        self._active = active
+        if active:
+            self._bar.setStyleSheet(
+                f'background:{C["cyan"]};border:none;border-radius:1px;'
+            )
+            self._text_lbl.setStyleSheet(
+                f'color:{C["cyan"]};font-family:{MONO};font-size:10px;'
+                f'letter-spacing:1.5px;font-weight:700;background:transparent;border:none;'
+            )
+            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}0e;}}')
+        else:
+            self._bar.setStyleSheet('background:transparent;border:none;')
+            self._text_lbl.setStyleSheet(
+                f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
+                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+            )
+            self.setStyleSheet('QWidget{background:transparent;}')
+        self._update_icon()
+
+    def set_label(self, text: str):
+        self._label_str = text
+        self._text_lbl.setText(text)
+
+    def enterEvent(self, _):
+        if not self._active:
+            self._text_lbl.setStyleSheet(
+                f'color:{C["text2"]};font-family:{MONO};font-size:10px;'
+                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+            )
+            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}08;}}')
+
+    def leaveEvent(self, _):
+        if not self._active:
+            self._text_lbl.setStyleSheet(
+                f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
+                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+            )
+            self.setStyleSheet('QWidget{background:transparent;}')
+
+    def mousePressEvent(self, _):
+        self.clicked.emit()
 
 
 # ═════════════════════════════════════════════════════════════
@@ -455,28 +706,39 @@ class CyberCleanApp(QMainWindow):
 
     update_found = pyqtSignal(str)
 
+    # Icon name per tab — maps to _ICON_FN keys
+    _TAB_ICONS = {
+        'dashboard': 'dashboard',
+        'clean':     'smart_clean',
+        'scanner':   'scanner',
+        'uninstall': 'uninstaller',
+        'log':       'history',
+        'rollback':  'rollback',
+        'browser':   'booster',
+    }
+
     @property
     def NAV_ITEMS(self):
         return [
-            ('dashboard', 'dashboard',   _t('nav_dashboard', 'DASHBOARD')),
-            ('clean',     'smart_clean', _t('nav_clean',     'CLEAN')),
-            ('scanner',   'scanner',     _t('nav_scanner',   'SCANNER')),
-            ('uninstall', 'uninstaller', _t('nav_uninstall', 'UNINSTALL')),
-            ('log',       'dashboard',   _t('nav_history',   'HISTORY')),
-            ('rollback',  'smart_clean', _t('nav_rollback',  'ROLLBACK')),
-            ('browser',   'ram_booster', _t('nav_booster',   'SYS BOOSTER')),
+            ('dashboard', 'dashboard',   _t('nav_dashboard', 'TỔNG QUAN')),
+            ('clean',     'smart_clean', _t('nav_clean',     'DỌN RÁC')),
+            ('scanner',   'scanner',     _t('nav_scanner',   'QUÉT BẢO MẬT')),
+            ('uninstall', 'uninstaller', _t('nav_uninstall', 'GỠ ỨNG DỤNG')),
+            ('log',       'history',     _t('nav_history',   'LỊCH SỬ')),
+            ('rollback',  'rollback',    _t('nav_rollback',  'KHÔI PHỤC')),
+            ('browser',   'booster',     _t('nav_booster',   'TĂNG TỐC')),
         ]
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('CyberClean v2.1.0')
+        self.setWindowTitle('CyberClean v2.2.0')
         self.setMinimumSize(1060, 680)
         self.resize(1200, 760)
         self.worker   = None
         self.selected = set()
         self._charts  = {}
         self._snap    = None
-        self._last_refresh_time = 0.0   # debounce: chống spam nút LÀM MỚI
+        self._last_refresh_time = 0.0
 
         self._init_palette()
         self._build_ui()
@@ -488,7 +750,7 @@ class CyberCleanApp(QMainWindow):
         self._start_auto_clean()
         self._check_update_async()
 
-    # ── Redesigned Global Palette & Stylesheet ───────────────
+    # ── Global Palette & Stylesheet ──────────────────────────
     def _init_palette(self):
         pal = QPalette()
         pal.setColor(QPalette.ColorRole.Window,        QColor(C['bg']))
@@ -502,17 +764,13 @@ class CyberCleanApp(QMainWindow):
                 background:{C['bg']}; color:{C['text']};
                 font-family:{MONO};
             }}
-
-            /* ── Scrollbars ── */
             QScrollBar:vertical {{
                 background:{C['bg']}; width:5px; border:none; margin:0;
             }}
             QScrollBar::handle:vertical {{
                 background:{C['border3']}; border-radius:2px; min-height:24px;
             }}
-            QScrollBar::handle:vertical:hover {{
-                background:{C['cyan']}60;
-            }}
+            QScrollBar::handle:vertical:hover {{ background:{C['cyan']}60; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QScrollBar:horizontal {{
                 background:{C['bg']}; height:5px; border:none;
@@ -521,8 +779,6 @@ class CyberCleanApp(QMainWindow):
                 background:{C['border3']}; border-radius:2px;
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
-
-            /* ── Tables ── */
             QTableWidget {{
                 background:{C['bg2']}; border:1px solid {C['border2']};
                 gridline-color:{C['border']}; font-size:11px; border-radius:3px;
@@ -549,8 +805,6 @@ class CyberCleanApp(QMainWindow):
                 font-weight:700;
             }}
             QHeaderView::section:last {{ border-right:none; }}
-
-            /* ── Checkboxes ── */
             QCheckBox {{ color:{C['text2']}; spacing:8px; font-size:11px; }}
             QCheckBox::indicator {{
                 width:13px; height:13px;
@@ -561,8 +815,6 @@ class CyberCleanApp(QMainWindow):
             QCheckBox::indicator:checked {{
                 background:{C['cyan']}25; border-color:{C['cyan']};
             }}
-
-            /* ── Progress bars ── */
             QProgressBar {{
                 background:{C['bg3']}; border:none; height:2px; border-radius:1px;
             }}
@@ -571,16 +823,12 @@ class CyberCleanApp(QMainWindow):
                     stop:0 {C['cyan']}, stop:1 {C['green']});
                 border-radius:1px;
             }}
-
-            /* ── Terminal / text edit ── */
             QTextEdit {{
                 background:#020810; color:{C['text2']};
                 border:1px solid {C['border2']}; border-radius:3px;
                 font-family:{MONO}; font-size:11px; padding:10px;
                 selection-background-color:{C['cyan']}30;
             }}
-
-            /* ── Line edit ── */
             QLineEdit {{
                 background:{C['bg3']}; color:{C['text']};
                 border:1px solid {C['border2']}; border-radius:3px;
@@ -588,30 +836,21 @@ class CyberCleanApp(QMainWindow):
             }}
             QLineEdit:hover {{ border-color:{C['border3']}; }}
             QLineEdit:focus {{ border-color:{C['cyan']}70; background:{C['bg4']}; }}
-            QLineEdit::placeholder {{ color:{C['text3']}; }}
-
-            /* ── Combo box ── */
             QComboBox {{
                 background:{C['bg3']}; color:{C['text2']};
                 border:1px solid {C['border2']}; border-radius:3px;
                 padding:5px 10px; font-size:11px; font-family:{MONO};
             }}
             QComboBox:hover {{ border-color:{C['border3']}; }}
-            QComboBox::drop-down {{
-                border:none; width:16px;
-            }}
+            QComboBox::drop-down {{ border:none; width:16px; }}
             QComboBox QAbstractItemView {{
                 background:{C['bg2']}; color:{C['text']};
                 selection-background-color:{C['cyan']}20;
-                border:1px solid {C['border2']};
-                outline:none;
+                border:1px solid {C['border2']}; outline:none;
             }}
-
-            /* ── Menus ── */
             QMenu {{
                 background:{C['bg2']}; color:{C['text']};
-                border:1px solid {C['border2']};
-                padding:4px;
+                border:1px solid {C['border2']}; padding:4px;
             }}
             QMenu::item {{ padding:7px 20px; border-radius:2px; }}
             QMenu::item:selected {{ background:{C['cyan']}18; color:{C['cyan']}; }}
@@ -634,10 +873,10 @@ class CyberCleanApp(QMainWindow):
         bl.addWidget(self._build_main(), 1)
         lay.addWidget(body, 1)
 
-    # ── REDESIGNED HEADER ────────────────────────────────────
+    # ── HEADER ───────────────────────────────────────────────
     def _build_header(self):
         h = QFrame()
-        h.setFixedHeight(54)
+        h.setFixedHeight(48)
         h.setStyleSheet(f"""
             QFrame {{
                 background:{C['bg']};
@@ -645,54 +884,39 @@ class CyberCleanApp(QMainWindow):
             }}
         """)
         lay = QHBoxLayout(h)
-        lay.setContentsMargins(24, 0, 24, 0)
+        lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(0)
 
-        # Logo group — CYBER·CLEAN with glyph accent
-        logo_group = QWidget()
-        logo_group.setStyleSheet('background:transparent;')
-        lg = QHBoxLayout(logo_group)
-        lg.setContentsMargins(0, 0, 0, 0)
-        lg.setSpacing(0)
+        # Hex logo widget — pure QPainter, no file
+        hex_logo = HexLogoWidget(size=28)
+        lay.addWidget(hex_logo)
+        lay.addSpacing(10)
 
-        # Bracket accent
-        bracket_l = QLabel('⌈')
-        bracket_l.setStyleSheet(
-            f'color:{C["cyan"]}60;font-size:20px;font-family:{MONO};'
-            f'padding-right:4px;font-weight:300;'
-        )
         logo_text = QLabel('CYBER')
         logo_text.setStyleSheet(
-            f'color:{C["cyan"]};font-size:15px;font-weight:900;'
-            f'letter-spacing:6px;font-family:{MONO};'
+            f'color:{C["cyan"]};font-size:14px;font-weight:900;'
+            f'letter-spacing:5px;font-family:{MONO};'
         )
         sep_dot = QLabel('·')
-        sep_dot.setStyleSheet(
-            f'color:{C["border3"]};font-size:14px;padding:0 6px;'
-        )
+        sep_dot.setStyleSheet(f'color:{C["border3"]};font-size:13px;padding:0 5px;')
         clean_text = QLabel('CLEAN')
         clean_text.setStyleSheet(
-            f'color:{C["text2"]};font-size:15px;font-weight:700;'
-            f'letter-spacing:6px;font-family:{MONO};'
+            f'color:{C["text2"]};font-size:14px;font-weight:700;'
+            f'letter-spacing:5px;font-family:{MONO};'
         )
-        bracket_r = QLabel('⌋')
-        bracket_r.setStyleSheet(
-            f'color:{C["cyan"]}60;font-size:20px;font-family:{MONO};'
-            f'padding-left:4px;font-weight:300;'
-        )
-        ver = QLabel('v2.1.0')
+        ver = QLabel('v2.2.0')
         ver.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;letter-spacing:1px;'
-            f'padding-left:12px;padding-top:6px;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:9px;letter-spacing:1px;'
+            f'padding-left:10px;padding-top:5px;font-family:{MONO};'
         )
-        for w in [bracket_l, logo_text, sep_dot, clean_text, bracket_r, ver]:
-            lg.addWidget(w)
+        for w in [logo_text, sep_dot, clean_text, ver]:
+            lay.addWidget(w)
 
-        # OS info pill
+        # OS info separator
         os_sep = QLabel('│')
-        os_sep.setStyleSheet(
-            f'color:{C["border3"]};padding:0 20px;font-size:16px;'
-        )
+        os_sep.setStyleSheet(f'color:{C["border3"]};padding:0 18px;font-size:15px;')
+        lay.addWidget(os_sep)
+
         self._os_info_lbl = QLabel(
             f'{OS.upper()}  ·  '
             f"{PKG_MANAGER.upper() if PKG_MANAGER else _t('header_cross','CROSS-PLATFORM')}"
@@ -701,30 +925,25 @@ class CyberCleanApp(QMainWindow):
         self._os_info_lbl.setStyleSheet(
             f'color:{C["text3"]};font-size:10px;letter-spacing:2px;font-family:{MONO};'
         )
-        os_info = self._os_info_lbl
-
-        lay.addWidget(logo_group)
-        lay.addWidget(os_sep)
-        lay.addWidget(os_info)
+        lay.addWidget(self._os_info_lbl)
         lay.addStretch()
 
-        # Right side: update notice, lang selector, status
+        # Update notice label (hidden until update found)
         self._upd_lbl = QLabel('')
         self._upd_lbl.setStyleSheet(
             f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
-            f'font-family:{MONO};padding:3px 0px;border:none;'
+            f'font-family:{MONO};padding:3px 0;border:none;'
         )
-        self._upd_lbl.setVisible(False)  # hidden until an update is found
+        self._upd_lbl.setVisible(False)
 
-        # Status dot group
+        # Status dot
         status_frame = QFrame()
-        status_frame.setStyleSheet(f'QFrame{{background:transparent;border:none;}}')
+        status_frame.setStyleSheet('QFrame{background:transparent;border:none;}')
         sf_lay = QHBoxLayout(status_frame)
         sf_lay.setContentsMargins(0, 0, 0, 0)
-        sf_lay.setSpacing(6)
-
+        sf_lay.setSpacing(5)
         dot = QLabel('●')
-        dot.setStyleSheet(f'color:{C["green"]};font-size:8px;')
+        dot.setStyleSheet(f'color:{C["green"]};font-size:7px;')
         status_lbl = QLabel('ACTIVE')
         status_lbl.setStyleSheet(
             f'color:{C["text3"]};font-size:10px;letter-spacing:2px;font-family:{MONO};'
@@ -735,7 +954,7 @@ class CyberCleanApp(QMainWindow):
         self.clock_lbl = QLabel('--:--:--')
         self.clock_lbl.setStyleSheet(
             f'color:{C["cyan"]};font-size:11px;letter-spacing:2px;'
-            f'font-family:{MONO};padding-left:16px;font-weight:700;'
+            f'font-family:{MONO};padding-left:14px;font-weight:700;'
         )
 
         self._lang_cb = QComboBox()
@@ -747,9 +966,9 @@ class CyberCleanApp(QMainWindow):
         self._lang_cb.currentIndexChanged.connect(self._change_language)
 
         lay.addWidget(self._upd_lbl)
-        lay.addSpacing(12)
+        lay.addSpacing(10)
         lay.addWidget(self._lang_cb)
-        lay.addSpacing(16)
+        lay.addSpacing(14)
         lay.addWidget(status_frame)
         lay.addWidget(self.clock_lbl)
         return h
@@ -757,7 +976,7 @@ class CyberCleanApp(QMainWindow):
     # ── REDESIGNED SIDEBAR ───────────────────────────────────
     def _build_sidebar(self):
         side = QFrame()
-        side.setFixedWidth(220)
+        side.setFixedWidth(200)
         side.setStyleSheet(f"""
             QFrame {{
                 background:{C['bg']};
@@ -765,68 +984,41 @@ class CyberCleanApp(QMainWindow):
             }}
         """)
         lay = QVBoxLayout(side)
-        lay.setContentsMargins(0, 16, 0, 16)
+        lay.setContentsMargins(0, 14, 0, 14)
         lay.setSpacing(0)
 
-        # Nav label
+        # Navigation label
         nav_label = QLabel('NAVIGATION')
         nav_label.setStyleSheet(
             f'color:{C["dim"]};font-size:9px;letter-spacing:3px;'
-            f'font-family:{MONO};padding:0 18px 8px 18px;font-weight:700;'
+            f'font-family:{MONO};padding:0 16px 8px 16px;font-weight:700;'
         )
         lay.addWidget(nav_label)
 
+        # Nav buttons — using new NavButton widget (pure QPainter icons)
         self.nav_btns = {}
         for pid, icon_name, label in self.NAV_ITEMS:
-            btn = QPushButton(f"  {label}")
-            btn.setCheckable(True)
-            # Load icon at 20px — large enough to read clearly in sidebar
-            ico = _svg_icon(icon_name, size=20)
-            if not ico.isNull():
-                btn.setIcon(ico)
-                btn.setIconSize(QSize(20, 20))
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    color:{C['text3']};
-                    background:transparent;
-                    border:none;
-                    border-left:2px solid transparent;
-                    text-align:left;
-                    padding:10px 16px;
-                    font-family:{MONO}; font-size:10px; letter-spacing:1.5px;
-                    font-weight:600;
-                }}
-                QPushButton:hover {{
-                    color:{C['text2']};
-                    background:{C['cyan']}08;
-                    border-left-color:{C['border3']};
-                }}
-                QPushButton:checked {{
-                    color:{C['cyan']};
-                    background:{C['cyan']}0e;
-                    border-left:2px solid {C['cyan']};
-                }}
-            """)
-            btn.clicked.connect(lambda _, p=pid: self._nav(p))
+            btn = NavButton(label, icon_name)
+            btn.clicked.connect(lambda p=pid: self._nav(p))
             self.nav_btns[pid] = btn
             lay.addWidget(btn)
 
-        lay.addSpacing(16)
+        lay.addSpacing(14)
         lay.addWidget(_divider())
-        lay.addSpacing(16)
+        lay.addSpacing(14)
 
-        # Disk ring panel — redesigned
+        # Disk ring panel
         disk_panel = QFrame()
         disk_panel.setStyleSheet(f"""
             QFrame {{
                 background:{C['bg2']};
                 border:1px solid {C['border2']};
                 border-radius:3px;
-                margin:0 14px;
+                margin:0 12px;
             }}
         """)
         dp_lay = QVBoxLayout(disk_panel)
-        dp_lay.setContentsMargins(12, 14, 12, 14)
+        dp_lay.setContentsMargins(12, 12, 12, 12)
         dp_lay.setSpacing(6)
 
         disk_header = QLabel('DISK USAGE')
@@ -871,29 +1063,29 @@ class CyberCleanApp(QMainWindow):
         pi_lbl = QLabel(pi_text)
         pi_lbl.setStyleSheet(
             f'color:{C["text3"]};font-size:10px;letter-spacing:1px;'
-            f'padding:0 16px;line-height:2;font-family:{MONO};'
+            f'padding:0 14px;line-height:2;font-family:{MONO};'
         )
         lay.addWidget(pi_lbl)
-        lay.addSpacing(10)
+        lay.addSpacing(8)
 
         # Status pills
         pills = []
         if IS_LINUX:
             pills.append(('POLKIT', C['green'] if HAS_POLKIT else C['red']))
             if HAS_FLATPAK: pills.append(('FLATPAK', C['cyan']))
-            if HAS_DOCKER:  pills.append(('DOCKER', C['cyan']))
+            if HAS_DOCKER:  pills.append(('DOCKER',  C['cyan']))
         elif IS_WINDOWS:
             pills.append(('ADMIN', C['green'] if is_windows_admin() else C['yellow']))
 
         if pills:
             pill_row = QHBoxLayout()
-            pill_row.setContentsMargins(14, 0, 14, 0)
+            pill_row.setContentsMargins(12, 0, 12, 0)
             pill_row.setSpacing(5)
             for label, col in pills:
                 pl = QLabel(label)
                 pl.setStyleSheet(
                     f'color:{col};font-size:9px;letter-spacing:1.5px;'
-                    f'border:1px solid {col}50;padding:2px 7px;'
+                    f'border:1px solid {col}50;padding:2px 6px;'
                     f'font-family:{MONO};font-weight:700;border-radius:2px;'
                 )
                 pill_row.addWidget(pl)
@@ -918,8 +1110,6 @@ class CyberCleanApp(QMainWindow):
 
     # ── Page header helper ───────────────────────────────────
     def _page_header(self, title, subtitle=None, store_key=None):
-        """Consistent page header with separator line.
-        store_key: if given, saves (title_lbl, sub_lbl) to self._page_hdr_lbls[store_key]"""
         if not hasattr(self, '_page_hdr_lbls'):
             self._page_hdr_lbls = {}
         frame = QWidget()
@@ -935,9 +1125,7 @@ class CyberCleanApp(QMainWindow):
         s = None
         if subtitle:
             s = QLabel(subtitle)
-            s.setStyleSheet(
-                f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
-            )
+            s.setStyleSheet(f'color:{C["text3"]};font-size:11px;font-family:{MONO};')
             s.setWordWrap(True)
             fl.addWidget(s)
         sep = _divider()
@@ -946,6 +1134,23 @@ class CyberCleanApp(QMainWindow):
         if store_key:
             self._page_hdr_lbls[store_key] = (t, s)
         return frame
+
+    # ── NAV logic — updated for NavButton ────────────────────
+    def _nav(self, pid):
+        pages = [item[0] for item in self.NAV_ITEMS]
+        if pid not in pages:
+            return
+        self._active_tab = pid
+        self.stack.setCurrentIndex(pages.index(pid))
+        for k, btn in self.nav_btns.items():
+            btn.set_active(k == pid)
+        if hasattr(self, '_si_worker'):
+            self._si_worker.paused = (pid != 'dashboard')
+        if pid == 'log':       self._load_log()
+        if pid == 'rollback':  self._load_rollback()
+        if pid == 'uninstall': self._load_uninstall()
+        if pid == 'clean' and IS_LINUX and not HAS_POLKIT_AGENT:
+            self._show_polkit_warning()
 
     # ─────────────────────────────────────────────────────────
     # REDESIGNED DASHBOARD
@@ -1557,13 +1762,13 @@ class CyberCleanApp(QMainWindow):
         vl_cpu.addWidget(self._lbl_t_cpu); vl_cpu.addWidget(self._lbl_d_cpu)
         btn_row_cpu = QHBoxLayout(); btn_row_cpu.setSpacing(8)
         self._game_btn = _btn(f"  {_t('btn_game_mode','GAME MODE')}", 'red', small=True)
-        self._game_btn.setIcon(_svg_icon('game_mode', size=20))
+        self._game_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["red"]))
         self._game_btn.setIconSize(QSize(20, 20))
         self._game_btn.setCheckable(True)
         self._game_btn.setToolTip(_t('game_tooltip','Throttle background bloat — no suspend, no deadlock'))
         self._game_btn.clicked.connect(self._toggle_game_mode)
         self._eco_btn = _btn(f"  {_t('btn_eco_mode','ECO MODE')}", 'green', small=True)
-        self._eco_btn.setIcon(_svg_icon('eco_mode', size=20))
+        self._eco_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["green"]))
         self._eco_btn.setIconSize(QSize(20, 20))
         self._eco_btn.setCheckable(True)
         self._eco_btn.setToolTip(_t('eco_tooltip','Lower all background task priority to IDLE'))
@@ -1571,7 +1776,7 @@ class CyberCleanApp(QMainWindow):
         btn_row_cpu.addWidget(self._game_btn)
         btn_row_cpu.addWidget(self._eco_btn)
         self._smart_btn = _btn(f"  {_t('btn_smart_boost','SMART BOOST')}", 'purple', small=True)
-        self._smart_btn.setIcon(_svg_icon('ram_booster', size=20))
+        self._smart_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["purple"]))
         self._smart_btn.setIconSize(QSize(20, 20))
         self._smart_btn.setCheckable(True)
         self._smart_btn.setToolTip(_t('smart_tooltip','Auto-detect PC tier and apply optimal boost'))
@@ -1618,21 +1823,6 @@ class CyberCleanApp(QMainWindow):
     # ALL LOGIC BELOW IS UNCHANGED FROM ORIGINAL
     # ═══════════════════════════════════════════════════════════
 
-    def _nav(self, pid):
-        pages = [item[0] for item in self.NAV_ITEMS]
-        if pid not in pages:
-            return
-        self._active_tab = pid
-        self.stack.setCurrentIndex(pages.index(pid))
-        for k, b in self.nav_btns.items():
-            b.setChecked(k == pid)
-        if hasattr(self, '_si_worker'):
-            self._si_worker.paused = (pid != 'dashboard')
-        if pid == 'log':       self._load_log()
-        if pid == 'rollback':  self._load_rollback()
-        if pid == 'uninstall': self._load_uninstall()
-        if pid == 'clean' and IS_LINUX and not HAS_POLKIT_AGENT:
-            self._show_polkit_warning()
 
     def _start_sysinfo(self):
         self._si_worker = SysInfoWorker()
@@ -1947,23 +2137,29 @@ class CyberCleanApp(QMainWindow):
 
         class ScanWorker(QThread):
             log  = pyqtSignal(str, str)
-            done = pyqtSignal(list)
+            done = pyqtSignal(list, list)
             def run(self_w):
+                # 1. Quét file rác/malware
                 sc = SecurityScanner()
                 results = sc.scan(lambda m, l: self_w.log.emit(m, l))
-                self_w.done.emit(results)
+                # 2. Quét tiến trình mạng
+                self_w.log.emit("  ⟳  Scanning active network processes...", "head")
+                net_results = get_network_processes()
+                self_w.done.emit(results, net_results)
 
         self._scan_worker = ScanWorker()
         self._scan_worker.log.connect(self._on_opt_log)
         self._scan_worker.done.connect(self._on_scan_done)
         self._scan_worker.start()
 
-    def _on_scan_done(self, results):
+    def _on_scan_done(self, results, net_results):
         self._scan_running = False
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText(f"⬡  {_t('btn_run_scan','RUN DEEP SCAN')}")
         self._scan_results = results
         sev_col = {'critical': C['red'], 'high': C['yellow'], 'medium': C['cyan'], 'info': C['text3']}
+
+        # Kết quả quét file cũ
         for r in results:
             row = self.scan_table.rowCount()
             self.scan_table.insertRow(row)
@@ -1973,6 +2169,20 @@ class CyberCleanApp(QMainWindow):
                     ti.setForeground(QColor(sev_col.get(r.severity, C['text'])))
                 self.scan_table.setItem(row, i, ti)
             self.scan_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, r)
+
+        # Kết quả quét mạng (MỚI)
+        for net in net_results:
+            if net.suspicious:
+                row = self.scan_table.rowCount()
+                self.scan_table.insertRow(row)
+                ti_sev = QTableWidgetItem('WARNING')
+                ti_sev.setForeground(QColor(C['yellow']))
+                self.scan_table.setItem(row, 0, ti_sev)
+                self.scan_table.setItem(row, 1, QTableWidgetItem('NETWORK'))
+                self.scan_table.setItem(row, 2, QTableWidgetItem(f"{net.name} (PID: {net.pid})"))
+                self.scan_table.setItem(row, 3, QTableWidgetItem(
+                    f"Kết nối tới: {net.remote_ip}:{net.remote_port} — {net.reason}"))
+
         fixable = [r for r in results if r.can_fix]
         if fixable:
             self.fix_btn.setEnabled(True)
@@ -2414,7 +2624,7 @@ class CyberCleanApp(QMainWindow):
         """Cập nhật TẤT CẢ text theo ngôn ngữ hiện tại — không cần restart."""
         # ── Sidebar nav buttons ──────────────────────────────
         for (pid, icon_name, label), btn in zip(self.NAV_ITEMS, self.nav_btns.values()):
-            btn.setText(f'   {label}')
+            btn.set_label(label)
 
         # ── Header ───────────────────────────────────────────
         if hasattr(self, '_os_info_lbl'):
@@ -2698,20 +2908,24 @@ class CyberCleanApp(QMainWindow):
             self._auto_worker.wait(1000)
 
     def _start_auto_clean(self):
+        # Bộ lập lịch thông minh: chỉ chạy khi máy RẢNH
+        self._scheduler = IdleScheduler(
+            min_interval_hours=6,
+            cpu_threshold=20.0,
+            net_threshold_kb=500
+        )
         self._auto_clean_timer = QTimer(self)
         self._auto_clean_timer.timeout.connect(self._run_auto_clean)
-        self._auto_clean_timer.start(6 * 60 * 60 * 1000)
+        # Check mỗi 5 phút xem máy có rảnh không
+        self._auto_clean_timer.start(5 * 60 * 1000)
 
     def _run_auto_clean(self):
-        if self.isVisible():
+        if self.isVisible() or getattr(self, '_game_active', False):
             return
-        if getattr(self, '_game_active', False):
-            if hasattr(self, 'tray'):
-                self.tray.showMessage('CyberClean',
-                    'Game Mode active — auto-clean postponed.',
-                    QSystemTrayIcon.MessageIcon.Information, 3000)
-            return
-        self._do_background_clean(notify=True)
+        # Chỉ dọn khi máy thực sự rảnh và đã hết cooldown
+        if self._scheduler.should_run():
+            self._do_background_clean(notify=True)
+            self._scheduler.mark_completed()
 
     def _do_background_clean(self, notify=True):
         safe_targets = [

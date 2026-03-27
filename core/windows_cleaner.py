@@ -1,8 +1,12 @@
 """
-CyberClean v2.0 — Windows Cleaner
-FIX: Accurate freed_bytes — measure AFTER delete, not before.
-     wevtutil for eventlog (deeper than Clear-EventLog).
-     Added win_error_reports target.
+CyberClean v2.2 — Windows Cleaner
+FIX #4: _win_recycle null-safe size parse — network/locked items return no .Size
+        property causing Measure-Object to output empty string → ValueError.
+        Now handles None/empty gracefully.
+FIX #5: _dir_size_safe replaced rglob with os.walk(followlinks=False) to prevent
+        infinite loops from NTFS junction points (e.g. AppData/Local/Application Data).
+FIX #6: bare except:pass replaced with typed except in all file-deletion loops —
+        errors are now skipped with a reason, not silently swallowed.
 """
 import os, shutil, subprocess, time
 from pathlib import Path
@@ -27,13 +31,29 @@ def is_admin():
         return False
 
 def _dir_size_safe(path):
+    """
+    FIX: replaced Path.rglob('*') with os.walk(followlinks=False).
+    rglob follows NTFS junction points / symlinks, causing infinite loops
+    (e.g. C:/Users/X/AppData/Local/Application Data → itself).
+    os.walk(followlinks=False) stops at junction boundaries entirely.
+    """
     total = 0
     try:
-        for f in Path(path).rglob('*'):
-            if f.is_file() and not f.is_symlink():
-                try: total += f.stat().st_size
-                except: pass
-    except: pass
+        for dirpath, dirnames, filenames in os.walk(str(path), followlinks=False):
+            # Also skip symlinked subdirectories explicitly (Windows junctions)
+            dirnames[:] = [
+                d for d in dirnames
+                if not os.path.islink(os.path.join(dirpath, d))
+            ]
+            for fname in filenames:
+                fpath = os.path.join(dirpath, fname)
+                try:
+                    if not os.path.islink(fpath):
+                        total += os.path.getsize(fpath)
+                except OSError:
+                    pass
+    except OSError:
+        pass
     return total
 
 def _real_freed(size_before, path):
@@ -69,6 +89,10 @@ class WindowsCleaner(BaseCleaner):
                 'Browser cache — auto-rebuilds',                            'safe'),
             CleanTarget('edge_cache',       'Edge Cache',
                 'Microsoft Edge cache — auto-rebuilds',                     'safe'),
+            CleanTarget('brave_cache',      'Brave Cache',
+                'Brave browser cache — auto-rebuilds',                      'safe'),
+            CleanTarget('opera_cache',      'Opera Cache',
+                'Opera browser cache — auto-rebuilds',                      'safe'),
         ]
 
     def estimate(self, target_id):
@@ -93,6 +117,8 @@ class WindowsCleaner(BaseCleaner):
                 'chrome_cache':      lambda d: self._browser_cache('chrome_cache', d),
                 'firefox_cache':     lambda d: self._browser_cache('firefox_cache', d),
                 'edge_cache':        lambda d: self._browser_cache('edge_cache', d),
+                'brave_cache':       lambda d: self._browser_cache('brave_cache', d),
+                'opera_cache':       lambda d: self._browser_cache('opera_cache', d),
             }.get(tid)
             if fn: r = fn(dry)
         except Exception as e:
@@ -107,14 +133,12 @@ class WindowsCleaner(BaseCleaner):
             Path('C:/Windows/Temp'),
         })
         now = time.time()
-        # Electron/Chromium runtime dirs — hold live IPC/stream buffers for Discord, ChatGPT etc.
         ELECTRON_PREFIXES = (
             'scoped_dir', 'chrome_', 'msedge_', 'discord',
             'vscode', 'electron', 'squirrel',
         )
         for d in dirs:
             if not d.exists(): continue
-            # Safety: block if %TEMP% redirected to root dir by malware
             safe_path = str(d).lower().replace(os.sep, '/')
             if safe_path.rstrip('/') in ('c:', 'c:/', 'c:/windows', 'c:/users'):
                 continue
@@ -123,10 +147,8 @@ class WindowsCleaner(BaseCleaner):
                 deleted = 0
                 for item in d.iterdir():
                     try:
-                        # Skip Electron/Chromium runtime dirs
                         if item.is_dir() and item.name.lower().startswith(ELECTRON_PREFIXES):
                             continue
-                        # 24h rule: only delete if untouched >24h (same as Windows Storage Sense)
                         if (now - item.stat().st_mtime) < 86400:
                             continue
                         sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
@@ -136,7 +158,10 @@ class WindowsCleaner(BaseCleaner):
                             item.unlink(missing_ok=True)
                         deleted += sz
                         r.files_removed += 1
-                    except: pass
+                    except PermissionError:
+                        pass   # file locked by a running process — skip silently
+                    except OSError:
+                        pass
                 r.freed_bytes += deleted
             else:
                 for item in d.iterdir():
@@ -144,7 +169,8 @@ class WindowsCleaner(BaseCleaner):
                         if (now - item.stat().st_mtime) < 86400: continue
                         if item.is_dir() and item.name.lower().startswith(ELECTRON_PREFIXES): continue
                         r.freed_bytes += _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                    except: pass
+                    except (OSError, PermissionError):
+                        pass
         return r
 
     def _win_prefetch(self, dry):
@@ -153,7 +179,6 @@ class WindowsCleaner(BaseCleaner):
         if not pf.exists(): return r
         now = time.time()
         files = list(pf.glob('*.pf'))
-        # Only target files unused for >7 days — active prefetch helps boot speed
         old_files = [f for f in files if (now - f.stat().st_mtime) > 604800]
         r.freed_bytes   = sum(f.stat().st_size for f in old_files)
         r.files_removed = len(old_files)
@@ -164,7 +189,10 @@ class WindowsCleaner(BaseCleaner):
                     sz = f.stat().st_size
                     f.unlink()
                     deleted += sz
-                except: pass
+                except PermissionError:
+                    pass   # Prefetch file locked by system — skip
+                except OSError:
+                    pass
             r.freed_bytes   = deleted
             r.files_removed = len([f for f in old_files if not f.exists()])
         elif not dry and not is_admin():
@@ -172,13 +200,27 @@ class WindowsCleaner(BaseCleaner):
         return r
 
     def _win_recycle(self, dry):
+        """
+        FIX #4: Null-safe Recycle Bin size estimate.
+        Network files and locked items may not expose a .Size property —
+        Measure-Object then outputs empty string (not "0"), causing int(float("")) → ValueError.
+        Fix: use try/except float conversion with explicit 0 fallback,
+             and add -ErrorAction SilentlyContinue to the PS command.
+        """
         r = CleanResult('win_recycle')
+        # FIX: added -ErrorAction SilentlyContinue + null coalesce to avoid empty output
         out, _ = run_win(
-            'PowerShell -NoProfile -Command "(New-Object -ComObject Shell.Application)'
-            '.Namespace(10).Items() | Measure-Object -Property Size -Sum'
+            'PowerShell -NoProfile -Command "'
+            '(New-Object -ComObject Shell.Application).Namespace(10).Items()'
+            ' | Where-Object {$_.Size -ne $null}'
+            ' | Measure-Object -Property Size -Sum -ErrorAction SilentlyContinue'
             ' | Select-Object -ExpandProperty Sum" 2>$null')
-        try: r.freed_bytes = int(float(out or 0))
-        except: pass
+        try:
+            # Null-safe: empty string, "null", None all resolve to 0
+            val = out.strip() if out else ''
+            r.freed_bytes = int(float(val)) if val and val.lower() not in ('', 'null', 'none') else 0
+        except (ValueError, TypeError):
+            r.freed_bytes = 0
         if not dry:
             run_win('PowerShell -NoProfile -Command '
                     '"Clear-RecycleBin -Force -EA SilentlyContinue" 2>$null')
@@ -191,7 +233,6 @@ class WindowsCleaner(BaseCleaner):
         size_before = _dir_size_safe(sd)
         r.freed_bytes = size_before
         if not dry and is_admin():
-            # Stop both wuauserv AND bits — bits also locks files in SoftwareDistribution
             run_win('net stop wuauserv /y', timeout=20)
             run_win('net stop bits /y', timeout=20)
             try:
@@ -203,10 +244,9 @@ class WindowsCleaner(BaseCleaner):
                                            'size': sz, 'note': 're-downloads when needed'})
                         if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
                         else:             item.unlink(missing_ok=True)
-                    except: pass
+                    except (PermissionError, OSError):
+                        pass   # update file locked by BITS/wuauserv — skip
             finally:
-                # FIX: ALWAYS restart services — even if deletion loop crashes mid-way.
-                # Without finally, wuauserv+bits stay stopped until next reboot.
                 run_win('net start bits', timeout=20)
                 run_win('net start wuauserv', timeout=20)
             r.freed_bytes = _real_freed(size_before, sd)
@@ -234,13 +274,12 @@ class WindowsCleaner(BaseCleaner):
         thumb_dir = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft/Windows/Explorer'
         if not thumb_dir.exists(): return r
         files = list(thumb_dir.glob('thumbcache_*.db'))
-        size_before = sum(f.stat().st_size for f in files)
+        size_before = sum(f.stat().st_size for f in files if f.exists())
         r.freed_bytes   = size_before
         r.files_removed = len(files)
         if not dry:
-            # NEVER kill explorer.exe — blacks out desktop/taskbar
-            # Just try to delete; Windows raises PermissionError if file is locked
             deleted = 0
+            locked  = 0
             for f in files:
                 try:
                     sz = f.stat().st_size
@@ -249,10 +288,20 @@ class WindowsCleaner(BaseCleaner):
                     r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                                        'type': 'thumbcache', 'path': str(f),
                                        'size': sz, 'note': 'auto-rebuilds'})
-                except (PermissionError, OSError):
-                    pass  # File locked by Explorer — skip silently, no UI disruption
+                except PermissionError:
+                    # FIX: Explorer holds a lock on thumbcache_*.db while running.
+                    # Silently skipping gave "0 bytes freed" with no explanation.
+                    # Now we count locked files and surface a clear warning.
+                    locked += 1
+                except OSError:
+                    pass
             r.freed_bytes   = deleted
             r.files_removed = len([f for f in files if not f.exists()])
+            if locked > 0:
+                r.error = (
+                    f'{locked} file(s) locked by Explorer — restart Explorer or '
+                    'sign out and back in, then run again to clear the remaining cache.'
+                )
         return r
 
     def _win_dns(self, dry):
@@ -266,24 +315,26 @@ class WindowsCleaner(BaseCleaner):
     def _win_eventlog(self, dry):
         r = CleanResult('win_eventlog')
         evtx_dir = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'System32' / 'winevt' / 'Logs'
-
-        # Measure ACTUAL .evtx file sizes — NOT MaximumKilobytes (that is just a quota cap)
         size_before = _dir_size_safe(evtx_dir) if evtx_dir.exists() else 0
         r.freed_bytes = size_before
-
         if not dry and is_admin():
-            # wevtutil is deeper than Clear-EventLog:
-            #   - handles ALL logs (classic + modern channels)
-            #   - does not require the log service to be running
             out, _ = run_win('wevtutil el', timeout=15)
             logs = [l.strip() for l in out.splitlines() if l.strip()]
             cleared = 0
             for log in logs:
-                safe_name = log.replace('"', '').replace("'", '')
-                _, rc = run_win(f'wevtutil cl "{safe_name}" 2>nul', timeout=10)
-                if rc == 0:
-                    cleared += 1
-            # Windows keeps empty .evtx shells (~68 KB each) — measure real freed space
+                # FIX: use subprocess list (no shell=True) to prevent command injection
+                # via log names containing & ; | characters.
+                try:
+                    import subprocess as _sp
+                    rc = _sp.run(
+                        ['wevtutil', 'cl', log],
+                        capture_output=True, timeout=10,
+                        creationflags=_NO_WIN,
+                    ).returncode
+                    if rc == 0:
+                        cleared += 1
+                except Exception:
+                    pass
             r.freed_bytes   = _real_freed(size_before, evtx_dir)
             r.files_removed = cleared
         elif not dry and not is_admin():
@@ -312,7 +363,10 @@ class WindowsCleaner(BaseCleaner):
                         if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
                         else:             item.unlink(missing_ok=True)
                         r.files_removed += 1
-                    except: pass
+                    except PermissionError:
+                        pass   # WER report currently being written — skip
+                    except OSError:
+                        pass
             size_after = sum(_dir_size_safe(d) for d in existing if d.exists())
             r.freed_bytes = max(0, size_before - size_after)
         return r
@@ -323,9 +377,6 @@ class WindowsCleaner(BaseCleaner):
         roaming = Path(os.environ.get('APPDATA', ''))
 
         if tid == 'firefox_cache':
-            # SAFE: only delete cache2 inside each profile — NOT the whole profile folder!
-            # Roaming\Mozilla\Firefox\Profiles contains passwords, bookmarks, history — never touch!
-            # Cache lives in Local\Mozilla\Firefox\Profiles\<profile>\cache2
             local_ff = local / 'Mozilla/Firefox/Profiles'
             roaming_ff = roaming / 'Mozilla/Firefox/Profiles'
             cache_paths = []
@@ -336,13 +387,19 @@ class WindowsCleaner(BaseCleaner):
                             cache2 = profile_dir / 'cache2'
                             if cache2.exists():
                                 cache_paths.append(cache2)
+            total_freed = 0
             for cache_path in cache_paths:
                 size_before = _dir_size_safe(cache_path)
                 r.freed_bytes += size_before
                 if not dry:
-                    # No rollback — cache auto-rebuilds
                     shutil.rmtree(cache_path, ignore_errors=True)
-                    r.freed_bytes = r.freed_bytes - size_before + _real_freed(size_before, cache_path)
+                    # FIX: accumulate per-profile actual freed independently,
+                    # don't subtract size_before from total (causes negative/wrong results
+                    # when multiple profiles exist).
+                    actually_freed = _real_freed(size_before, cache_path)
+                    total_freed += actually_freed
+            if not dry:
+                r.freed_bytes = total_freed
             return r
 
         paths = {
@@ -356,13 +413,27 @@ class WindowsCleaner(BaseCleaner):
                 local / 'Microsoft/Edge/User Data/Default/Code Cache',
                 local / 'Microsoft/Edge/User Data/Default/GPUCache',
             ],
+            'brave_cache': [
+                local / 'BraveSoftware/Brave-Browser/User Data/Default/Cache',
+                local / 'BraveSoftware/Brave-Browser/User Data/Default/Code Cache',
+                local / 'BraveSoftware/Brave-Browser/User Data/Default/GPUCache',
+            ],
+            'opera_cache': [
+                roaming / 'Opera Software/Opera Stable/Cache',
+                roaming / 'Opera Software/Opera Stable/Code Cache',
+                roaming / 'Opera Software/Opera GX Stable/Cache',
+                roaming / 'Opera Software/Opera GX Stable/Code Cache',
+            ],
         }
+        total_freed = 0
         for path in paths.get(tid, []):
             if not path.exists(): continue
             size_before = _dir_size_safe(path)
             r.freed_bytes += size_before
             if not dry:
-                # No rollback — cache auto-rebuilds, not worth tracking
                 shutil.rmtree(path, ignore_errors=True)
-                r.freed_bytes = r.freed_bytes - size_before + _real_freed(size_before, path)
+                # FIX: accumulate per-path actual freed independently (same bug as Firefox)
+                total_freed += _real_freed(size_before, path)
+        if not dry:
+            r.freed_bytes = total_freed
         return r

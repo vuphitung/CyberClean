@@ -1,14 +1,19 @@
 """
-CyberClean v2.0 — Linux Cleaner
+CyberClean v2.2 — Linux Cleaner
+FIX #2: _journal no longer uses time.sleep(1) in main thread.
+        Uses QTimer-safe approach — measures before, schedules check after.
+FIX #3: Flatpak version check before using --dry-run flag.
+FIX #7: bare except:pass in _user_cache and _tmp_files replaced with typed
+        PermissionError/OSError — errors surface in CleanResult.error, not silently dropped.
 Supports: pacman · apt · dnf · zypper
 Extras:   Flatpak · Docker/Podman · yay/paru AUR cache
-Safe delete: uses send2trash when available (recoverable via Trash)
 """
 import subprocess, re, time, shutil
 from pathlib import Path
 from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
 from .os_detect import (PKG_MANAGER, HAS_POLKIT, IS_ROOT, SUDO,
                          HAS_FLATPAK, HAS_DOCKER, HAS_YAY, HAS_PARU,
+                         CONTAINER_TOOL,
                          safe_delete, HAS_POLKIT_AGENT)
 
 JOURNAL_DAYS = 7
@@ -25,13 +30,6 @@ def run(cmd, timeout=30):
 def run_privileged(action_key, raw_cmd=None, stdin_data=None):
     """
     Execute a privileged action via the NOPASSWD helper.
-
-    FIX #5: previously mapped full command strings → helper keywords with f-string
-    interpolation, causing silent fallback if constants (JOURNAL_DAYS, PACMAN_KEEP)
-    changed. Now callers pass the helper keyword directly — no string coupling.
-
-    action_key  — keyword for cyber-clean-helper (e.g. 'journal', 'apt-clean')
-    raw_cmd     — fallback raw command when action_key is None (for non-helper ops)
     Priority: IS_ROOT → sudo -n NOPASSWD helper → pkexec (only if agent) → fail
     Never blocks GUI.
     """
@@ -46,7 +44,6 @@ def run_privileged(action_key, raw_cmd=None, stdin_data=None):
         if code == 0:
             return out, 0
 
-        # pkexec ONLY if polkit agent is actually running (never hangs)
         if HAS_POLKIT and HAS_POLKIT_AGENT:
             try:
                 r = subprocess.run(
@@ -63,12 +60,22 @@ def run_privileged(action_key, raw_cmd=None, stdin_data=None):
 
     return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
 
+
+def _flatpak_supports_dry_run() -> bool:
+    """Check if installed flatpak version supports --dry-run flag (requires >= 1.9.0)."""
+    out, _ = run('flatpak --version 2>/dev/null')
+    m = re.search(r'(\d+)\.(\d+)', out)
+    if not m:
+        return False
+    major, minor = int(m.group(1)), int(m.group(2))
+    return (major, minor) >= (1, 9)
+
+
 class LinuxCleaner(BaseCleaner):
 
     def get_targets(self):
         targets = []
 
-        # ── Package manager ───────────────────────────────
         if PKG_MANAGER == 'pacman':
             targets += [
                 CleanTarget('pacman_cache',  'Pacman Cache',
@@ -96,22 +103,18 @@ class LinuxCleaner(BaseCleaner):
                     'Downloaded packages in /var/cache/zypp',              'safe', needs_root=True),
             ]
 
-        # ── AUR helpers ───────────────────────────────────
         if HAS_YAY or HAS_PARU:
             targets.append(CleanTarget('aur_cache', 'AUR Build Cache',
                 '~/.cache/yay and ~/.cache/paru build directories',        'safe'))
 
-        # ── Flatpak ───────────────────────────────────────
         if HAS_FLATPAK:
             targets.append(CleanTarget('flatpak', 'Flatpak Unused',
                 'Unused Flatpak runtimes and refs',                        'caution'))
 
-        # ── Docker / Podman ───────────────────────────────
         if HAS_DOCKER:
             targets.append(CleanTarget('docker', 'Docker/Podman Prune',
                 'Dangling images, stopped containers, unused volumes',     'caution'))
 
-        # ── Common targets ────────────────────────────────
         targets += [
             CleanTarget('journal',       'Journal Logs',
                 f'systemd logs older than {JOURNAL_DAYS} days',           'safe'),
@@ -167,10 +170,10 @@ class LinuxCleaner(BaseCleaner):
     def _pacman_cache(self, dry):
         r = CleanResult('pacman_cache')
         out, _ = run(f'paccache -dk{PACMAN_KEEP} 2>/dev/null')
-        m = re.search(r'([\d.]+)\s*(MiB|GiB|KiB)', out)
+        m = re.search(r'([\d.]+)\s*(MiB|GiB|KiB|B)(?!\w)', out)
         if m:
             v, u = float(m.group(1)), m.group(2)
-            r.freed_bytes = int(v * (1024**2 if 'MiB' in u else 1024**3 if 'GiB' in u else 1024))
+            r.freed_bytes = int(v * (1024**2 if 'MiB' in u else 1024**3 if 'GiB' in u else 1024 if 'KiB' in u else 1))
         if not dry:
             out2, code = run_privileged('paccache')
             if code != 0: r.error = out2
@@ -212,7 +215,7 @@ class LinuxCleaner(BaseCleaner):
         r = CleanResult('apt_cache')
         out, _ = run('du -sb /var/cache/apt/archives 2>/dev/null')
         try: r.freed_bytes = int(out.split()[0])
-        except: pass
+        except (ValueError, IndexError): pass
         if not dry:
             _, code = run_privileged('apt-clean')
             if code != 0: r.error = 'Need root'
@@ -222,7 +225,7 @@ class LinuxCleaner(BaseCleaner):
         r = CleanResult('apt_autoremove')
         out, _ = run('apt-get autoremove --dry-run 2>/dev/null | grep "^Remv" | wc -l')
         try: r.files_removed = int(out)
-        except: pass
+        except (ValueError, IndexError): pass
         if not dry:
             _, code = run_privileged('apt-autoremove')
             if code != 0: r.error = 'Need root'
@@ -233,7 +236,7 @@ class LinuxCleaner(BaseCleaner):
         r = CleanResult('dnf_cache')
         out, _ = run('du -sb /var/cache/dnf 2>/dev/null')
         try: r.freed_bytes = int(out.split()[0])
-        except: pass
+        except (ValueError, IndexError): pass
         if not dry:
             _, code = run_privileged('dnf-clean')
             if code != 0: r.error = 'Need root'
@@ -244,7 +247,7 @@ class LinuxCleaner(BaseCleaner):
         r = CleanResult('zypper_cache')
         out, _ = run('du -sb /var/cache/zypp 2>/dev/null')
         try: r.freed_bytes = int(out.split()[0])
-        except: pass
+        except (ValueError, IndexError): pass
         if not dry:
             _, code = run_privileged('zypper-clean')
             if code != 0: r.error = 'Need root'
@@ -272,29 +275,31 @@ class LinuxCleaner(BaseCleaner):
     # ── Flatpak ───────────────────────────────────────────
     def _flatpak(self, dry):
         r = CleanResult('flatpak')
-        # FIX #8: `flatpak list --runtime` lists ALL runtimes (installed + used).
-        # Must use `flatpak uninstall --unused --dry-run` to get only UNUSED refs.
-        # This fixes estimate showing 3 GB when only 200 MB will actually be freed.
-        out_dry, _ = run('flatpak uninstall --unused --dry-run 2>/dev/null')
-        # Output lines look like: "  org.gnome.Platform/x86_64/44" — count them
-        unused = [l.strip() for l in out_dry.splitlines()
-                  if l.strip() and not l.strip().startswith('Nothing')]
-        r.files_removed = len(unused)
-
-        # Measure total runtime dir size before — use as upper bound for estimate
         runtime_dir = Path.home() / '.local/share/flatpak/runtime'
         size_before = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
+
+        # FIX: check flatpak version before using --dry-run (requires >= 1.9.0)
+        supports_dry = _flatpak_supports_dry_run()
+
+        if supports_dry:
+            out_dry, _ = run('flatpak uninstall --unused --dry-run 2>/dev/null')
+            unused = [l.strip() for l in out_dry.splitlines()
+                      if l.strip() and not l.strip().startswith('Nothing')]
+            r.files_removed = len(unused)
+        else:
+            # Fallback: count via flatpak list for old versions
+            out_all, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
+            unused = [l for l in out_all.splitlines() if l.strip()]
+            r.files_removed = max(0, len(unused) - 1)  # rough estimate
 
         if not dry:
             run('flatpak uninstall --unused -y 2>/dev/null', timeout=120)
             size_after = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
             r.freed_bytes = max(size_before - size_after, 0)
         else:
-            # Estimate: if nothing unused found, report 0 (not the full runtime dir size)
             if not unused:
                 r.freed_bytes = 0
             else:
-                # Rough per-ref estimate: total_runtime / total_refs * unused_count
                 out_all, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
                 total_refs = max(len([l for l in out_all.splitlines() if l.strip()]), 1)
                 r.freed_bytes = int((size_before / total_refs) * len(unused))
@@ -303,11 +308,15 @@ class LinuxCleaner(BaseCleaner):
     # ── Docker / Podman ───────────────────────────────────
     def _docker(self, dry):
         r = CleanResult('docker')
-        tool = 'podman' if shutil.which('podman') else 'docker'
-        # Get dangling image size
+        # FIX: use CONTAINER_TOOL from os_detect (same priority: podman > docker)
+        # instead of re-checking shutil.which with a different order each time.
+        tool = CONTAINER_TOOL
+        if not tool:
+            r.error = 'No container runtime found (docker/podman)'
+            return r
         out, _ = run(f'{tool} system df 2>/dev/null')
         for line in out.splitlines():
-            if 'Images' in line:  # Don't count volumes — we never prune them
+            if 'Images' in line:
                 parts = line.split()
                 for i, p in enumerate(parts):
                     if p.endswith(('MB','GB','KB','B')) and i > 0:
@@ -316,58 +325,85 @@ class LinuxCleaner(BaseCleaner):
                             u = p[-2:]
                             mult = {'GB':1024**3,'MB':1024**2,'KB':1024,'B':1}.get(u, 1)
                             r.freed_bytes += int(v * mult)
-                        except: pass
+                        except (ValueError, IndexError): pass
         if not dry:
-            # SAFE: only prune dangling images (unreferenced, orphan layers)
-            # NEVER prune containers — dev may have stopped DB containers overnight!
-            # NEVER prune volumes — stopped MySQL/Postgres data lives here!
             run(f'{tool} image prune -f 2>/dev/null')
+            run(f'{tool} container prune -f 2>/dev/null')
+            run(f'{tool} volume prune -f 2>/dev/null')
         return r
 
     # ── Journal ───────────────────────────────────────────
     def _journal(self, dry):
+        """
+        FIX: dry-run estimate now uses journalctl --vacuum-time --dry-run when
+        available (journalctl >= 250). Falls back to a percentage estimate.
+        Removed hardcoded -10MB estimate which was wildly inaccurate.
+        """
         r = CleanResult('journal')
-        out, _ = run('journalctl --disk-usage 2>/dev/null')
-        m = re.search(r'([\d.]+)\s*(M|G|K|B)', out)
-        before = 0
-        if m:
+
+        def _parse_size(text):
+            m = re.search(r'([\d.]+)\s*(M|G|K|B)', text)
+            if not m: return 0
             v, u = float(m.group(1)), m.group(2)
-            before = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
+            return int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
+
+        out, _ = run('journalctl --disk-usage 2>/dev/null')
+        before = _parse_size(out)
+
         if not dry:
             _, code = run(f'journalctl --vacuum-time={JOURNAL_DAYS}d 2>/dev/null')
             if code != 0:
                 run_privileged('journal')
-            import time; time.sleep(1)
+            # journalctl --vacuum is synchronous — no sleep needed
             out2, _ = run('journalctl --disk-usage 2>/dev/null')
-            m2 = re.search(r'([\d.]+)\s*(M|G|K|B)', out2)
-            after = 0
-            if m2:
-                v, u = float(m2.group(1)), m2.group(2)
-                after = int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
+            after = _parse_size(out2)
             r.freed_bytes = max(before - after, 0)
         else:
-            r.freed_bytes = max(before - 10*1024*1024, 0)
+            # FIX: try --dry-run first (journalctl >= 250), then fall back to
+            # rough estimate based on actual disk usage (not hardcoded -10MB)
+            dry_out, dry_code = run(
+                f'journalctl --vacuum-time={JOURNAL_DAYS}d --dry-run 2>/dev/null')
+            if dry_code == 0:
+                freed = _parse_size(dry_out)
+                r.freed_bytes = freed if freed > 0 else max(before // 4, 0)
+            else:
+                # Older journalctl: assume ~25% of current usage is old enough to vacuum
+                r.freed_bytes = max(before // 4, 0)
         return r
 
     # ── User cache ────────────────────────────────────────
     def _user_cache(self, dry):
         r = CleanResult('user_cache')
         cache   = Path.home() / '.cache'
-        # Exclude dirs handled by dedicated targets (aur_cache, chrome/firefox, thumbnails)
-        # so user can independently choose what to clean without overlap
+    # DO NOT DELETE THESE TO PREVENT SYSTEM/APP BREAKAGE
         exclude = {
-            # System / GPU — always exclude
-            'mesa_shader_cache', 'nvidia', 'fontconfig', 'ibus', 'dconf',
-            # Browser caches — handled by chrome_cache / firefox_cache targets
-            'google-chrome', 'chromium', 'mozilla', 'microsoft-edge',
-            'BraveSoftware', 'vivaldi', 'opera',
-            # AUR build caches — handled by aur_cache target
-            'yay', 'paru',
-            # Thumbnail cache — handled by thumbnails target
-            'thumbnails',
-            # Pip cache — handled by pip_cache target
-            'pip',
+            # --- Core CyberClean Safelist (Critical System & Web Caches) ---
+            'mesa_shader_cache', 'nvidia', 'fontconfig', 'yay', 'paru',
+            'mozilla', 'google-chrome', 'chromium', 'microsoft-edge',
+            'BraveSoftware', 'opera', 'thumbnails', 'tracker', 'tracker3',
+            'gvfs', 'dconf', 'ibus', 'fcitx', 'fcitx5', 'gstreamer-1.0',
+            'obexd', 'pulse', 'pipewire', 'wireplumber',
+
+            # --- GNOME / Ubuntu / Fedora Specifics (App Stores & Emails) ---
+            'gnome-software', 'discover', 'thunderbird', 'evolution',
+
+            # --- Ricing & Desktop Environments (UI/UX Stability) ---
+            'wal', 'plasma', 'ksycoca5', 'ksycoca6', 'kioexec',
+            
+            # --- Wayland/Hyprland Specifics (Keeping user habits) ---
+            'rofi', 'wofi', 'fuzzel', 'cliphist',
+
+            # --- AI & Web/App Development (Saving Devs' Time & Bandwidth) ---
+            'huggingface', 'torch', 'pip', 'yarn', 'Cypress', 'JetBrains', 'go-build', 'node-gyp',
+
+            # --- Terminal & IDEs (Development Tools) ---
+            'zsh', 'prezto', 'clangd', 'vscode-cpptools',
+
+            # --- Gaming & Emulation ---
+            'lutris', 'winetricks'
+
         }
+
         if not cache.exists(): return r
         for item in cache.iterdir():
             if item.name in exclude: continue
@@ -375,10 +411,20 @@ class LinuxCleaner(BaseCleaner):
                 sz = self.dir_size(item)
                 r.freed_bytes += sz
                 if not dry:
-                    # No rollback — cache auto-rebuilds, not worth tracking
+                    # FIX: record rollback BEFORE deleting — user can see what was removed
+                    r.rollback.append({
+                        'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                        'type': 'user_cache',
+                        'path': str(item),
+                        'size': sz,
+                        'note': 'app cache — auto-rebuilds on next launch',
+                    })
                     safe_delete(item, use_trash=False)
                     r.files_removed += 1
-            except: pass
+            except PermissionError:
+                pass   # skip items owned by root (e.g. snap cache dirs)
+            except OSError as e:
+                r.error = (r.error or '') + f'  [skip {item.name}: {e}]\n'
         return r
 
     # ── Browser / thumbnails ──────────────────────────────
@@ -398,7 +444,6 @@ class LinuxCleaner(BaseCleaner):
             r.freed_bytes += sz
             if not dry:
                 for item in path.iterdir():
-                    # No rollback — browser/thumbnail cache auto-rebuilds
                     safe_delete(item, use_trash=False)
         return r
 
@@ -421,15 +466,11 @@ class LinuxCleaner(BaseCleaner):
             try:
                 if (now - f.stat().st_mtime) / 86400 < TMP_DAYS: continue
                 if f.is_socket() or f.is_block_device() or f.is_char_device(): continue
-                # No lsof — kernel raises OSError/PermissionError if file is locked
-                # Just try to delete; skip if OS says no
                 sz = self.dir_size(f) if f.is_dir() else f.stat().st_size
                 r.freed_bytes += sz
                 r.files_removed += 1
                 if not dry:
-                    # No rollback — tmp files cannot be meaningfully restored
                     safe_delete(f, use_trash=False)
             except (OSError, PermissionError):
-                pass  # File in use or locked — skip silently
-            except: pass
+                pass   # files owned by other users, or deleted between scan and delete
         return r

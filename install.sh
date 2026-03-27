@@ -55,6 +55,24 @@ echo "  ╚═════╝   ╚═╝   ╚═════╝ ╚═══�
 echo -e "${NC}"
 echo -e "${CYAN}  Smart Disk Cleaner v${VERSION} — Installing...${NC}\n"
 
+head "Checking requirements"
+PY_CMD=""
+for py in python3 python; do
+    if command -v "$py" &>/dev/null; then
+        PY_VER=$("$py" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null)
+        if "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' 2>/dev/null; then
+            PY_CMD="$py"
+            ok "Python $PY_VER found"
+            break
+        else
+            warn "Python $PY_VER found but PyQt6 requires 3.9+ — skipping"
+        fi
+    fi
+done
+if [[ -z "$PY_CMD" ]]; then
+    err "Python 3.9+ is required. Install it first:\n  sudo apt install python3  (Debian/Ubuntu)\n  sudo pacman -S python     (Arch)"
+fi
+
 head "Downloading"
 mkdir -p /opt/CyberClean
 TARGZ_TMP="/tmp/CyberClean.tar.gz"
@@ -116,8 +134,8 @@ case "$1" in
   pacman-orphans)   pkgs=$(cat); [[ -n "$pkgs" ]] && pacman -Rns --noconfirm $pkgs 2>/dev/null ;;
   journal)          journalctl --vacuum-time=7d 2>/dev/null ;;
   broken-downloads) find /var/cache/pacman/pkg -name "download-*" -delete 2>/dev/null ;;
-  apt-clean)        apt-get clean 2>/dev/null ;;
-  apt-autoremove)   apt-get autoremove -y 2>/dev/null ;;
+  apt-clean)        DEBIAN_FRONTEND=noninteractive apt-get clean 2>/dev/null ;;
+  apt-autoremove)   DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null ;;
   dnf-clean)        dnf clean all 2>/dev/null ;;
   zypper-clean)     zypper clean --all 2>/dev/null ;;
   fstrim)           fstrim -av 2>/dev/null ;;
@@ -136,7 +154,7 @@ case "$1" in
   kill-pid)         [[ -z "$2" ]] && exit 1; kill -9 "$2" 2>/dev/null ;;
   stop-service)     [[ -z "$2" ]] && exit 1; systemctl stop "$2" 2>/dev/null ;;
   pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "${@:2}" 2>/dev/null ;;
-  apt-remove)       [[ -z "$2" ]] && exit 1; apt-get remove -y "$2" 2>/dev/null ;;
+  apt-remove)       [[ -z "$2" ]] && exit 1; DEBIAN_FRONTEND=noninteractive apt-get remove -y "$2" 2>/dev/null ;;
   dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;
   one-click-fix)
     sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
@@ -152,7 +170,17 @@ ok "System helper → $HELPER"
 
 # Write sudoers rule — works on all distros (Arch uses wheel, Debian/Ubuntu uses sudo group)
 # "ALL ALL" means: any user on any host — safe because HELPER path is tightly scoped
-echo "ALL ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
+# Restrict to members of the 'sudo' group (Debian/Ubuntu) or 'wheel' (Arch/Fedora).
+# "ALL ALL" would grant any user on any host passwordless access — too broad.
+# We detect which group exists and use the appropriate one.
+if getent group sudo &>/dev/null; then
+    SUDO_GROUP="sudo"
+elif getent group wheel &>/dev/null; then
+    SUDO_GROUP="wheel"
+else
+    SUDO_GROUP="sudo"   # fallback — at worst same as before but with group constraint
+fi
+echo "%${SUDO_GROUP} ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
 chmod 0440 /etc/sudoers.d/cyberclean
 # Validate sudoers syntax before applying — prevents locking out sudo on bad distros
 visudo -c -f /etc/sudoers.d/cyberclean 2>/dev/null && ok "Sudoers rule validated" || warn "Sudoers validation skipped (visudo not found)"

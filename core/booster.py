@@ -22,7 +22,9 @@ except ImportError:
     HAS_PSUTIL = False
 
 HELPER = "/usr/local/bin/cyber-clean-helper"
-CURRENT_UID = os.getuid() if IS_LINUX else -1
+# FIX: os.getuid() does not exist on Windows — use getattr with lambda fallback
+# so importing this module on Windows never raises AttributeError.
+CURRENT_UID = getattr(os, 'getuid', lambda: -1)()
 
 # ══════════════════════════════════════════════════════════════
 # LAYER 1: CROSS-PLATFORM OS FIREWALL
@@ -148,7 +150,8 @@ def free_ram(log):
                         ctypes.windll.psapi.EmptyWorkingSet(h)
                         ctypes.windll.kernel32.CloseHandle(h)
                         count += 1
-                except: pass
+                except (OSError, psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass   # process exited between iteration and handle open
             log(f"  + Trimmed {count} background working sets (UI/mouse/audio skipped)", "ok")
         except Exception as e:
             log(f"  ~ {e}", "warn")
@@ -168,30 +171,61 @@ def memory_tune(log):
     Tune kernel memory params.
     Returns a dict of {param: original_value} so caller can restore on exit.
     On Windows: no kernel params to tune — returns empty dict.
+
+    FIX: Validate dirty_ratio >= dirty_background_ratio + 2 (kernel constraint).
+         Check file writability before attempting write — avoids silent PermissionError swallow.
+         Order writes: swappiness first, then dirty_background_ratio, then dirty_ratio
+         so we never end up in an invalid state mid-write.
     """
     result = BoostResult("memory_tune")
     log("Tuning memory settings...", "head")
-    # FIX: Save original values before writing — callers MUST call memory_tune_restore() on exit
     _originals: dict = {}
 
     if IS_LINUX:
-        for param, val, label, helper_key in [
-            ("swappiness",             "10", "swappiness = 10",             "swappiness"),
-            ("dirty_ratio",            "10", "dirty_ratio = 10",            "dirty-ratio"),
-            ("dirty_background_ratio", "5",  "dirty_background_ratio = 5",  "dirty-background-ratio"),
-        ]:
+        # Target values — dirty_ratio must be >= dirty_background_ratio + 2
+        TUNED = {
+            "swappiness":             "10",
+            "dirty_background_ratio": "5",
+            "dirty_ratio":            "10",   # must be >= 5 + 2 = 7; 10 is safe
+        }
+        HELPER_KEYS = {
+            "swappiness":             "swappiness",
+            "dirty_background_ratio": "dirty-background-ratio",
+            "dirty_ratio":            "dirty-ratio",
+        }
+        LABELS = {
+            "swappiness":             "swappiness = 10",
+            "dirty_background_ratio": "dirty_background_ratio = 5",
+            "dirty_ratio":            "dirty_ratio = 10",
+        }
+        # Write order matters: background_ratio before ratio to avoid constraint violation
+        WRITE_ORDER = ["swappiness", "dirty_background_ratio", "dirty_ratio"]
+
+        for param in WRITE_ORDER:
+            val = TUNED[param]
+            label = LABELS[param]
+            helper_key = HELPER_KEYS[param]
+            p = Path(f"/proc/sys/vm/{param}")
             try:
-                p = Path(f"/proc/sys/vm/{param}")
                 orig = p.read_text().strip()
-                p.write_text(val)
+                # Skip if already at target — no need to write
+                if orig == val:
+                    log(f"  ~ {label}  [already set]", "ok")
+                    continue
+                # Test writability before committing (avoids silent except-swallow)
+                if not os.access(str(p), os.W_OK):
+                    raise PermissionError(f"not writable: {p}")
+                p.write_text(val + "\n")
                 _originals[param] = orig
                 log(f"  + {label}  [{orig} → {val}]", "ok")
-            except:
+            except (PermissionError, OSError):
+                # Fall back to NOPASSWD helper
                 _, code = _run_helper(helper_key, timeout=10)
                 if code == 0:
                     log(f"  + {label} (via helper)", "ok")
                 else:
-                    log(f"  ~ {param}: no write access", "warn")
+                    log(f"  ~ {param}: no write access — run install.sh for full optimization", "warn")
+
         _, code = _run_helper("compact-memory", timeout=10)
         if code == 0:
             log("  + Memory compacted", "ok")
@@ -204,7 +238,7 @@ def memory_tune(log):
         mem = psutil.virtual_memory()
         log(f"+ Memory tune done -- {mem.percent:.1f}% used, {mem.available//1024//1024} MB free", "ok")
 
-    result.rollback = [{"originals": _originals}]   # stash for restore
+    result.rollback = [{"originals": _originals}]
     return result
 
 
@@ -217,8 +251,8 @@ def memory_tune_restore(originals: dict, log):
             p = Path(f"/proc/sys/vm/{param}")
             p.write_text(orig_val)
             log(f"  + Restored vm.{param} = {orig_val}", "ok")
-        except:
-            pass
+        except (PermissionError, OSError) as e:
+            log(f"  ~ Could not restore vm.{param}: {e}", "warn")
 
 
 def clear_disk_cache(log):
@@ -290,7 +324,8 @@ def _has_active_children(pid):
         for child in psutil.Process(pid).children(recursive=True):
             if child.status() == psutil.STATUS_RUNNING:
                 return True
-    except: pass
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        pass   # process exited or we lost access mid-scan
     return False
 
 
@@ -336,7 +371,8 @@ def kill_bloat(log):
         try:
             p.cpu_percent(interval=0)
             _warmup_pids.add(p.pid)
-        except: pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     import time as _time; _time.sleep(0.6)   # 600ms window — enough for accurate delta
 
     killed = 0
@@ -352,7 +388,7 @@ def kill_bloat(log):
                 if IS_LINUX:
                     try:
                         if p.uids().real != CURRENT_UID: continue
-                    except: continue
+                    except (psutil.NoSuchProcess, psutil.AccessDenied): continue
                     oom = _get_oom_score(p.pid)
                     if oom < 200: continue
                     if _has_active_children(p.pid): continue
@@ -381,7 +417,8 @@ def kill_bloat(log):
                         p.wait(timeout=2)
                     except Exception:
                         try: p.kill()  # SIGKILL only if it refuses to die
-                        except: pass
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass   # process already gone between terminate and kill
                     killed += 1
                     result.mb_freed += pmem
                     log(f"  x [{tag}] {p.name()} -- {pmem} MB", "warn")
@@ -462,7 +499,8 @@ def _enable_kernel_performance(log):
             if "GUID:" in out:
                 orig_guid = out.split("GUID:")[1].split()[0].strip()
                 log(f"  · Saved original power plan: {orig_guid[:8]}...", "ok")
-        except: pass
+        except (subprocess.TimeoutExpired, OSError, IndexError):
+            pass   # powercfg unavailable or output format changed
 
         # Switch to Ultimate → High Performance
         for guid, name in [(POWER_ULTIMATE, "Ultimate"), (POWER_HIGH_PERF, "High Performance")]:
@@ -639,13 +677,15 @@ def game_mode_off(saved, log):
     # Restore nice/priority
     for pid, orig in saved.get("nice", {}).items():
         try: psutil.Process(pid).nice(orig)
-        except: pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass   # process exited since game mode was enabled
 
     # Restore CPU affinity
     restored = 0
     for pid, orig in saved.get("affinity", {}).items():
         try: psutil.Process(pid).cpu_affinity(orig); restored += 1
-        except: pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass   # process exited since game mode was enabled
     if restored:
         log(f"  + CPU affinity restored for {restored} processes", "ok")
 
@@ -663,9 +703,20 @@ def eco_mode_on(log):
     Windows: BELOW_NORMAL (not IDLE) — no stutter. Windows Quantum Boosting
              handles foreground automatically — no need to manually boost it.
     Linux:   nice(5) gentle yield — not brutal nice(19).
+             REQUIRES root: Linux kernel blocks nice() restore for non-root users
+             (can lower nice but not raise back = apps stay throttled forever).
+             Non-root on Linux → logs a clear warning, returns empty dict (no-op).
     Never throttle: system procs, GPU, browsers, chat apps (user switches often).
     """
     if not HAS_PSUTIL: return {}
+
+    # FIX: Surface clear warning for Linux non-root instead of silent no-op.
+    # smart_boost_on() calls eco_mode for MID+LOW tiers but this is Linux-root-only.
+    if IS_LINUX and os.geteuid() != 0:
+        log("  ~ Eco Mode skipped on Linux — needs root to guarantee nice() restore", "warn")
+        log("  i Run install.sh to enable NOPASSWD helper, then relaunch as root for full eco mode", "ok")
+        return {}
+
     SKIP = {
         # Linux core
         "python", "python3", "cyberclean", "systemd", "kwin",
@@ -689,37 +740,28 @@ def eco_mode_on(log):
         # Office — may have unsaved work
         "excel", "winword", "powerpnt", "onenote", "outlook",
     }
-    # NOTE: No fg_pid / ABOVE_NORMAL logic here.
-    # Windows Quantum Boosting already handles foreground priority automatically.
-    # Manually setting ABOVE_NORMAL on CyberClean would persist after alt-tab,
-    # causing Excel/Word to lag while CyberClean sits idle in tray.
     saved = {}
     throttled = 0
     for p in psutil.process_iter(["pid", "name"]):
         try:
             nm = (p.info["name"] or "").lower().replace(".exe", "")
             if nm in SKIP: continue
-            if _is_protected(nm): continue  # GPU drivers, display, audio — never throttle
+            if _is_protected(nm): continue
             with p.oneshot():
                 if IS_LINUX:
                     try:
                         if p.uids().real != CURRENT_UID: continue
-                    except: continue
+                    except (psutil.NoSuchProcess, psutil.AccessDenied): continue
                 cur = p.nice()
                 if IS_WINDOWS:
-                    # BELOW_NORMAL = yield without freezing; IDLE causes mouse stutter
                     if cur not in (psutil.BELOW_NORMAL_PRIORITY_CLASS, psutil.IDLE_PRIORITY_CLASS):
                         saved[p.pid] = cur
                         p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
                         throttled += 1
                 elif IS_LINUX:
-                    # FIX: Linux kernel security rule — non-root can LOWER nice (slow down)
-                    # but CANNOT RAISE it back (restore to original). This is a one-way street.
-                    # If we set nice(5) without root, eco_mode_off silently fails → apps stay
-                    # throttled forever until reboot. Only throttle if we can guarantee restore.
-                    if os.geteuid() == 0 and cur < 5:
+                    if cur < 5:
                         saved[p.pid] = cur
-                        p.nice(5)  # gentle yield, not brutal 19
+                        p.nice(5)
                         throttled += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied): pass
     log(f"ECO MODE ON -- {throttled} background tasks soft-throttled (yield mode)", "ok")
@@ -731,7 +773,8 @@ def eco_mode_off(saved, log):
     restored = 0
     for pid, orig in saved.items():
         try: psutil.Process(pid).nice(orig); restored += 1
-        except: pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass   # process exited during eco session
     log(f"ECO MODE OFF -- {restored} processes restored", "ok")
 
 
