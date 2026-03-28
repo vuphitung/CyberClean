@@ -5,6 +5,12 @@ FIX #2: _journal no longer uses time.sleep(1) in main thread.
 FIX #3: Flatpak version check before using --dry-run flag.
 FIX #7: bare except:pass in _user_cache and _tmp_files replaced with typed
         PermissionError/OSError — errors surface in CleanResult.error, not silently dropped.
+FIX #8: _user_cache redesigned with 3-layer protection:
+        Layer 1 — Name whitelist (GPU, fonts, browsers, wallpaper daemons, theming tools...)
+        Layer 2 — Smart type guard: skip any item that IS or CONTAINS a socket/FIFO/device.
+                  Catches unknown apps without needing their name in any list.
+        Layer 3 — Recently-modified guard (< 30s): skip dirs active right now.
+        _tmp_files: added is_fifo() to guard list (was missing — FIFOs are also runtime IPC).
 Supports: pacman · apt · dnf · zypper
 Extras:   Flatpak · Docker/Podman · yay/paru AUR cache
 """
@@ -119,7 +125,7 @@ class LinuxCleaner(BaseCleaner):
             CleanTarget('journal',       'Journal Logs',
                 f'systemd logs older than {JOURNAL_DAYS} days',           'safe'),
             CleanTarget('user_cache',    'User Cache (~/.cache)',
-                'App caches — excludes GPU/font caches',                  'safe'),
+                'App caches — 3-layer guard: name list + socket detect + activity check', 'safe'),
             CleanTarget('chrome_cache',  'Chrome / Chromium Cache',
                 'Browser cache — auto-rebuilds on next launch',           'safe'),
             CleanTarget('firefox_cache', 'Firefox Cache',
@@ -374,44 +380,149 @@ class LinuxCleaner(BaseCleaner):
     # ── User cache ────────────────────────────────────────
     def _user_cache(self, dry):
         r = CleanResult('user_cache')
-        cache   = Path.home() / '.cache'
-    # DO NOT DELETE THESE TO PREVENT SYSTEM/APP BREAKAGE
-        exclude = {
-            # --- Core CyberClean Safelist (Critical System & Web Caches) ---
-            'mesa_shader_cache', 'nvidia', 'fontconfig', 'yay', 'paru',
+        cache = Path.home() / '.cache'
+        if not cache.exists():
+            return r
+
+        # ══════════════════════════════════════════════════════
+        # LAYER 1 — NAME WHITELIST (explicit, never touch these)
+        # Kể cả khi logic thông minh ở Layer 2/3 không bắt được,
+        # những thứ này vẫn được bảo vệ tuyệt đối.
+        # ══════════════════════════════════════════════════════
+        NAME_EXCLUDE = {
+            # ── GPU / Display drivers (xóa = crash / màn hình đen) ──
+            'mesa_shader_cache', 'mesa', 'nvidia', 'amdgpu',
+            'radeon', 'intel', 'vulkan',
+
+            # ── Fonts (xóa = ô vuông khắp nơi) ──
+            'fontconfig',
+
+            # ── Browsers (có target riêng, không xử lý ở đây) ──
             'mozilla', 'google-chrome', 'chromium', 'microsoft-edge',
-            'BraveSoftware', 'opera', 'thumbnails', 'tracker', 'tracker3',
-            'gvfs', 'dconf', 'ibus', 'fcitx', 'fcitx5', 'gstreamer-1.0',
-            'obexd', 'pulse', 'pipewire', 'wireplumber',
+            'BraveSoftware', 'brave', 'opera', 'vivaldi',
 
-            # --- GNOME / Ubuntu / Fedora Specifics (App Stores & Emails) ---
-            'gnome-software', 'discover', 'thunderbird', 'evolution',
+            # ── Package managers (AUR có target riêng) ──
+            'yay', 'paru',
 
-            # --- Ricing & Desktop Environments (UI/UX Stability) ---
-            'wal', 'plasma', 'ksycoca5', 'ksycoca6', 'kioexec',
-            
-            # --- Wayland/Hyprland Specifics (Keeping user habits) ---
-            'rofi', 'wofi', 'fuzzel', 'cliphist',
+            # ── Thumbnails (có target riêng) ──
+            'thumbnails',
 
-            # --- AI & Web/App Development (Saving Devs' Time & Bandwidth) ---
-            'huggingface', 'torch', 'pip', 'yarn', 'Cypress', 'JetBrains', 'go-build', 'node-gyp',
+            # ── Wayland / X11 compositor & display runtime ──
+            'hyprland', 'sway', 'i3', 'openbox', 'xfwm4',
+            'kwin', 'mutter', 'marco',
 
-            # --- Terminal & IDEs (Development Tools) ---
-            'zsh', 'prezto', 'clangd', 'vscode-cpptools',
+            # ── Wallpaper managers (daemon giữ socket trong cache) ──
+            # Xóa = màn hình đen hoặc wallpaper mất
+            'swww', 'swaybg', 'hyprpaper', 'wpaperd', 'mpvpaper',
+            'feh', 'nitrogen', 'variety', 'wbg', 'xwallpaper',
 
-            # --- Gaming & Emulation ---
-            'lutris', 'winetricks'
+            # ── Theming / color scheme (xóa = mất theme hiện tại) ──
+            'wal', 'wallust', 'matugen', 'pywal', 'lutgen',
+            'wpg', 'chameleon',
 
+            # ── Desktop environment runtime caches ──
+            'plasma', 'ksycoca5', 'ksycoca6', 'kioexec',
+            'gnome-software', 'gnome-shell', 'gnome-session',
+            'discover', 'tracker', 'tracker3',
+
+            # ── Input methods (xóa = không gõ được) ──
+            'ibus', 'fcitx', 'fcitx5',
+
+            # ── Audio (xóa = mất âm thanh / app không nhận device) ──
+            'pipewire', 'wireplumber', 'pulse', 'pulseaudio',
+            'gstreamer-1.0', 'obexd',
+
+            # ── Bars / launchers / notif (có socket runtime) ──
+            'waybar', 'polybar', 'eww', 'ags',
+            'rofi', 'wofi', 'fuzzel', 'tofi', 'anyrun',
+            'dunst', 'mako', 'swaync', 'fnott',
+            'cliphist', 'wl-clipboard',
+
+            # ── Filesystem / GVFS (xóa = mount points bị ảnh hưởng) ──
+            'gvfs', 'dconf', 'glib-2.0',
+
+            # ── Email clients ──
+            'thunderbird', 'evolution', 'geary',
+
+            # ── AI / ML (model cache cực lớn, tải lại rất lâu) ──
+            'huggingface', 'torch', 'transformers',
+
+            # ── Dev tools (tải lại tốn bandwidth / thời gian) ──
+            'pip', 'yarn', 'Cypress', 'JetBrains',
+            'go-build', 'node-gyp', 'cargo',
+            'clangd', 'vscode-cpptools',
+            'zsh', 'prezto',
+
+            # ── Gaming (Lutris / Wine prefix cache) ──
+            'lutris', 'winetricks',
         }
 
-        if not cache.exists(): return r
+        # ══════════════════════════════════════════════════════
+        # LAYER 2 — SMART TYPE GUARD (không cần biết tên app)
+        # Bất kể tool mới lạ nào, nếu nó để lại socket/fifo/device
+        # trong .cache thì tự động được bỏ qua.
+        # Socket = "dây thần kinh" IPC của app đang chạy.
+        # Xóa socket = app crash ngay lập tức.
+        # ══════════════════════════════════════════════════════
+        def _is_runtime_file(p: Path) -> bool:
+            """True nếu item là socket, FIFO hoặc block/char device."""
+            try:
+                return p.is_socket() or p.is_fifo() or p.is_block_device() or p.is_char_device()
+            except OSError:
+                return True   # không stat được → giữ lại cho an toàn
+
+        def _dir_has_socket(p: Path) -> bool:
+            """
+            True nếu thư mục chứa bất kỳ socket / FIFO nào ở cấp đầu tiên.
+            Đây là dấu hiệu app đang chạy và giữ runtime state trong thư mục này.
+            Chỉ check cấp 1 — đủ để phát hiện, không cần đệ quy toàn bộ cây.
+            """
+            try:
+                for child in p.iterdir():
+                    if _is_runtime_file(child):
+                        return True
+            except (OSError, PermissionError):
+                return True   # không đọc được → giữ lại an toàn
+            return False
+
+        # ══════════════════════════════════════════════════════
+        # LAYER 3 — RECENTLY MODIFIED GUARD
+        # Thư mục được modified trong vòng 30 giây = app đang active.
+        # Không xóa để tránh race condition.
+        # ══════════════════════════════════════════════════════
+        _now = time.time()
+        _ACTIVE_WINDOW_SEC = 30
+
+        def _recently_modified(p: Path) -> bool:
+            try:
+                return (_now - p.stat().st_mtime) < _ACTIVE_WINDOW_SEC
+            except OSError:
+                return True   # không stat được → giữ lại an toàn
+
+        # ── Main iteration ────────────────────────────────────
         for item in cache.iterdir():
-            if item.name in exclude: continue
+
+            # Layer 1: tên nằm trong whitelist → skip tuyệt đối
+            if item.name in NAME_EXCLUDE:
+                continue
+
+            # Layer 2a: bản thân item là socket/FIFO/device → skip
+            if _is_runtime_file(item):
+                continue
+
+            # Layer 2b: nếu là thư mục và chứa socket bên trong → skip
+            if item.is_dir() and _dir_has_socket(item):
+                continue
+
+            # Layer 3: modified trong vòng 30 giây → skip (app đang active)
+            if _recently_modified(item):
+                continue
+
+            # Vượt qua cả 3 tầng → an toàn để xóa
             try:
                 sz = self.dir_size(item)
                 r.freed_bytes += sz
                 if not dry:
-                    # FIX: record rollback BEFORE deleting — user can see what was removed
                     r.rollback.append({
                         'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                         'type': 'user_cache',
@@ -422,7 +533,7 @@ class LinuxCleaner(BaseCleaner):
                     safe_delete(item, use_trash=False)
                     r.files_removed += 1
             except PermissionError:
-                pass   # skip items owned by root (e.g. snap cache dirs)
+                pass   # snap cache dirs owned by root — skip silently
             except OSError as e:
                 r.error = (r.error or '') + f'  [skip {item.name}: {e}]\n'
         return r
@@ -464,8 +575,14 @@ class LinuxCleaner(BaseCleaner):
         now = _t.time()
         for f in Path('/tmp').iterdir():
             try:
-                if (now - f.stat().st_mtime) / 86400 < TMP_DAYS: continue
-                if f.is_socket() or f.is_block_device() or f.is_char_device(): continue
+                # Skip IPC runtime files — these are active sockets/FIFOs used
+                # by Wayland compositors (e.g. /tmp/wayland-0), X11, PipeWire, etc.
+                # Deleting any of these crashes the compositor or audio daemon immediately.
+                if f.is_socket() or f.is_fifo() or f.is_block_device() or f.is_char_device():
+                    continue
+                # Skip files modified recently — could be in active use
+                if (now - f.stat().st_mtime) / 86400 < TMP_DAYS:
+                    continue
                 sz = self.dir_size(f) if f.is_dir() else f.stat().st_size
                 r.freed_bytes += sz
                 r.files_removed += 1

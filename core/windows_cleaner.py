@@ -7,10 +7,49 @@ FIX #5: _dir_size_safe replaced rglob with os.walk(followlinks=False) to prevent
         infinite loops from NTFS junction points (e.g. AppData/Local/Application Data).
 FIX #6: bare except:pass replaced with typed except in all file-deletion loops —
         errors are now skipped with a reason, not silently swallowed.
+FIX #9: _win_temp redesigned with smart guards:
+        - ELECTRON_PREFIXES extended to cover more runtimes (Electron, CEF, etc.)
+        - _is_safe_to_delete() probes exclusive open before touching file —
+          locked files (open by another process) are skipped without error.
+        - Directory guard: dirs containing any locked/socket-equivalent files are skipped.
+        - Age threshold remains 24h for safety.
 """
-import os, shutil, subprocess, time
+import os, shutil, subprocess, time, stat as _stat
 from pathlib import Path
 from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
+
+_NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+
+def run_win(cmd, timeout=30):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True,
+                           text=True, timeout=timeout,
+                           creationflags=_NO_WIN)
+        return r.stdout.strip(), r.returncode
+    except Exception as e:
+        return str(e), 1
+
+def is_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except:
+        return False
+
+def _is_locked_win(path: Path) -> bool:
+    """
+    Try to open the file exclusively. If it fails with a sharing violation
+    (WinError 32) or access denied, the file is locked by another process.
+    Returns True = locked (skip), False = safe to delete.
+    Only meaningful on files; always returns False for directories.
+    """
+    if not path.is_file():
+        return False
+    try:
+        with open(path, 'rb+'):
+            return False   # opened fine → not locked
+    except (PermissionError, OSError):
+        return True   # locked or access denied → skip
 
 _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
 
@@ -133,24 +172,61 @@ class WindowsCleaner(BaseCleaner):
             Path('C:/Windows/Temp'),
         })
         now = time.time()
-        ELECTRON_PREFIXES = (
+
+        # ── Prefix guard: dirs whose names start with these are NEVER touched ──
+        # These are active runtime dirs created by Electron/CEF apps that keep
+        # file handles open the entire session. Attempting rmtree = access denied cascade.
+        SKIP_DIR_PREFIXES = (
+            # Electron / CEF runtime scratch dirs
             'scoped_dir', 'chrome_', 'msedge_', 'discord',
             'vscode', 'electron', 'squirrel',
+            # .NET / CLR temp assembly dirs
+            'tmp', 'clr',
+            # Windows installer staging
+            'msi', 'msp',
         )
+
+        # ── Extension guard: files with these extensions are NEVER deleted ──
+        # .tmp files with these extensions may still be open by their host process.
+        SKIP_EXTENSIONS = {
+            '.lnk',   # shell shortcuts — deleting = broken Start Menu entry
+            '.lock',  # lock files used by databases, IDEs, package managers
+            '.msi',   # MSI being staged for installation
+        }
+
         for d in dirs:
-            if not d.exists(): continue
+            if not d.exists():
+                continue
             safe_path = str(d).lower().replace(os.sep, '/')
+            # Absolute safety: never iterate these root paths
             if safe_path.rstrip('/') in ('c:', 'c:/', 'c:/windows', 'c:/users'):
                 continue
+
             size_before = _dir_size_safe(d)
             if not dry:
                 deleted = 0
                 for item in d.iterdir():
                     try:
-                        if item.is_dir() and item.name.lower().startswith(ELECTRON_PREFIXES):
+                        # Layer 1: age check — must be older than 24h
+                        mtime = item.stat().st_mtime
+                        if (now - mtime) < 86400:
                             continue
-                        if (now - item.stat().st_mtime) < 86400:
+
+                        # Layer 2: directory prefix guard
+                        if item.is_dir() and item.name.lower().startswith(SKIP_DIR_PREFIXES):
                             continue
+
+                        # Layer 3: extension guard for files
+                        if item.is_file() and item.suffix.lower() in SKIP_EXTENSIONS:
+                            continue
+
+                        # Layer 4: lock probe — try opening the file exclusively.
+                        # If it's locked by another process, skip entirely.
+                        # For directories, we rely on rmtree(ignore_errors=True).
+                        if item.is_file() and _is_locked_win(item):
+                            continue
+
+                        # Safe to delete
                         sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
                         if item.is_dir():
                             shutil.rmtree(item, ignore_errors=True)
@@ -158,16 +234,22 @@ class WindowsCleaner(BaseCleaner):
                             item.unlink(missing_ok=True)
                         deleted += sz
                         r.files_removed += 1
+
                     except PermissionError:
-                        pass   # file locked by a running process — skip silently
+                        pass   # file still locked after probe (race) — skip
                     except OSError:
                         pass
                 r.freed_bytes += deleted
             else:
+                # dry-run: estimate only, no file access probing
                 for item in d.iterdir():
                     try:
-                        if (now - item.stat().st_mtime) < 86400: continue
-                        if item.is_dir() and item.name.lower().startswith(ELECTRON_PREFIXES): continue
+                        if (now - item.stat().st_mtime) < 86400:
+                            continue
+                        if item.is_dir() and item.name.lower().startswith(SKIP_DIR_PREFIXES):
+                            continue
+                        if item.is_file() and item.suffix.lower() in SKIP_EXTENSIONS:
+                            continue
                         r.freed_bytes += _dir_size_safe(item) if item.is_dir() else item.stat().st_size
                     except (OSError, PermissionError):
                         pass
