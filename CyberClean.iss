@@ -1,10 +1,10 @@
-; CyberClean v2.1.0 - Inno Setup Script
+; CyberClean v2.2.0 - Inno Setup Script
 ; Build: Open in Inno Setup Compiler and press Compile (F9)
 ; Download: https://jrsoftware.org/isinfo.php
 
 [Setup]
 AppName=CyberClean
-AppVersion=2.1.0
+AppVersion=2.2.0
 AppPublisher=vuphitung
 AppPublisherURL=https://github.com/vuphitung/CyberClean
 AppSupportURL=https://github.com/vuphitung/CyberClean/issues
@@ -13,7 +13,7 @@ DefaultDirName={autopf}\CyberClean
 DefaultGroupName=CyberClean
 AllowNoIcons=yes
 OutputDir=dist
-OutputBaseFilename=CyberClean_Setup_v2.1.0
+OutputBaseFilename=CyberClean_Setup_v2.2.0
 SetupIconFile=C:\CyberClean\assets\logo.ico
 Compression=lzma
 SolidCompression=yes
@@ -21,7 +21,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 UninstallDisplayName=CyberClean
 UninstallDisplayIcon={app}\CyberClean.exe
-VersionInfoVersion=2.1.0
+VersionInfoVersion=2.2.0
 VersionInfoDescription=Smart Disk Cleaner
 
 [Languages]
