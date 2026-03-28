@@ -10,7 +10,7 @@
 ```
 
 **Smart System Cleaner & Performance Optimizer**
-**Windows · Linux · Cross-platform · v2.0**
+**Windows · Linux · Cross-platform · v2.2.0**
 
 <br/>
 
@@ -26,27 +26,39 @@
 
 <br/>
 
-<!-- Microsoft Security Verified Badge -->
+---
+
+<!-- Security Badge -->
 <table>
 <tr>
-<td align="center" width="520">
+<td align="center" width="560">
 
-### 🛡️ Microsoft Security Verified
+```
+╔══════════════════════════════════════════════╗
+║  ✔  MICROSOFT DEFENDER SCAN — NO THREAT      ║
+║─────────────────────────────────────────────║
+║  Result  :  No malicious code detected       ║
+║  Engine  :  Microsoft Security Intelligence  ║
+║  Sub ID  :  b632c14c-aff3-4ef6-97ab-...cd   ║
+║  Status  :  Completed ✓                      ║
+╚══════════════════════════════════════════════╝
+```
 
-This application has been reviewed and cleared by **Microsoft Security Intelligence**.<br/>
-Submission ID: `b632c14c-aff3-4ef6-97ab-4058309bc4cd` · Status: **✅ Completed**
+**CyberClean passed an independent malware scan by Microsoft Defender.**
+This is a self-submitted scan result — not a Microsoft partnership or endorsement.
+No malicious code · No telemetry · No hidden behavior.
 
-*CyberClean is safe to use. No malicious code, no telemetry, no hidden behavior.*
+[![Scan Result](https://img.shields.io/badge/Microsoft%20Defender-No%20Threat%20Detected-0078D4?style=for-the-badge&logo=microsoftdefender&logoColor=white)](https://www.microsoft.com/en-us/wdsi/filesubmission)
 
-[![Microsoft Security](https://img.shields.io/badge/Microsoft%20Security-Verified%20Clean-0078D4?style=for-the-badge&logo=microsoftdefender&logoColor=white)](https://www.microsoft.com/en-us/wdsi/filesubmission)
-
-<img src="screenshots/Microsoft-Security.png" width="600"/>
+<img src="screenshots/Microsoft-Security.png" width="580"/>
 
 </td>
 </tr>
 </table>
 
 <br/>
+
+---
 
 <table>
 <tr>
@@ -82,7 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Installer
 
-**[⬇ Download CyberClean Setup v2.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Download CyberClean Setup v2.2.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 > UAC elevation on **first install only** · No background services · Uninstall via `Settings → Apps → CyberClean`
 
@@ -93,18 +105,24 @@ sudo cyberclean --uninstall
 ## ✨ Features
 
 ### 📊 Real-time Dashboard
-Live system monitoring with auto-refresh every 4 seconds.
+
+Live system monitoring, auto-refreshes every 4 seconds.
+
 - CPU usage per core with sparkline history chart
-- RAM / Swap usage with available memory readout
+- RAM / Swap usage and available memory readout
 - Disk usage rings per mount point
-- Temperature monitoring — multi-source fallback (psutil → `/sys/thermal` → WMI → PowerShell)
+- Temperature monitoring — multi-source fallback (psutil → `/sys/thermal` → WMI → PowerShell → LibreHardwareMonitor)
 - Top CPU and Memory processes with one-click kill
 - Network I/O counters (sent / received)
 - System uptime display
 - Startup items manager (XDG autostart + systemd on Linux · Registry on Windows)
 
+---
+
 ### 🧹 Smart Clean
+
 Safe, reversible disk cleanup with dry-run preview before touching anything.
+Every deletion is logged for manual rollback. Each target is labelled **Safe / Caution / Danger**.
 
 | Target | Linux | Windows |
 |--------|:-----:|:-------:|
@@ -114,12 +132,12 @@ Safe, reversible disk cleanup with dry-run preview before touching anything.
 | Flatpak unused runtimes | ✅ | — |
 | Docker / Podman dangling images | ✅ | — |
 | systemd journal logs (>7 days) | ✅ | — |
-| User cache (`~/.cache`) | ✅ | — |
-| Browser cache (Chrome / Firefox / Edge) | ✅ | ✅ |
+| User cache `~/.cache` — 3-layer smart guard | ✅ | — |
+| Browser cache (Chrome / Chromium / Firefox / Edge / Brave / Opera) | ✅ | ✅ |
 | Thumbnail cache | ✅ | ✅ |
 | pip wheel cache | ✅ | — |
 | Temp files (>3 days, not in use) | ✅ | — |
-| Windows Temp & `%TEMP%` | — | ✅ |
+| Windows Temp & `%TEMP%` — lock-probe guard | — | ✅ |
 | Prefetch cache (unused >7 days) | — | ✅ |
 | Recycle Bin | — | ✅ |
 | Windows Update cache | — | ✅ |
@@ -129,26 +147,35 @@ Safe, reversible disk cleanup with dry-run preview before touching anything.
 | Event logs (wevtutil) | — | ✅ |
 | Windows Error Reports & crash dumps | — | ✅ |
 
-- **Dry-run mode** — scan and estimate freed space before committing
-- **Safety levels** — `Safe` / `Caution` / `Danger` labels on every target
-- **Rollback log** — every deletion recorded for manual recovery
+**Smart guard system (v2.2.0):**
+- **3-layer Linux cache guard** — name whitelist → socket/FIFO type detection → recent-activity check. Unknown wallpaper daemons, compositors, and IPC tools are automatically protected without needing a name update.
+- **Lock-probe Windows temp guard** — probes each file for an exclusive open before deleting. Locked files (held by a running process) are skipped silently instead of causing cascade errors.
+
+---
 
 ### ⚡ System Booster
-Performance optimization without killing your system.
+
+Performance optimization without crashing or freezing your system.
 
 | Feature | Linux | Windows |
 |---------|:-----:|:-------:|
 | **Free RAM** — page cache drop + memory compact | ✅ | ✅ |
 | **Memory Tune** — swappiness / dirty_ratio / vm params | ✅ | — |
 | **Kill Bloat** — zombie + idle high-RAM processes (warm-up CPU sampling, no false positives) | ✅ | ✅ |
-| **Clear GPU / Shader Cache** — mesa, NVIDIA, Chrome, Edge | ✅ | ✅ |
-| **🎮 Game Mode** — 3-tier CPU affinity jail (Comms / Media / Trash) + performance governor + freeze Windows Update/Search/Telemetry | ✅ | ✅ |
-| **🌿 Eco Mode** — soft background throttle (BELOW_NORMAL on Windows, nice=5 on Linux root) | ✅ (root) | ✅ |
+| **Clear GPU / Shader Cache** — mesa, NVIDIA, Chrome, Edge + Flatpak / Snap paths | ✅ | ✅ |
+| **🎮 Game Mode** — 3-tier CPU affinity jail (Comms / Media / Trash) + performance governor + disable Windows Update/Search/Telemetry | ✅ | ✅ |
+| **🌿 Eco Mode** — soft background throttle (BELOW_NORMAL on Windows, nice=5 on Linux) | ✅ | ✅ |
+| **⚡ Smart Boost** — auto-detects PC tier (High / Mid / Low), applies the right strategy | ✅ | ✅ |
 
-> Game Mode isolates background apps into last CPU cores so your game gets all prime cores by default — inspired by Process Lasso + Razer Cortex + Feral GameMode.
+> **Game Mode** jails background apps into the last CPU cores so your game gets all prime cores — inspired by Process Lasso, Razer Cortex, and Feral GameMode.
+
+> **Smart Boost** detects whether you're on a potato or a workstation and applies the appropriate combination: Game Mode only for high-end rigs, Game Mode + Eco + RAM free for low-end.
+
+---
 
 ### 🔍 Security Scanner
-Read-only deep scan — nothing deleted automatically. You decide what to fix.
+
+Read-only deep scan — nothing is deleted automatically. You decide what to fix.
 
 - **Running processes** — detect crypto miners, reverse shells, processes spawned from `/tmp`
 - **SUID/SGID binaries** — flag unexpected setuid files outside the known-safe whitelist
@@ -156,30 +183,43 @@ Read-only deep scan — nothing deleted automatically. You decide what to fix.
 - **Cron backdoors** — scan all cron directories + user crontab for shell injection patterns
 - **Suspicious files** — `.sh/.py/.ps1/.bat/.vbs` in temp/user dirs with malicious patterns
 - **LD_PRELOAD hijacks** — `/etc/ld.so.preload` and `$LD_PRELOAD` env check
-- **SSH authorized_keys** — audit unexpected public keys
+- **SSH authorized_keys** — flag forced-command keys and unrecognised key formats (normal keys shown as info, not a warning)
 - **Hosts file tampering** — detect redirects of trusted domains (Google, GitHub, PayPal...)
 - **Suspicious listening ports** — 4444, 1337, 31337 and common RAT ports
 - **Windows autoruns** — HKCU/HKLM Run keys with suspicious keywords (powershell -enc, mshta, wscript...)
 
+---
+
 ### 🗑️ App Uninstaller
-Remove installed applications cleanly.
+
+Remove installed applications cleanly, no leftovers.
+
 - **Windows** — reads from Add/Remove Programs registry (no `wmic` dependency)
 - **Linux** — native package manager (pacman / apt / dnf) integration
 - Displays installed size, version, and install date
 - Background uninstall with live progress log
 
+---
+
 ### 📜 History & Rollback
-- Every clean operation is logged to `~/.local/share/cyber-clean/history.jsonl`
-- Rollback log stores path, size, and type of each deleted item
+
+- Every clean session is logged to `~/.local/share/cyber-clean/history.jsonl`
+- Rollback log stores path, size, and type of every deleted item
 - View full history with timestamps and freed space per session
 
+---
+
 ### 🌐 Multi-language (i18n)
-Built-in translations: English · Tiếng Việt · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · العربية · Türkçe · Polski · Italiano
+
+Built-in translations: **English · Tiếng Việt · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · العربية · Türkçe · Polski · Italiano**
+
+---
 
 ### 🔔 System Tray & Auto-clean
+
 - Minimize to system tray — stays out of your way
-- **Auto-clean** runs `safe` targets every 6 hours while hidden in tray
-- Auto-clean is paused automatically when Game Mode is active (no FPS drops)
+- **Auto-clean** runs `safe` targets every 6 hours while hidden in tray, only when the system is idle (CPU < 20%, network quiet)
+- Auto-clean pauses automatically when Game Mode is active — no FPS drops
 - Tray notification on completion
 
 ---
@@ -202,11 +242,11 @@ Built-in translations: English · Tiếng Việt · 中文 · Español · Franç
 - **No telemetry** — zero data collection, zero network calls during operation
 - **No background service** — only runs when you open it (or auto-clean from tray)
 - **Scoped privilege** — Linux sudoers rule grants access only to `/usr/local/bin/cyber-clean-helper`, not blanket sudo
-- **Helper script** — all privileged operations go through a tightly scoped shell script you can read and audit
-- **Windows UAC — ask once, never again** — installer creates a hidden Task Scheduler entry (`CyberClean_AutoAdmin`) with highest privilege at install time. Every subsequent launch via Desktop/Start Menu shortcut runs silently with no UAC prompt, even after reboot. The task is removed cleanly on uninstall.
-- **Microsoft Security Intelligence verified** — submitted and cleared, Submission ID `b632c14c-aff3-4ef6-97ab-4058309bc4cd`
+- **Transparent helper** — all privileged operations go through a shell script you can read and audit
+- **Windows UAC — ask once, never again** — installer creates a hidden Task Scheduler entry (`CyberClean_AutoAdmin`) at install time. Every subsequent launch via Desktop/Start Menu shortcut runs silently with no UAC prompt, even after reboot. The task is fully removed on uninstall.
+- **Independent malware scan** — the `.exe` was self-submitted to Microsoft Defender's online scanner and returned clean. This is not a Microsoft partnership — it's a public scanning service anyone can use to verify a file. Submission ID: `b632c14c-aff3-4ef6-97ab-4058309bc4cd`
 
-> ⚠️ **Taskbar pin note:** If you pin CyberClean to the Taskbar by right-clicking the running app, Windows pins the `.exe` directly instead of the shortcut — this bypasses the Auto-Admin task and UAC will reappear. This is a Windows-level limitation (same behavior in MSI Afterburner, Rufus, etc.). Always use the **Desktop or Start Menu shortcut** for a prompt-free experience.
+> ⚠️ **Taskbar pin note:** Right-clicking the running app and choosing "Pin to taskbar" pins the `.exe` directly — this bypasses the Auto-Admin task and UAC will reappear. Use the **Desktop or Start Menu shortcut** instead. This is a Windows limitation also seen in MSI Afterburner and Rufus.
 
 ---
 
@@ -238,19 +278,21 @@ CyberClean/
 ├── main.py                 # Main GUI (PyQt6)
 ├── core/
 │   ├── base_cleaner.py     # Abstract cleaner interface
-│   ├── linux_cleaner.py    # Linux-specific clean targets
-│   ├── windows_cleaner.py  # Windows-specific clean targets
+│   ├── linux_cleaner.py    # Linux clean targets — 3-layer smart guard
+│   ├── windows_cleaner.py  # Windows clean targets — lock-probe guard
 │   ├── scanner.py          # Security scanner
-│   ├── booster.py          # RAM / CPU / Game Mode optimizer
+│   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost optimizer
+│   ├── analyzer.py         # Duplicate finder · Startup scorer · Network monitor
 │   ├── uninstaller.py      # App uninstaller
 │   └── os_detect.py        # OS / distro / package manager detection
 ├── utils/
-│   ├── sysinfo.py          # psutil system snapshot
-│   └── i18n.py             # Translations
+│   ├── sysinfo.py          # psutil system snapshot (thread-safe cache)
+│   └── i18n.py             # 14-language translations
 ├── assets/
 │   ├── logo.png            # App icon
 │   ├── logo.ico            # Windows icon
-│   └── icons/              # SVG nav icons
+│   └── icons/              # QPainter-drawn nav icons (no SVG files)
+├── LibreHardwareMonitorLib.dll  # Windows temperature (MSR kernel driver)
 └── install.sh              # Linux one-line installer
 ```
 
