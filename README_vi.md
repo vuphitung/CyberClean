@@ -62,9 +62,9 @@ Không mã độc · Không thu thập dữ liệu · Không hành vi ẩn.
 
 <table>
 <tr>
-<td><img src="screenshots/dashboard.jpg" width="380"/></td>
-<td><img src="screenshots/clean.jpg" width="380"/></td>
-<td><img src="screenshots/scanner.jpg" width="380"/></td>
+<td><img src="screenshots/dashboard.png" width="480"/></td>
+<td><img src="screenshots/clean.png" width="480"/></td>
+<td><img src="screenshots/scanner.png" width="480"/></td>
 </tr>
 <tr>
 <td align="center"><b>📊 Dashboard</b></td>
