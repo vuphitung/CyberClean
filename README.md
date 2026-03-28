@@ -14,7 +14,7 @@
 
 <br/>
 
-> 🌐 **Language:** **English** · [Tiếng Việt](README.vi.md)
+> 🌐 **Language:** **English** · [Tiếng Việt](README_vi.md)
 
 <br/>
 
