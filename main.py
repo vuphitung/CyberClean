@@ -12,6 +12,11 @@ from datetime import datetime
 from urllib.request import urlopen
 from urllib.error import URLError
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland*=false"
+# FIX: Disable Qt thread watchdog that falsely fires on Python 3.14
+# when time.sleep() releases GIL in a QThread (seen on Arch+KDE+Wayland).
+# This does NOT disable real crash detection — only the GIL-release false alarm.
+os.environ.setdefault("QT_FATAL_WARNINGS", "0")
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
 
 # ── Dependency check ──────────────────────────────────────────
 _missing = []
@@ -698,6 +703,149 @@ class NavButton(QWidget):
 
     def mousePressEvent(self, _):
         self.clicked.emit()
+
+
+
+# ═════════════════════════════════════════════════════════════
+# MODULE-LEVEL QTHREAD WORKERS
+# MUST be defined at module scope, NOT nested inside methods.
+# Reason: PyQt6 + SIP + Python 3.14 on KDE/Wayland crashes
+# when pyqtSignal is defined inside a locally-scoped class
+# (SIP cannot resolve the metaclass at binding time → Qt fatal).
+# FIX: All QThread subclasses with pyqtSignal moved here.
+# ═════════════════════════════════════════════════════════════
+
+class _SmartOnWorker(QThread):
+    """Smart Boost ON — runs smart_boost_on() in background thread."""
+    log_signal = pyqtSignal(str, str)
+    done       = pyqtSignal(object)
+
+    def run(self):
+        try:
+            saved = smart_boost_on(lambda m, l='text': self.log_signal.emit(m, l))
+            self.done.emit(saved)
+        except Exception as e:
+            self.log_signal.emit(f"  x Smart Boost error: {e}", "err")
+            self.done.emit({})
+
+
+class _SmartOffWorker(QThread):
+    """Smart Boost OFF — runs smart_boost_off() in background thread."""
+    log_signal = pyqtSignal(str, str)
+    done       = pyqtSignal(object)
+
+    def __init__(self, saved_state):
+        super().__init__()
+        self._saved_state = saved_state
+
+    def run(self):
+        try:
+            smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(m, l))
+        except Exception as e:
+            self.log_signal.emit(f"  x Smart Boost restore error: {e}", "err")
+        self.done.emit(None)
+
+
+class _OneClickWorker(QThread):
+    """One-Click Optimize — runs platform-specific quick fixes."""
+    done = pyqtSignal(str, bool)
+
+    def run(self):
+        import subprocess as _sp
+        HELPER  = '/usr/local/bin/cyber-clean-helper'
+        results = []
+        if IS_LINUX:
+            for action, label in [
+                ('swappiness',  'Swappiness→10'),
+                ('fstrim',      'SSD TRIM'),
+                ('journal',     'Journal'),
+                ('paccache',    'Paccache'),
+                ('compact-memory', 'Compact RAM'),
+            ]:
+                import shutil as _sh
+                if action == 'paccache' and not _sh.which('paccache'):
+                    continue
+                r = _sp.run(f'sudo -n {HELPER} {action}', shell=True,
+                            capture_output=True, text=True, timeout=60)
+                results.append((label, r.returncode == 0))
+            # Free RAM without drop_caches (no lag)
+            try:
+                from core.booster import free_ram
+                free_ram(lambda m, l='text': None)
+                results.append(('Smart RAM Free', True))
+            except Exception:
+                pass
+        elif IS_WINDOWS:
+            for cmd, label in [
+                ('ipconfig /flushdns', 'Flush DNS'),
+                ('del /q /f /s "%TEMP%\\*" 2>nul', 'Clear TEMP'),
+            ]:
+                r = _sp.run(cmd, shell=True, capture_output=True,
+                            text=True, timeout=30, creationflags=0x08000000)
+                results.append((label, r.returncode == 0))
+            try:
+                from core.booster import free_ram
+                free_ram(lambda m, l='text': None)
+                results.append(('Smart RAM Free', True))
+            except Exception:
+                pass
+        ok_count = sum(1 for _, ok in results if ok)
+        summary  = (f'✓ {ok_count}/{len(results)}  ' +
+                    '  ·  '.join(f'{"✓" if ok else "~"}{n}' for n, ok in results))
+        self.done.emit(summary, ok_count > 0)
+
+
+class _ScanWorker(QThread):
+    """Security Scanner — runs full deep scan in background."""
+    log  = pyqtSignal(str, str)
+    done = pyqtSignal(list, list)
+
+    def run(self):
+        try:
+            sc      = SecurityScanner()
+            results = sc.scan(lambda m, l: self.log.emit(m, l))
+        except Exception as e:
+            self.log.emit(f"  x Scanner error: {e}", "err")
+            results = []
+        try:
+            self.log.emit("  ⟳  Scanning active network processes...", "head")
+            net_results = get_network_processes()
+        except Exception:
+            net_results = []
+        self.done.emit(results, net_results)
+
+
+class _UninstallWorker(QThread):
+    """App Uninstaller — enumerates installed apps in background."""
+    finished = pyqtSignal(list)
+
+    def run(self):
+        try:
+            apps = get_installed_apps()
+            self.finished.emit(apps)
+        except Exception:
+            self.finished.emit([])
+
+
+class _AutoCleanWorker(QThread):
+    """Auto-clean — runs safe targets silently from tray."""
+    done = pyqtSignal(int, int)
+
+    def __init__(self, safe_targets):
+        super().__init__()
+        self._safe_targets = safe_targets
+
+    def run(self):
+        total_freed = 0
+        cleaned     = 0
+        for tid in self._safe_targets:
+            try:
+                result       = CLEANER.clean(tid, dry=False)
+                total_freed += result.freed_bytes
+                cleaned     += 1
+            except Exception:
+                pass
+        self.done.emit(total_freed, cleaned)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1982,44 +2130,7 @@ class CyberCleanApp(QMainWindow):
         self.oneclick_log.setText('Running...')
         import subprocess as _sp
 
-        class OneClickWorker(QThread):
-            done = pyqtSignal(str, bool)
-
-            def run(self_w):
-                HELPER = '/usr/local/bin/cyber-clean-helper'
-                results = []
-                if IS_LINUX:
-                    for action, label in [
-                        ('drop-cache', 'Drop cache'),
-                        ('swappiness', 'Swappiness→10'),
-                        ('fstrim', 'SSD TRIM'),
-                        ('journal', 'Journal'),
-                        ('paccache', 'Paccache'),
-                    ]:
-                        import shutil as _sh
-                        if action == 'paccache' and not _sh.which('paccache'):
-                            continue
-                        r = _sp.run(f'sudo -n {HELPER} {action}', shell=True,
-                                    capture_output=True, text=True, timeout=60)
-                        results.append((label, r.returncode == 0))
-                elif IS_WINDOWS:
-                    for cmd, label in [
-                        ('ipconfig /flushdns', 'Flush DNS'),
-                        ('del /q /f /s "%TEMP%\\*" 2>nul', 'Clear TEMP'),
-                    ]:
-                        r = _sp.run(cmd, shell=True, capture_output=True,
-                                    text=True, timeout=30, creationflags=0x08000000)
-                        results.append((label, r.returncode == 0))
-                try:
-                    free_ram(lambda m, l: None)
-                    results.append(('Smart RAM Free', True))
-                except: pass
-                ok_count = sum(1 for _, ok in results if ok)
-                summary = f'✓ {ok_count}/{len(results)}  ' + \
-                          '  ·  '.join(f'{"✓" if ok else "~"}{n}' for n, ok in results)
-                self_w.done.emit(summary, ok_count > 0)
-
-        self._oneclick_worker = OneClickWorker()
+        self._oneclick_worker = _OneClickWorker()
         self._oneclick_worker.done.connect(self._on_oneclick_done)
         self._oneclick_worker.start()
 
@@ -2136,19 +2247,7 @@ class CyberCleanApp(QMainWindow):
         self.scan_table.setRowCount(0)
         self._scan_results = []
 
-        class ScanWorker(QThread):
-            log  = pyqtSignal(str, str)
-            done = pyqtSignal(list, list)
-            def run(self_w):
-                # 1. Quét file rác/malware
-                sc = SecurityScanner()
-                results = sc.scan(lambda m, l: self_w.log.emit(m, l))
-                # 2. Quét tiến trình mạng
-                self_w.log.emit("  ⟳  Scanning active network processes...", "head")
-                net_results = get_network_processes()
-                self_w.done.emit(results, net_results)
-
-        self._scan_worker = ScanWorker()
+        self._scan_worker = _ScanWorker()
         self._scan_worker.log.connect(self._on_opt_log)
         self._scan_worker.done.connect(self._on_scan_done)
         self._scan_worker.start()
@@ -2249,15 +2348,6 @@ class CyberCleanApp(QMainWindow):
         self.uninstall_log.append(
             f'<span style="color:{C["cyan"]}">  ⟳  Scanning installed apps...</span>'
         )
-
-        class _UninstallWorker(QThread):
-            finished = pyqtSignal(list)
-            def run(self_w):
-                try:
-                    apps = get_installed_apps()
-                    self_w.finished.emit(apps)
-                except Exception as e:
-                    self_w.finished.emit([])
 
         self._uninstall_worker = _UninstallWorker()
         self._uninstall_worker.finished.connect(self._on_uninstall_loaded)
@@ -2832,19 +2922,12 @@ class CyberCleanApp(QMainWindow):
             self._smart_btn.setEnabled(False)
             self._smart_active = True
 
-            class SmartOnWorker(QThread):
-                log_signal = pyqtSignal(str, str)
-                done       = pyqtSignal(object)
-                def run(self):
-                    saved = smart_boost_on(lambda m, l='text': self.log_signal.emit(m, l))
-                    self.done.emit(saved)
-
             def _on_done(saved):
                 self._smart_saved = saved or {}
                 self._smart_trans = False
                 self._smart_btn.setEnabled(True)
 
-            self._smart_worker = SmartOnWorker()
+            self._smart_worker = _SmartOnWorker()
             self._smart_worker.log_signal.connect(self._blog)
             self._smart_worker.done.connect(_on_done)
             self._smart_worker.start()
@@ -2857,20 +2940,12 @@ class CyberCleanApp(QMainWindow):
             self._smart_active = False
             saved = self._smart_saved
 
-            class SmartOffWorker(QThread):
-                log_signal = pyqtSignal(str, str)
-                done       = pyqtSignal(object)
-                def __init__(self, sv): super().__init__(); self._sv = sv
-                def run(self):
-                    smart_boost_off(self._sv, lambda m, l='text': self.log_signal.emit(m, l))
-                    self.done.emit(None)
-
             def _on_off_done(_):
                 self._smart_saved = {}
                 self._smart_trans = False
                 self._smart_btn.setEnabled(True)
 
-            self._smart_off_worker = SmartOffWorker(saved)
+            self._smart_off_worker = _SmartOffWorker(saved)
             self._smart_off_worker.log_signal.connect(self._blog)
             self._smart_off_worker.done.connect(_on_off_done)
             self._smart_off_worker.start()
@@ -2943,22 +3018,7 @@ class CyberCleanApp(QMainWindow):
                                       QSystemTrayIcon.MessageIcon.Warning, 2000)
             return
 
-        class _AutoCleanWorker(QThread):
-            done = pyqtSignal(int, int)
-
-            def run(self_w):
-                total_freed = 0
-                cleaned = 0
-                for tid in safe_targets:
-                    try:
-                        result = CLEANER.clean(tid, dry=False)
-                        total_freed += result.freed_bytes
-                        cleaned += 1
-                    except:
-                        pass
-                self_w.done.emit(total_freed, cleaned)
-
-        self._auto_worker = _AutoCleanWorker()
+        self._auto_worker = _AutoCleanWorker(safe_targets)
         self._auto_worker.done.connect(
             lambda freed, n: self._on_auto_clean_done(freed, n, notify)
         )
