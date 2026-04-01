@@ -24,7 +24,7 @@ RED='\033[0;31m'; NC='\033[0m'
 ok()   { echo -e "  ${GREEN}✓${NC}  $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
 err()  { echo -e "  ${RED}✗${NC}  $1"; exit 1; }
-head() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
+section() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
 
 if [[ $EUID -ne 0 ]]; then
     err "Run with sudo:  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo bash"
@@ -32,7 +32,7 @@ fi
 
 # ── Uninstall ─────────────────────────────────────────────
 if [[ "$1" == "--uninstall" ]]; then
-    head "Uninstalling CyberClean"
+    section "Uninstalling CyberClean"
     rm -f "$BIN"           && ok "Removed $BIN"
     rm -rf /opt/CyberClean && ok "Removed /opt/CyberClean"
     rm -f "$ICON_DEST"     2>/dev/null || true
@@ -49,7 +49,7 @@ fi
 # ── Fetch latest version from GitHub API ──────────────────
 # Không hardcode version trong file này nữa.
 # Luôn lấy bản mới nhất từ GitHub Releases API.
-head "Fetching latest version"
+section "Fetching latest version"
 LATEST_JSON=""
 if command -v curl &>/dev/null; then
     LATEST_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
@@ -84,28 +84,9 @@ echo "  ╚═════╝   ╚═╝   ╚═════╝ ╚═══�
 echo -e "${NC}"
 echo -e "${CYAN}  Smart Disk Cleaner v${VERSION} — Installing...${NC}\n"
 
-# ── Check requirements ────────────────────────────────────
-head "Checking requirements"
-PY_CMD=""
-for py in python3 python; do
-    if command -v "$py" &>/dev/null; then
-        if "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' 2>/dev/null; then
-            PY_VER=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
-            PY_CMD="$py"
-            ok "Python ${PY_VER} found"
-            break
-        else
-            PY_VER=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
-            warn "Python ${PY_VER} found but PyQt6 requires 3.9+ — skipping"
-        fi
-    fi
-done
-if [[ -z "$PY_CMD" ]]; then
-    err "Python 3.9+ is required.\n  sudo apt install python3  (Debian/Ubuntu)\n  sudo pacman -S python     (Arch)"
-fi
 
 # ── Download ──────────────────────────────────────────────
-head "Downloading v${VERSION}"
+section "Downloading v${VERSION}"
 mkdir -p /opt/CyberClean
 TARGZ_TMP="/tmp/CyberClean.tar.gz"
 
@@ -131,7 +112,7 @@ chmod +x "$INSTALL_DIR/CyberClean/CyberClean"
 ok "Installed → $INSTALL_DIR"
 
 # ── Create launcher command ───────────────────────────────
-head "Creating command"
+section "Creating command"
 cat > "$BIN" << LAUNCHER
 #!/bin/bash
 if [[ "\$1" == "--uninstall" ]]; then
@@ -144,7 +125,7 @@ chmod +x "$BIN"
 ok "Command → cyberclean"
 
 # ── Icon ──────────────────────────────────────────────────
-head "Installing icon"
+section "Installing icon"
 mkdir -p "$(dirname "$ICON_DEST")"
 if command -v curl &>/dev/null; then
     curl -fsSL -o "$ICON_DEST" "$ICON_URL" 2>/dev/null && ok "Icon installed" || warn "Icon skipped (non-critical)"
@@ -154,7 +135,7 @@ fi
 gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 
 # ── Desktop entry ─────────────────────────────────────────
-head "Registering app"
+section "Registering app"
 cat > "$DESKTOP_DEST" << DESKTOP
 [Desktop Entry]
 Name=CyberClean
@@ -172,7 +153,7 @@ update-desktop-database /usr/share/applications 2>/dev/null || true
 ok "App registered in launcher"
 
 # ── System helper ─────────────────────────────────────────
-head "Setting up system helper"
+section "Setting up system helper"
 cat > "$HELPER" << 'HELPER_CONTENT'
 #!/bin/bash
 # CyberClean — Privileged Helper
