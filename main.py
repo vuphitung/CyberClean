@@ -1,12 +1,17 @@
 """
-CyberClean v2.2.0 — Main GUI
-v2.2: All nav icons replaced with QPainter-drawn code icons.
-      No SVG file dependency — icons always render sharp at any DPI.
-      Sidebar redesigned: wider, icon+label layout with active indicator bar.
-      Header: hex logo drawn in code, tighter spacing.
-All functional logic unchanged from v2.1.
+CyberClean — Main GUI
+All nav icons replaced with QPainter-drawn code icons.
+No SVG file dependency — icons always render sharp at any DPI.
+Sidebar redesigned: wider, icon+label layout with active indicator bar.
+Header: hex logo drawn in code, tighter spacing.
 """
 import sys, os, json, time, platform, threading
+
+# ── Version (single source of truth: version.py) ──────────────
+try:
+    from version import __version__
+except ImportError:
+    __version__ = "0.0.0"
 from pathlib import Path
 from datetime import datetime
 from urllib.request import urlopen
@@ -77,10 +82,40 @@ elif IS_WINDOWS:
 else:
     CLEANER = None
 
+# ── CRITICAL #3 FIX: block unsupported OS before any CLEANER.* call ──────────
+# macOS / BSD / etc. — CLEANER = None, show a clear message and exit
+# instead of crashing later with AttributeError deep inside the app.
+if CLEANER is None:
+    import platform as _plat
+    _app_tmp = QApplication.instance() or QApplication(sys.argv)
+    _msg = QMessageBox()
+    _msg.setWindowTitle('CyberClean — Unsupported OS')
+    _msg.setIcon(QMessageBox.Icon.Critical)
+    _msg.setText(
+        f'CyberClean does not support {_plat.system()} yet.\n\n'
+        'Supported platforms: Windows 10/11 · Linux (all major distros)\n\n'
+        'macOS support is planned for a future release.'
+    )
+    _msg.exec()
+    sys.exit(1)
+
+# ── CRITICAL #2 FIX: guard LOG_DIR creation — crash if not writeable ─────────
+# Environments like containers, chroot, or read-only /home will raise OSError.
+# Silently fall back to /tmp so the app still launches; logs just won't persist.
 LOG_DIR       = Path.home() / '.local/share/cyber-clean'
 LOG_FILE      = LOG_DIR / 'history.jsonl'
 ROLLBACK_FILE = LOG_DIR / 'rollback.jsonl'
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    import tempfile as _tmp
+    LOG_DIR       = Path(_tmp.gettempdir()) / 'cyber-clean'
+    LOG_FILE      = LOG_DIR / 'history.jsonl'
+    ROLLBACK_FILE = LOG_DIR / 'rollback.jsonl'
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass   # absolute last resort — app runs but no logging
 OS = platform.system()
 
 # ═════════════════════════════════════════════════════════════
@@ -463,10 +498,24 @@ class CleanWorker(QThread):
         self.log.emit('─' * 44, 'head')
 
         for i, tid in enumerate(self.targets):
-            pct = int((i / steps) * 90)
-            self.progress.emit(pct, f'{tid}...')
-            self.log.emit(f'\n  ▸ {tid.upper().replace("_", " ")}', 'head')
+            # ── Real progress: each target owns an equal slice of 0–95% ──────
+            # Within each target's slice, we emit three sub-steps so the bar
+            # moves visibly instead of jumping in large discrete chunks:
+            #   step 0% → starting (label shows target name)
+            #   step 50% → working
+            #   step 100% → done (moves to next target's start)
+            # The final 95→100% jump happens only after ALL targets finish.
+            slice_start = int((i / steps) * 95)
+            slice_mid   = int(((i + 0.5) / steps) * 95)
+            slice_end   = int(((i + 1) / steps) * 95)
+
+            label = tid.replace('_', ' ').upper()
+            self.progress.emit(slice_start, f'{label}...')
+            self.log.emit(f'\n  ▸ {label}', 'head')
+
+            self.progress.emit(slice_mid, f'{label} — working...')
             result = CLEANER.clean(tid, dry=self.dry)
+            self.progress.emit(slice_end, f'{label} — done')
 
             if result.error:
                 self.log.emit(f'  ✗  {result.error}', 'err')
@@ -880,7 +929,7 @@ class CyberCleanApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('CyberClean v2.2.0')
+        self.setWindowTitle(f'CyberClean v{__version__}')
         self.setMinimumSize(1060, 680)
         self.resize(1200, 760)
         self.worker   = None
@@ -1053,7 +1102,7 @@ class CyberCleanApp(QMainWindow):
             f'color:{C["text2"]};font-size:14px;font-weight:700;'
             f'letter-spacing:5px;font-family:{MONO};'
         )
-        ver = QLabel('v2.2.0')
+        ver = QLabel(f'v{__version__}')
         ver.setStyleSheet(
             f'color:{C["text3"]};font-size:9px;letter-spacing:1px;'
             f'padding-left:10px;padding-top:5px;font-family:{MONO};'
@@ -2634,7 +2683,7 @@ class CyberCleanApp(QMainWindow):
         else:
             px = QPixmap(16, 16); px.fill(QColor(C['cyan']))
             self.tray.setIcon(QIcon(px))
-        self.tray.setToolTip('CyberClean v2.1.0')
+        self.tray.setToolTip(f'CyberClean v{__version__}')
 
         self.tray_menu = QMenu(self)
         self.tray_menu.setStyleSheet(
@@ -3026,7 +3075,7 @@ class CyberCleanApp(QMainWindow):
 
     def _on_auto_clean_done(self, freed_bytes, num_targets, notify=True):
         if hasattr(self, 'tray'):
-            self.tray.setToolTip('CyberClean v2.1.0')
+            self.tray.setToolTip(f'CyberClean v{__version__}')
         if notify and hasattr(self, 'tray'):
             if freed_bytes > 0:
                 self.tray.showMessage(
@@ -3042,7 +3091,7 @@ class CyberCleanApp(QMainWindow):
                 )
 
     GITHUB_LATEST = 'https://api.github.com/repos/vuphitung/CyberClean/releases/latest'
-    CURRENT_VER   = '2.2.0'
+    CURRENT_VER   = __version__
 
     def _check_update_async(self):
         threading.Thread(target=self._fetch_update, daemon=True).start()
@@ -3113,7 +3162,7 @@ if __name__ == '__main__':
                 sys.exit(0)
 
     app.setApplicationName('CyberClean')
-    app.setApplicationVersion('2.1.0')
+    app.setApplicationVersion(__version__)
 
     def _res(rel):
         base = getattr(sys, '_MEIPASS', Path(__file__).parent)

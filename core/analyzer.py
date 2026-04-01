@@ -59,8 +59,14 @@ def find_duplicates(
     progress_cb: Optional[Callable] = None,
 ) -> List[DuplicateGroup]:
     """
-    Find duplicate files via two-pass hash (size bucket → MD5).
+    Find duplicate files via two-pass hash (size bucket → SHA-256).
     Only hashes files in same-size bucket to avoid hashing everything.
+
+    FIX (v2.3): Upgraded from MD5 to SHA-256.
+    MD5 has known collision vulnerabilities — two different files can produce
+    the same hash, causing app to incorrectly flag them as duplicates and
+    potentially recommend deleting a file that is NOT actually a copy.
+    SHA-256 has no practical collision risk, making duplicate detection safe.
 
     min_size_bytes: skip tiny files (0-byte, icons, cache manifests)
     max_size_bytes: skip giant files that would take too long to hash
@@ -102,7 +108,7 @@ def find_duplicates(
         if progress_cb and i % 200 == 0:
             progress_cb(int(i / max(total, 1) * 40), f'Scanning... {scanned} files')
 
-    # Pass 2 — hash only candidates (same size ≥ 2)
+    # Pass 2 — hash only candidates (same size ≥ 2) using SHA-256
     candidates = {sz: files for sz, files in size_map.items() if len(files) >= 2}
     hash_map: dict = defaultdict(list)
 
@@ -112,12 +118,13 @@ def find_duplicates(
 
     for i, (sz, f) in enumerate(candidate_files):
         try:
+            # FIX: SHA-256 replaces MD5 — no collision risk, safe for file dedup
             # Read in chunks — avoid loading huge files into memory
-            md5 = hashlib.md5()
+            sha256 = hashlib.sha256()
             with open(f, 'rb') as fh:
                 for chunk in iter(lambda: fh.read(65536), b''):
-                    md5.update(chunk)
-            hash_map[md5.hexdigest()].append((sz, f))
+                    sha256.update(chunk)
+            hash_map[sha256.hexdigest()].append((sz, f))
             done += 1
         except (OSError, PermissionError):
             pass

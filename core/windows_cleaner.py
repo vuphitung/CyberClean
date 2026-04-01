@@ -1,5 +1,5 @@
 """
-CyberClean v2.2 — Windows Cleaner
+CyberClean v2.3 — Windows Cleaner
 FIX #4: _win_recycle null-safe size parse — network/locked items return no .Size
         property causing Measure-Object to output empty string → ValueError.
         Now handles None/empty gracefully.
@@ -13,12 +13,18 @@ FIX #9: _win_temp redesigned with smart guards:
           locked files (open by another process) are skipped without error.
         - Directory guard: dirs containing any locked/socket-equivalent files are skipped.
         - Age threshold remains 24h for safety.
+FIX #10 (v2.3): Removed duplicate definitions of _NO_WIN, run_win(), is_admin().
+        Previously these were defined twice (lines 23-37 and 54-70), causing the
+        second definition to silently shadow the first — any edit to one was invisible
+        to the other. Kept the single correct version below.
 """
 import os, shutil, subprocess, time, stat as _stat
 from pathlib import Path
 from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
 
+# ── Subprocess helper: hide console window on Windows ─────────
 _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+
 
 def run_win(cmd, timeout=30):
     try:
@@ -29,12 +35,14 @@ def run_win(cmd, timeout=30):
     except Exception as e:
         return str(e), 1
 
+
 def is_admin():
     try:
         import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except:
+    except Exception:
         return False
+
 
 def _is_locked_win(path: Path) -> bool:
     """
@@ -50,24 +58,6 @@ def _is_locked_win(path: Path) -> bool:
             return False   # opened fine → not locked
     except (PermissionError, OSError):
         return True   # locked or access denied → skip
-
-_NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-
-def run_win(cmd, timeout=30):
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True,
-                           text=True, timeout=timeout,
-                           creationflags=_NO_WIN)
-        return r.stdout.strip(), r.returncode
-    except Exception as e:
-        return str(e), 1
-
-def is_admin():
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except:
-        return False
 
 def _dir_size_safe(path):
     """

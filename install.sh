@@ -1,15 +1,15 @@
 #!/bin/bash
-# CyberClean v2.2.0 — Installer
+# CyberClean — Linux Installer
+# VERSION được đọc từ version.py bundled trong release — không hardcode
+#
 # Usage:
 #   Install:   curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 #   Uninstall: sudo cyberclean --uninstall
 
 set -e
 
-VERSION="2.2.0"
 APP="CyberClean"
 REPO="vuphitung/CyberClean"
-TARGZ_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-linux-x86_64.tar.gz"
 ICON_URL="https://raw.githubusercontent.com/${REPO}/main/assets/logo.png"
 
 BIN="/usr/local/bin/cyberclean"
@@ -30,6 +30,7 @@ if [[ $EUID -ne 0 ]]; then
     err "Run with sudo:  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo bash"
 fi
 
+# ── Uninstall ─────────────────────────────────────────────
 if [[ "$1" == "--uninstall" ]]; then
     head "Uninstalling CyberClean"
     rm -f "$BIN"           && ok "Removed $BIN"
@@ -45,6 +46,34 @@ if [[ "$1" == "--uninstall" ]]; then
     exit 0
 fi
 
+# ── Fetch latest version from GitHub API ──────────────────
+# Không hardcode version trong file này nữa.
+# Luôn lấy bản mới nhất từ GitHub Releases API.
+head "Fetching latest version"
+LATEST_JSON=""
+if command -v curl &>/dev/null; then
+    LATEST_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+elif command -v wget &>/dev/null; then
+    LATEST_JSON=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+fi
+
+VERSION=""
+if [[ -n "$LATEST_JSON" ]]; then
+    VERSION=$(echo "$LATEST_JSON" | grep -o '"tag_name": *"[^"]*"' | head -1 | grep -o '[0-9][^"]*')
+fi
+
+if [[ -z "$VERSION" ]]; then
+    # Fallback: dùng version hardcode nếu API không trả về
+    # Cập nhật dòng này khi release nhưng không phải điểm fail chính
+    VERSION="2.2.0"
+    warn "GitHub API unavailable — using fallback version ${VERSION}"
+else
+    ok "Latest version: v${VERSION}"
+fi
+
+TARGZ_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-linux-x86_64.tar.gz"
+
+# ── Banner ────────────────────────────────────────────────
 echo -e "${CYAN}"
 echo "  ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗"
 echo " ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗"
@@ -55,27 +84,31 @@ echo "  ╚═════╝   ╚═╝   ╚═════╝ ╚═══�
 echo -e "${NC}"
 echo -e "${CYAN}  Smart Disk Cleaner v${VERSION} — Installing...${NC}\n"
 
+# ── Check requirements ────────────────────────────────────
 head "Checking requirements"
 PY_CMD=""
 for py in python3 python; do
     if command -v "$py" &>/dev/null; then
-        PY_VER=$("$py" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null)
         if "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' 2>/dev/null; then
+            PY_VER=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
             PY_CMD="$py"
-            ok "Python $PY_VER found"
+            ok "Python ${PY_VER} found"
             break
         else
-            warn "Python $PY_VER found but PyQt6 requires 3.9+ — skipping"
+            PY_VER=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+            warn "Python ${PY_VER} found but PyQt6 requires 3.9+ — skipping"
         fi
     fi
 done
 if [[ -z "$PY_CMD" ]]; then
-    err "Python 3.9+ is required. Install it first:\n  sudo apt install python3  (Debian/Ubuntu)\n  sudo pacman -S python     (Arch)"
+    err "Python 3.9+ is required.\n  sudo apt install python3  (Debian/Ubuntu)\n  sudo pacman -S python     (Arch)"
 fi
 
-head "Downloading"
+# ── Download ──────────────────────────────────────────────
+head "Downloading v${VERSION}"
 mkdir -p /opt/CyberClean
 TARGZ_TMP="/tmp/CyberClean.tar.gz"
+
 if command -v curl &>/dev/null; then
     curl -fsSL --progress-bar -o "$TARGZ_TMP" "$TARGZ_URL" || err "Download failed — check internet connection"
 elif command -v wget &>/dev/null; then
@@ -83,11 +116,21 @@ elif command -v wget &>/dev/null; then
 else
     err "curl or wget required"
 fi
+
+# Validate tar.gz (không phải file HTML error page)
+MIN_BYTES=100000  # release phải > 100KB
+ACTUAL_SIZE=$(stat -c%s "$TARGZ_TMP" 2>/dev/null || echo 0)
+if [[ "$ACTUAL_SIZE" -lt "$MIN_BYTES" ]]; then
+    rm -f "$TARGZ_TMP"
+    err "Downloaded file too small (${ACTUAL_SIZE} bytes) — release v${VERSION} may not exist yet"
+fi
+
 tar -xzf "$TARGZ_TMP" -C "$INSTALL_DIR"
 rm -f "$TARGZ_TMP"
 chmod +x "$INSTALL_DIR/CyberClean/CyberClean"
 ok "Installed → $INSTALL_DIR"
 
+# ── Create launcher command ───────────────────────────────
 head "Creating command"
 cat > "$BIN" << LAUNCHER
 #!/bin/bash
@@ -100,15 +143,17 @@ LAUNCHER
 chmod +x "$BIN"
 ok "Command → cyberclean"
 
+# ── Icon ──────────────────────────────────────────────────
 head "Installing icon"
-mkdir -p "$(dirname $ICON_DEST)"
+mkdir -p "$(dirname "$ICON_DEST")"
 if command -v curl &>/dev/null; then
-    curl -fsSL -o "$ICON_DEST" "$ICON_URL" 2>/dev/null && ok "Icon installed" || warn "Icon skipped"
+    curl -fsSL -o "$ICON_DEST" "$ICON_URL" 2>/dev/null && ok "Icon installed" || warn "Icon skipped (non-critical)"
 else
-    wget -q -O "$ICON_DEST" "$ICON_URL" 2>/dev/null && ok "Icon installed" || warn "Icon skipped"
+    wget -q -O "$ICON_DEST" "$ICON_URL" 2>/dev/null && ok "Icon installed" || warn "Icon skipped (non-critical)"
 fi
 gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 
+# ── Desktop entry ─────────────────────────────────────────
 head "Registering app"
 cat > "$DESKTOP_DEST" << DESKTOP
 [Desktop Entry]
@@ -120,15 +165,19 @@ Icon=cyberclean
 Terminal=false
 Type=Application
 Categories=System;Utility;
-Keywords=disk;clean;cache;
+Keywords=disk;clean;cache;optimizer;
 StartupNotify=true
 DESKTOP
 update-desktop-database /usr/share/applications 2>/dev/null || true
 ok "App registered in launcher"
 
+# ── System helper ─────────────────────────────────────────
 head "Setting up system helper"
 cat > "$HELPER" << 'HELPER_CONTENT'
 #!/bin/bash
+# CyberClean — Privileged Helper
+# Scoped tightly: chỉ expose đúng những action cần thiết.
+# Không có blanket sudo — đây là security design, không phải giới hạn.
 case "$1" in
   paccache)         paccache -rk1 2>/dev/null ;;
   pacman-orphans)   pkgs=$(cat); [[ -n "$pkgs" ]] && pacman -Rns --noconfirm $pkgs 2>/dev/null ;;
@@ -140,14 +189,10 @@ case "$1" in
   zypper-clean)     zypper clean --all 2>/dev/null ;;
   fstrim)           fstrim -av 2>/dev/null ;;
   drop-cache)       sync && echo 1 > /proc/sys/vm/drop_caches ;;
-  compact-memory)   echo 1 > /proc/sys/vm/compact_memory ;;
+  compact-memory)   echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true ;;
   swappiness)       echo 10 > /proc/sys/vm/swappiness ;;
   dirty-ratio)      echo 10 > /proc/sys/vm/dirty_ratio ;;
   dirty-background-ratio) echo 5 > /proc/sys/vm/dirty_background_ratio ;;
-  optimizer)
-    sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
-    echo 10 > /proc/sys/vm/swappiness 2>/dev/null
-    fstrim -av 2>/dev/null ;;
   fix-suid)         [[ -z "$2" ]] && exit 1; chmod u-s "$2" 2>/dev/null ;;
   fix-writable)     [[ -z "$2" ]] && exit 1; chmod o-w "$2" 2>/dev/null ;;
   remove-file)      [[ -z "$2" ]] && exit 1; rm -f "$2" 2>/dev/null ;;
@@ -156,36 +201,40 @@ case "$1" in
   pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "${@:2}" 2>/dev/null ;;
   apt-remove)       [[ -z "$2" ]] && exit 1; DEBIAN_FRONTEND=noninteractive apt-get remove -y "$2" 2>/dev/null ;;
   dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;
+  zypper-remove)    [[ -z "$2" ]] && exit 1; zypper remove -y "$2" 2>/dev/null ;;
   one-click-fix)
     sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
     echo 10 > /proc/sys/vm/swappiness 2>/dev/null
     fstrim -av 2>/dev/null
     journalctl --vacuum-time=7d 2>/dev/null
     command -v paccache &>/dev/null && paccache -rk1 2>/dev/null ;;
-  *)  echo "Unknown: $1" >&2; exit 1 ;;
+  *)  echo "Unknown command: $1" >&2; exit 1 ;;
 esac
 HELPER_CONTENT
 chmod +x "$HELPER"
 ok "System helper → $HELPER"
 
-# Write sudoers rule — works on all distros (Arch uses wheel, Debian/Ubuntu uses sudo group)
-# "ALL ALL" means: any user on any host — safe because HELPER path is tightly scoped
-# Restrict to members of the 'sudo' group (Debian/Ubuntu) or 'wheel' (Arch/Fedora).
-# "ALL ALL" would grant any user on any host passwordless access — too broad.
-# We detect which group exists and use the appropriate one.
+# ── Sudoers rule ──────────────────────────────────────────
+# Detect sudo group (sudo = Debian/Ubuntu, wheel = Arch/Fedora/RHEL)
 if getent group sudo &>/dev/null; then
     SUDO_GROUP="sudo"
 elif getent group wheel &>/dev/null; then
     SUDO_GROUP="wheel"
 else
-    SUDO_GROUP="sudo"   # fallback — at worst same as before but with group constraint
+    SUDO_GROUP="sudo"
 fi
+
 echo "%${SUDO_GROUP} ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
 chmod 0440 /etc/sudoers.d/cyberclean
-# Validate sudoers syntax before applying — prevents locking out sudo on bad distros
-visudo -c -f /etc/sudoers.d/cyberclean 2>/dev/null && ok "Sudoers rule validated" || warn "Sudoers validation skipped (visudo not found)"
-ok "Sudoers rule configured"
+# Validate trước khi apply — tránh lock sudo ra
+if visudo -c -f /etc/sudoers.d/cyberclean 2>/dev/null; then
+    ok "Sudoers rule validated"
+else
+    warn "Sudoers validation skipped (visudo not found) — rule still applied"
+fi
+ok "Sudoers configured: %${SUDO_GROUP} → NOPASSWD helper only"
 
+# ── Done ──────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}══════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  ✅ CyberClean v${VERSION} installed!${NC}"

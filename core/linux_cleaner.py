@@ -390,9 +390,26 @@ class LinuxCleaner(BaseCleaner):
         # những thứ này vẫn được bảo vệ tuyệt đối.
         # ══════════════════════════════════════════════════════
         NAME_EXCLUDE = {
-            # ── GPU / Display drivers (xóa = crash / màn hình đen) ──
+            # ── GPU shader / driver cache (xóa = 5–30 phút rebuild lag khi vào game) ──
+            # Bao gồm tên thư mục cấp 1 lẫn subdirectory của từng driver:
+            #   mesa_shader_cache/   → Mesa tổng (AMD RadeonSI, Intel Iris, etc.)
+            #   mesa/                → Mesa build artifacts
+            #   nvidia/              → NVIDIA OpenGL / Vulkan shader cache
+            #   amdgpu/              → AMDGPU-PRO driver cache
+            #   radeon/              → legacy ATI/AMD radeon driver
+            #   intel/               → Intel GPU media driver cache
+            #   vulkan/              → Vulkan ICD layer cache
+            #   radv/                → AMD Radeon Vulkan (Mesa RADV driver)
+            #   anv/                 → Intel ANV Vulkan driver cache
+            #   iris/                → Intel Iris/Iris Xe (OpenGL)
+            #   nouveau/             → NVIDIA open-source driver
+            #   d3d/                 → DXVK / VKD3D Direct3D-over-Vulkan cache
+            #   dxvk/                → DXVK shader cache (Steam/Proton games)
+            #   vkd3d/               → VKD3D-Proton DX12→Vulkan cache
             'mesa_shader_cache', 'mesa', 'nvidia', 'amdgpu',
             'radeon', 'intel', 'vulkan',
+            'radv', 'anv', 'iris', 'nouveau',
+            'd3d', 'dxvk', 'vkd3d',
 
             # ── Fonts (xóa = ô vuông khắp nơi) ──
             'fontconfig',

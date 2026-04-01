@@ -1,11 +1,18 @@
 """
-CyberClean v2.2 — Security Scanner
+CyberClean v2.3 — Security Scanner
 FIX #3: rglob → os.walk(followlinks=False) to prevent infinite loops
         from circular symlinks (e.g. ~/.config/app -> /tmp -> ~/.config).
         rglob skips symlinked *files* but still DESCENDS INTO symlinked *directories*.
         os.walk(followlinks=False) stops at the symlink directory boundary entirely.
 FIX (cron): /var/spool/cron usually requires root — now logs "permission denied"
             instead of silently skipping, so user knows scan was partial.
+FIX (v2.3 HIGH #2): kill-pid now validated through _safe_kill_cmd() before being
+        embedded in fix_cmd. Guards against:
+        - PID < 100  → kernel/init/systemd processes, killing = system freeze
+        - PID not owned by current user on Linux (checks /proc/{pid}/status)
+        - PID 0, 1, 2 always blocked regardless of ownership
+        The helper still does the actual kill; this prevents building a
+        dangerous fix_cmd that targets a protected PID in the first place.
 """
 import os, subprocess, platform, stat, re
 from pathlib import Path
@@ -14,6 +21,48 @@ from typing import List, Callable
 
 OS     = platform.system()
 HELPER = '/usr/local/bin/cyber-clean-helper'
+
+# ── PID safety guard ──────────────────────────────────────────
+# Minimum PID allowed for kill actions.
+# PIDs < 100 are almost always kernel threads, init, udevd, etc.
+# Killing them causes a system freeze or kernel panic.
+_PID_MIN_SAFE = 100
+
+def _safe_kill_cmd(pid: int) -> str:
+    """
+    Return a fix_cmd string for killing the given PID, or an empty string
+    if the PID is protected (system process / not user-owned).
+
+    Rules:
+      1. PID must be > _PID_MIN_SAFE (100) — blocks init, systemd, kernel threads
+      2. On Linux: process must be owned by the current user (reads /proc/{pid}/status)
+         Root is exempt from the ownership check (can kill anything).
+      3. Always blocks PID 0, 1, 2 regardless of any other check.
+
+    Returns '' (empty) when the kill should NOT be offered in the UI.
+    """
+    # Rule 1 & 3: hard PID floor
+    if pid <= _PID_MIN_SAFE:
+        return ''
+
+    # Rule 2: Linux ownership check
+    if OS == 'Linux':
+        current_uid = os.getuid()
+        if current_uid != 0:   # root can kill anything — skip check for root
+            try:
+                status = Path(f'/proc/{pid}/status').read_text(errors='ignore')
+                for line in status.splitlines():
+                    if line.startswith('Uid:'):
+                        # Uid: real  effective  saved  filesystem
+                        proc_uid = int(line.split()[1])
+                        if proc_uid != current_uid:
+                            return ''   # not our process — don't offer kill
+                        break
+            except (OSError, ValueError):
+                return ''   # can't read /proc → play it safe, don't offer kill
+
+    return f'sudo -n {HELPER} kill-pid {pid}'
+
 
 def _h(action: str, target: str = '') -> str:
     if target:
@@ -144,26 +193,29 @@ class SecurityScanner:
                     cmd  = ' '.join(p.info['cmdline'] or []).lower()
 
                     if name in KNOWN_MINERS:
+                        _kill = _safe_kill_cmd(p.pid)
                         r = ScanResult('critical','malware', exe or name,
                             f'Crypto miner running: {name} (PID {p.pid})',
-                            can_fix=True, fix_cmd=f'sudo -n /usr/local/bin/cyber-clean-helper kill-pid {p.pid}')
+                            can_fix=bool(_kill), fix_cmd=_kill)
                         self.results.append(r)
                         log_cb(f'  ⛔  MINER: {name} PID={p.pid}', 'err')
                         continue
 
                     is_appimage_mount = exe and re.search(r'/tmp/\.mount_', exe)
                     if exe and any(exe.startswith(d) for d in ['/tmp','/dev/shm','/var/tmp']) and not is_appimage_mount:
+                        _kill = _safe_kill_cmd(p.pid)
                         r = ScanResult('high','suspicious', exe,
                             f'Process running from temp dir: {exe} (PID {p.pid})',
-                            can_fix=True, fix_cmd=f'sudo -n /usr/local/bin/cyber-clean-helper kill-pid {p.pid}')
+                            can_fix=bool(_kill), fix_cmd=_kill)
                         self.results.append(r)
                         log_cb(f'  ⚠  Suspicious exec from tmp: {exe}', 'warn')
 
                     for pattern, desc in SUSPICIOUS_SCRIPTS:
                         if re.search(pattern, cmd, re.I):
+                            _kill = _safe_kill_cmd(p.pid)
                             r = ScanResult('critical','malware', exe or name,
                                 f'{desc} in process cmdline (PID {p.pid})',
-                                can_fix=True, fix_cmd=f'sudo -n /usr/local/bin/cyber-clean-helper kill-pid {p.pid}')
+                                can_fix=bool(_kill), fix_cmd=_kill)
                             self.results.append(r)
                             log_cb(f'  ⛔  {desc}: PID {p.pid}', 'err')
                             break
