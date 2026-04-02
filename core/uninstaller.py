@@ -63,14 +63,18 @@ def _get_linux() -> List[InstalledApp]:
                 source='pacman', pkg_id=current['name']))
 
     elif PKG_MANAGER == 'apt':
-        out, _ = run('dpkg-query -W -f="${Package}\t${Version}\t${Installed-Size}\n" 2>/dev/null')
+        # FIX (v2.3): Use single quotes around the -f format string.
+        # Double quotes caused ${Package}, ${Version}, ${Installed-Size} to be
+        # expanded by bash to empty strings → every app returned name='', version=''.
+        # Single quotes pass the dpkg format specifiers through to dpkg-query intact.
+        out, _ = run("dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\n' 2>/dev/null")
         for line in out.splitlines():
             parts = line.split('\t')
-            if len(parts) >= 2:
+            if len(parts) >= 2 and parts[0].strip():
                 try: sz = float(parts[2]) / 1024 if len(parts) > 2 else 0.0
                 except: sz = 0.0
-                apps.append(InstalledApp(name=parts[0], version=parts[1],
-                    size_mb=sz, source='apt', pkg_id=parts[0]))
+                apps.append(InstalledApp(name=parts[0].strip(), version=parts[1].strip(),
+                    size_mb=sz, source='apt', pkg_id=parts[0].strip()))
 
     elif PKG_MANAGER == 'dnf':
         out, _ = run('rpm -qa --queryformat "%{NAME}\t%{VERSION}\t%{SIZE}\n" 2>/dev/null')

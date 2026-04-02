@@ -51,6 +51,9 @@ class SystemSnapshot:
     uptime_seconds: int = 0
 
 def fmt_size(n: int) -> str:
+    # FIX (v2.3): clamp to 0 — negative values (e.g. from quota edge cases or
+    # signed arithmetic) produced '-1.0 B' which is nonsensical in a disk cleaner.
+    n = max(0, n)
     for u in ['B','KB','MB','GB','TB']:
         if n < 1024 or u == 'TB':
             return f'{n:.1f} {u}'

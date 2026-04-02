@@ -10,7 +10,7 @@
 ```
 
 **Công cụ Dọn dẹp & Tối ưu Hiệu năng Hệ thống**
-**Windows · Linux · Đa nền tảng · v2.2.0**
+**Windows · Linux · Đa nền tảng · v2.2.1**
 
 <br/>
 
@@ -94,7 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Bộ cài đặt
 
-**[⬇ Tải CyberClean Setup v2.2.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Tải CyberClean Setup v2.2.1 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 > Chỉ hỏi UAC **đúng 1 lần khi cài đặt** · Không cài service nền · Gỡ qua `Cài đặt → Ứng dụng → CyberClean`
 
@@ -147,7 +147,7 @@ Mỗi lần xóa đều được ghi log để rollback thủ công. Mỗi mục
 | Event logs (wevtutil) | — | ✅ |
 | Báo lỗi & crash dump Windows | — | ✅ |
 
-**Hệ thống bảo vệ thông minh (v2.2.0):**
+**Hệ thống bảo vệ thông minh (v2.2.1):**
 - **Bảo vệ 3 tầng cho Linux** — whitelist tên → phát hiện socket/FIFO → kiểm tra hoạt động gần đây. Wallpaper daemon, compositor hay IPC tool lạ đều được tự động bảo vệ mà không cần thêm tên vào danh sách.
 - **Kiểm tra lock cho Windows temp** — thử mở file exclusive trước khi xóa. File đang bị giữ bởi process khác sẽ được bỏ qua im lặng, không gây lỗi dây chuyền.
 
@@ -211,7 +211,7 @@ Gỡ bỏ phần mềm sạch sẽ, không để lại rác.
 
 ### 🌐 Đa ngôn ngữ
 
-Hỗ trợ sẵn: **Tiếng Việt · English · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · العربية · Türkçe · Polski · Italiano**
+Hỗ trợ sẵn: **Tiếng Việt · English · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · Italiano**
 
 ---
 
@@ -287,7 +287,7 @@ CyberClean/
 │   └── os_detect.py        # Phát hiện OS / distro / package manager
 ├── utils/
 │   ├── sysinfo.py          # Snapshot hệ thống (psutil, cache thread-safe)
-│   └── i18n.py             # 14 ngôn ngữ
+│   └── i18n.py             # 11 ngôn ngữ
 ├── assets/
 │   ├── logo.png            # Icon ứng dụng
 │   ├── logo.ico            # Icon Windows

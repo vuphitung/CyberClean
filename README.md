@@ -10,7 +10,7 @@
 ```
 
 **Smart System Cleaner & Performance Optimizer**
-**Windows · Linux · Cross-platform · v2.2.0**
+**Windows · Linux · Cross-platform · v2.2.1**
 
 <br/>
 
@@ -94,7 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Installer
 
-**[⬇ Download CyberClean Setup v2.2.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Download CyberClean Setup v2.2.1 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 > UAC elevation on **first install only** · No background services · Uninstall via `Settings → Apps → CyberClean`
 
@@ -147,7 +147,7 @@ Every deletion is logged for manual rollback. Each target is labelled **Safe / C
 | Event logs (wevtutil) | — | ✅ |
 | Windows Error Reports & crash dumps | — | ✅ |
 
-**Smart guard system (v2.2.0):**
+**Smart guard system (v2.2.1):**
 - **3-layer Linux cache guard** — name whitelist → socket/FIFO type detection → recent-activity check. Unknown wallpaper daemons, compositors, and IPC tools are automatically protected without needing a name update.
 - **Lock-probe Windows temp guard** — probes each file for an exclusive open before deleting. Locked files (held by a running process) are skipped silently instead of causing cascade errors.
 
@@ -211,7 +211,7 @@ Remove installed applications cleanly, no leftovers.
 
 ### 🌐 Multi-language (i18n)
 
-Built-in translations: **English · Tiếng Việt · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · العربية · Türkçe · Polski · Italiano**
+Built-in translations: **English · Tiếng Việt · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · Italiano**
 
 ---
 
@@ -287,7 +287,7 @@ CyberClean/
 │   └── os_detect.py        # OS / distro / package manager detection
 ├── utils/
 │   ├── sysinfo.py          # psutil system snapshot (thread-safe cache)
-│   └── i18n.py             # 14-language translations
+│   └── i18n.py             # 11-language translations
 ├── assets/
 │   ├── logo.png            # App icon
 │   ├── logo.ico            # Windows icon
