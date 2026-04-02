@@ -30,7 +30,7 @@ def _read_version() -> str:
     if not vfile.exists():
         print(f"  ⚠  version.py not found — using 0.0.0 (create it!)")
         return '0.0.0'
-    src = vfile.read_text()
+    src = vfile.read_text(encoding="utf-8")
     m = re.search(r'__version__\s*=\s*["\'](.+?)["\']', src)
     if not m:
         print(f"  ⚠  __version__ not found in version.py — using 0.0.0")
@@ -264,7 +264,7 @@ def build_linux_appimage():
     apprun.write_text(
         '#!/bin/bash\n'
         f'exec "$APPDIR/usr/bin/{APP}/{APP}" "$@"\n'
-    )
+        encoding='utf-8')
     apprun.chmod(0o755)
 
     (appdir / f'{APP}.desktop').write_text(
@@ -275,7 +275,7 @@ def build_linux_appimage():
         f'Type=Application\n'
         f'Categories=System;Utility;\n'
         f'Comment=Smart Disk Cleaner v{VERSION}\n'
-    )
+        encoding='utf-8')
 
     if ICON_PNG.exists():
         shutil.copy(ICON_PNG, appdir / f'{APP}.png')
@@ -346,7 +346,7 @@ def build_linux_deb():
         f'Categories=System;Utility;\n'
         f'Comment=Smart Disk Cleaner v{VERSION}\n'
         f'Terminal=false\n'
-    )
+        encoding='utf-8')
 
     debian_dir = deb_root / 'DEBIAN'
     debian_dir.mkdir()
@@ -361,14 +361,14 @@ def build_linux_deb():
         f'Section: utils\n'
         f'Priority: optional\n'
         f'Depends: libxcb-cursor0\n'      # Qt6 runtime dep on Ubuntu 22.04+
-    )
+        encoding='utf-8')
 
     postinst = debian_dir / 'postinst'
     postinst.write_text(
         '#!/bin/bash\n'
         f'chmod +x /opt/{APP}/{APP}/{APP}\n'
         'update-desktop-database /usr/share/applications 2>/dev/null || true\n'
-    )
+        encoding='utf-8')
     postinst.chmod(0o755)
 
     postrm = debian_dir / 'postrm'
@@ -376,7 +376,7 @@ def build_linux_deb():
         '#!/bin/bash\n'
         f'rm -rf /opt/{APP}\n'
         'update-desktop-database /usr/share/applications 2>/dev/null || true\n'
-    )
+        encoding='utf-8')
     postrm.chmod(0o755)
 
     DIST.mkdir(exist_ok=True)
