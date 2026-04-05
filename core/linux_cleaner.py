@@ -527,6 +527,20 @@ class LinuxCleaner(BaseCleaner):
             if _is_runtime_file(item):
                 continue
 
+            # FIX W7: bind-mount / Btrfs subvolume guard.
+            # On Fedora Silverblue, NixOS, and systems with Btrfs subvol layout,
+            # ~/.cache subdirs can be real mount points (not symlinks) for
+            # separate subvolumes or tmpfs mounts.
+            # item.is_symlink() returns False for mount points → Layer 2 misses them.
+            # os.path.ismount() correctly detects both symlink mounts AND real mounts.
+            # Deleting a mount point would attempt to remove the entire subvolume.
+            try:
+                import os as _os
+                if _os.path.ismount(str(item)):
+                    continue
+            except OSError:
+                continue   # stat failed → play it safe
+
             # Layer 2b: nếu là thư mục và chứa socket bên trong → skip
             if item.is_dir() and _dir_has_socket(item):
                 continue

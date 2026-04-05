@@ -343,7 +343,14 @@ class WindowsCleaner(BaseCleaner):
 
     def _win_thumbcache(self, dry):
         r = CleanResult('win_thumbcache')
-        thumb_dir = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft/Windows/Explorer'
+        # FIX B3: guard empty LOCALAPPDATA (domain users / sandbox environments).
+        # os.environ.get('LOCALAPPDATA','') returns '' → Path('') / subfolder resolves
+        # to a relative path in the working directory — potentially deleting real files.
+        _local = os.environ.get('LOCALAPPDATA', '')
+        if not _local:
+            r.error = 'LOCALAPPDATA not set — skipping'
+            return r
+        thumb_dir = Path(_local) / 'Microsoft/Windows/Explorer'
         if not thumb_dir.exists(): return r
         files = list(thumb_dir.glob('thumbcache_*.db'))
         size_before = sum(f.stat().st_size for f in files if f.exists())
@@ -415,9 +422,15 @@ class WindowsCleaner(BaseCleaner):
 
     def _win_error_reports(self, dry):
         r = CleanResult('win_error_reports')
-        wer_dirs = [
-            Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft/Windows/WER/ReportArchive',
-            Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft/Windows/WER/ReportQueue',
+        # FIX B3: guard empty LOCALAPPDATA
+        _local = os.environ.get('LOCALAPPDATA', '')
+        wer_dirs = []
+        if _local:
+            wer_dirs += [
+                Path(_local) / 'Microsoft/Windows/WER/ReportArchive',
+                Path(_local) / 'Microsoft/Windows/WER/ReportQueue',
+            ]
+        wer_dirs += [
             Path('C:/ProgramData/Microsoft/Windows/WER/ReportArchive'),
             Path('C:/ProgramData/Microsoft/Windows/WER/ReportQueue'),
         ]
@@ -445,8 +458,13 @@ class WindowsCleaner(BaseCleaner):
 
     def _browser_cache(self, tid, dry):
         r = CleanResult(tid)
-        local   = Path(os.environ.get('LOCALAPPDATA', ''))
-        roaming = Path(os.environ.get('APPDATA', ''))
+        # FIX B3: guard empty env vars — Path('') / subfolder = relative path danger
+        _lc = os.environ.get('LOCALAPPDATA', '')
+        _rm = os.environ.get('APPDATA', '')
+        if not _lc and not _rm:
+            return r   # no profile paths resolvable — skip safely
+        local   = Path(_lc)  if _lc else Path('C:/Users/Default/AppData/Local')
+        roaming = Path(_rm)  if _rm else Path('C:/Users/Default/AppData/Roaming')
 
         if tid == 'firefox_cache':
             local_ff = local / 'Mozilla/Firefox/Profiles'
