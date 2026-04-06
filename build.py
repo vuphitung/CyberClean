@@ -263,7 +263,7 @@ def build_linux_appimage():
     apprun = appdir / 'AppRun'
     apprun.write_text(
         '#!/bin/bash\n'
-        f'exec "$APPDIR/usr/bin/{APP}/{APP}" "$@"\n'
+        f'exec "$APPDIR/usr/bin/{APP}/{APP}" "$@"\n',
         encoding='utf-8')
     apprun.chmod(0o755)
 
@@ -274,7 +274,7 @@ def build_linux_appimage():
         f'Icon={APP}\n'
         f'Type=Application\n'
         f'Categories=System;Utility;\n'
-        f'Comment=Smart Disk Cleaner v{VERSION}\n'
+        f'Comment=Smart Disk Cleaner v{VERSION}\n',
         encoding='utf-8')
 
     if ICON_PNG.exists():
@@ -345,7 +345,7 @@ def build_linux_deb():
         f'Type=Application\n'
         f'Categories=System;Utility;\n'
         f'Comment=Smart Disk Cleaner v{VERSION}\n'
-        f'Terminal=false\n'
+        f'Terminal=false\n',
         encoding='utf-8')
 
     debian_dir = deb_root / 'DEBIAN'
@@ -360,14 +360,14 @@ def build_linux_deb():
         f'Homepage: {URL}\n'
         f'Section: utils\n'
         f'Priority: optional\n'
-        f'Depends: libxcb-cursor0\n'      # Qt6 runtime dep on Ubuntu 22.04+
+        f'Depends: libxcb-cursor0\n',     # Qt6 runtime dep on Ubuntu 22.04+
         encoding='utf-8')
 
     postinst = debian_dir / 'postinst'
     postinst.write_text(
         '#!/bin/bash\n'
         f'chmod +x /opt/{APP}/{APP}/{APP}\n'
-        'update-desktop-database /usr/share/applications 2>/dev/null || true\n'
+        'update-desktop-database /usr/share/applications 2>/dev/null || true\n',
         encoding='utf-8')
     postinst.chmod(0o755)
 
@@ -375,7 +375,7 @@ def build_linux_deb():
     postrm.write_text(
         '#!/bin/bash\n'
         f'rm -rf /opt/{APP}\n'
-        'update-desktop-database /usr/share/applications 2>/dev/null || true\n'
+        'update-desktop-database /usr/share/applications 2>/dev/null || true\n',
         encoding='utf-8')
     postrm.chmod(0o755)
 
