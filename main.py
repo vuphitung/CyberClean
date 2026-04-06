@@ -5,20 +5,15 @@ No SVG file dependency — icons always render sharp at any DPI.
 Sidebar redesigned: wider, icon+label layout with active indicator bar.
 Header: hex logo drawn in code, tighter spacing.
 """
-import sys, os, json, time, platform, threading
+import sys, os, json, time, platform
 
 # ── Version (single source of truth: version.py) ──────────────
 try:
-    from version import __version__, version_is_newer
+    from version import __version__
 except ImportError:
     __version__ = "0.0.0"
-
-    def version_is_newer(remote: str, current: str) -> bool:
-        return remote != current
 from pathlib import Path
 from datetime import datetime
-from urllib.request import urlopen
-from urllib.error import URLError
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland*=false"
 # GIO: skip GVFS remote volume monitors — avoids noisy DBus errors when related
 # user systemd units are masked (common on minimal/Zen setups). Local disks still work.
@@ -70,7 +65,7 @@ from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linu
 from core.scanner    import SecurityScanner
 from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
-from utils.updater import UpdateDialog, UpdateBadge
+from utils.updater import UpdateDialog, UpdateBadge, UpdateCheckThread
 from core.analyzer import get_network_processes, IdleScheduler
 from core.booster import (free_ram, memory_tune, memory_tune_restore,
                           clear_disk_cache, kill_bloat,
@@ -910,8 +905,6 @@ class _AutoCleanWorker(QThread):
 # ═════════════════════════════════════════════════════════════
 class CyberCleanApp(QMainWindow):
 
-    update_found = pyqtSignal(str, str)  # version, release_body (markdown)
-
     # Icon name per tab — maps to _ICON_FN keys
     _TAB_ICONS = {
         'dashboard': 'dashboard',
@@ -955,7 +948,6 @@ class CyberCleanApp(QMainWindow):
         self._start_clock()
         self._nav('dashboard')
         self._setup_tray()
-        self.update_found.connect(self._show_update_notice)
         self._start_auto_clean()
         self._check_update_async()
 
@@ -3203,6 +3195,8 @@ class CyberCleanApp(QMainWindow):
             self._clock_timer.stop()
         if hasattr(self, '_auto_clean_timer'):
             self._auto_clean_timer.stop()
+        if getattr(self, '_upd_check_thread', None) and self._upd_check_thread.isRunning():
+            self._upd_check_thread.wait(3000)
         if getattr(self, '_auto_worker', None) and self._auto_worker.isRunning():
             self._auto_worker.quit()
             self._auto_worker.wait(1000)
@@ -3265,43 +3259,37 @@ class CyberCleanApp(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information, 3000,
                 )
 
-    GITHUB_LATEST = 'https://api.github.com/repos/vuphitung/CyberClean/releases/latest'
-    CURRENT_VER   = __version__
+    CURRENT_VER = __version__
 
     def _check_update_async(self):
-        threading.Thread(target=self._fetch_update, daemon=True).start()
-
-    def _fetch_update(self):
-        try:
-            req = urlopen(self.GITHUB_LATEST, timeout=8)
-            data = json.loads(req.read().decode())
-            latest = data.get("tag_name", "").lstrip("v")
-            body = data.get("body") or ""
-            if latest and version_is_newer(latest, self.CURRENT_VER):
-                self.update_found.emit(latest, body)
-        except Exception:
-            pass
+        # QThread (not threading.Thread): emitting from std threads can crash Qt on some Linux setups.
+        self._upd_check_thread = UpdateCheckThread(self.CURRENT_VER, parent=self)
+        self._upd_check_thread.found.connect(self._show_update_notice)
+        self._upd_check_thread.start()
 
     def _show_update_notice(self, ver: str, body: str):
-        self._pending_update_ver = ver
-        self._pending_update_body = body
-        self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
-        self._upd_lbl.setStyleSheet(
-            f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
-            f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
-            f'padding:3px 8px;border-radius:2px;'
-        )
-        self._upd_lbl.setVisible(True)
-        if hasattr(self, "_tray_update_act"):
-            self._tray_update_act.setVisible(True)
-            self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
-        if hasattr(self, "tray"):
-            self.tray.showMessage(
-                "CyberClean — Update available",
-                _t("tray_upd_msg", f"v{ver}: click the header badge or tray → View update…", ver=ver),
-                QSystemTrayIcon.MessageIcon.Information,
-                6000,
+        try:
+            self._pending_update_ver = ver
+            self._pending_update_body = body
+            self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
+            self._upd_lbl.setStyleSheet(
+                f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
+                f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
+                f'padding:3px 8px;border-radius:2px;'
             )
+            self._upd_lbl.setVisible(True)
+            if hasattr(self, "_tray_update_act"):
+                self._tray_update_act.setVisible(True)
+                self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
+            if hasattr(self, "tray"):
+                self.tray.showMessage(
+                    "CyberClean — Update available",
+                    _t("tray_upd_msg", f"v{ver}: click the header badge or tray → View update…", ver=ver),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    6000,
+                )
+        except Exception:
+            pass
 
     def _open_update_dialog(self):
         ver = getattr(self, "_pending_update_ver", "") or ""

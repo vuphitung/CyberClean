@@ -5,6 +5,7 @@ All UI strings go through _t() for full i18n support.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -50,6 +51,61 @@ def _t(key: str, default: str = '', **kwargs) -> str:
     return text
 
 REPO = "vuphitung/CyberClean"
+
+
+def _github_api_headers(current_ver: str) -> dict[str, str]:
+    """GitHub REST v3 requires a non-empty User-Agent; also request JSON explicitly."""
+    return {
+        "User-Agent": f"CyberClean/{current_ver} (in-app update check)",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+class UpdateCheckThread(QThread):
+    """
+    Fetch releases from GitHub in a real QThread (not threading.Thread).
+    Emits found(version, body) when a non-draft release is newer than current.
+
+    Uses /releases (not /releases/latest) so prereleases still show up — /latest
+    ignores prerelease-only tags, which made local tests look like 'no update'.
+    """
+    found = pyqtSignal(str, str)
+
+    def __init__(self, current_ver: str, repo: str = REPO, parent=None):
+        super().__init__(parent)
+        self._current = current_ver
+        self._repo = repo
+
+    def run(self):
+        try:
+            from version import version_is_newer
+        except ImportError:
+            return
+        url = f"https://api.github.com/repos/{self._repo}/releases?per_page=30"
+        try:
+            req = Request(url, headers=_github_api_headers(self._current))
+            with urlopen(req, timeout=25) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(data, list):
+            return
+        best_tag = ""
+        best_body = ""
+        for rel in data:
+            if not isinstance(rel, dict) or rel.get("draft"):
+                continue
+            tag = (rel.get("tag_name") or "").lstrip("v")
+            if not tag or not version_is_newer(tag, self._current):
+                continue
+            if not best_tag or version_is_newer(tag, best_tag):
+                best_tag = tag
+                best_body = rel.get("body") or ""
+        if best_tag:
+            self.found.emit(best_tag, best_body)
+
 
 # Design tokens — match main.py (no circular import)
 C = {
