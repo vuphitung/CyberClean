@@ -86,6 +86,28 @@ def run(cmd, timeout=10):
         return r.stdout.strip()
     except: return ''
 
+
+def _is_expected_suid_path(path: str) -> bool:
+    """
+    Chromium / Electron intentionally install a setuid helper named chrome-sandbox
+    (e.g. /usr/lib/electron39/chrome-sandbox on Arch). Flagging it is a false
+    positive; stripping SUID would break the browser sandbox.
+    """
+    p = path.replace('\\', '/')
+    if not p.endswith('/chrome-sandbox'):
+        return False
+    if not (p.startswith('/usr/') or p.startswith('/opt/')):
+        return False
+    pl = p.lower()
+    markers = (
+        '/electron', '/chromium', '/chromium-browser',
+        '/chrome/', '/google-chrome', 'google-chrome',
+        '/opt/google/chrome', '/brave', '/vivaldi', '/opera',
+        'microsoft-edge', '/edge/',
+    )
+    return any(m in pl for m in markers)
+
+
 SUSPICIOUS_SCRIPTS = [
     (r'bash\s+-i\s+>&\s*/dev/tcp',          'Reverse bash shell'),
     (r'nc\s+-e\s+/bin/(bash|sh)',            'Netcat reverse shell'),
@@ -250,7 +272,8 @@ class SecurityScanner:
         found = 0
         for line in out.splitlines():
             f = line.strip()
-            if not f or f in known_suid: continue
+            if not f or f in known_suid or _is_expected_suid_path(f):
+                continue
             self.results.append(ScanResult('high','suid', f,
                 f'Unexpected SUID binary: {f}',
                 can_fix=True, fix_cmd=f'sudo -n {HELPER} fix-suid "{f}"'))

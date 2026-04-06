@@ -65,7 +65,7 @@ fi
 if [[ -z "$VERSION" ]]; then
     # Fallback: dùng version hardcode nếu API không trả về
     # Cập nhật dòng này khi release nhưng không phải điểm fail chính
-    VERSION="2.2.1"
+    VERSION="2.2.2"
     warn "GitHub API unavailable — using fallback version ${VERSION}"
 else
     ok "Latest version: v${VERSION}"
@@ -168,6 +168,9 @@ case "$1" in
   apt-autoremove)   DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null ;;
   dnf-clean)        dnf clean all 2>/dev/null ;;
   zypper-clean)     zypper clean --all 2>/dev/null ;;
+  xbps-clean-cache) xbps-remove -o 2>/dev/null ;;
+  xbps-orphans)     xbps-remove -O 2>/dev/null ;;
+  snap-remove-rev)  [[ -z "$2" || -z "$3" ]] && exit 1; snap remove "$2" --revision="$3" 2>/dev/null ;;
   fstrim)           fstrim -av 2>/dev/null ;;
   drop-cache)       sync && echo 1 > /proc/sys/vm/drop_caches ;;
   compact-memory)   echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true ;;
@@ -183,6 +186,14 @@ case "$1" in
   apt-remove)       [[ -z "$2" ]] && exit 1; DEBIAN_FRONTEND=noninteractive apt-get remove -y "$2" 2>/dev/null ;;
   dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;
   zypper-remove)    [[ -z "$2" ]] && exit 1; zypper remove -y "$2" 2>/dev/null ;;
+  update-replace)
+    [[ -z "$2" || -z "$3" ]] && exit 1
+    SRC="$2"; DST="$3"; BACKUP="${4:-/opt/CyberClean/_backup}"
+    rm -rf "$BACKUP" 2>/dev/null || true
+    [[ -d "$DST" ]] && mv "$DST" "$BACKUP"
+    cp -r "$SRC" "$DST"
+    chmod +x "$DST/CyberClean" 2>/dev/null || true
+    rm -rf "$SRC" 2>/dev/null || true ;;
   one-click-fix)
     sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
     echo 10 > /proc/sys/vm/swappiness 2>/dev/null

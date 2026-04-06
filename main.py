@@ -9,14 +9,20 @@ import sys, os, json, time, platform, threading
 
 # ── Version (single source of truth: version.py) ──────────────
 try:
-    from version import __version__
+    from version import __version__, version_is_newer
 except ImportError:
     __version__ = "0.0.0"
+
+    def version_is_newer(remote: str, current: str) -> bool:
+        return remote != current
 from pathlib import Path
 from datetime import datetime
 from urllib.request import urlopen
 from urllib.error import URLError
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland*=false"
+# GIO: skip GVFS remote volume monitors — avoids noisy DBus errors when related
+# user systemd units are masked (common on minimal/Zen setups). Local disks still work.
+os.environ.setdefault("GIO_USE_VFS", "local")
 # FIX: Disable Qt thread watchdog that falsely fires on Python 3.14
 # when time.sleep() releases GIL in a QThread (seen on Arch+KDE+Wayland).
 # This does NOT disable real crash detection — only the GIL-release false alarm.
@@ -42,11 +48,11 @@ from PyQt6.QtWidgets import (
     QTextEdit, QHeaderView, QMessageBox, QSystemTrayIcon, QMenu,
     QSizePolicy, QLineEdit, QComboBox, QFileDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF, QRectF, QSize
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF, QRectF, QSize, QSettings, QUrl
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QTextCursor, QPainter, QBrush,
     QPen, QLinearGradient, QIcon, QAction, QPolygonF, QPixmap,
-    QTransform
+    QTransform, QDesktopServices,
 )
 
 # ── SVG kept for compatibility but never used for nav icons ──
@@ -57,13 +63,14 @@ except ImportError:
     HAS_SVG = False
 
 sys.path.insert(0, str(Path(__file__).parent))
-from core.os_detect  import (IS_LINUX, IS_WINDOWS, PKG_MANAGER, platform_info,
+from core.os_detect  import (IS_LINUX, IS_WINDOWS, IS_WSL, PKG_MANAGER, platform_info,
                                 HAS_POLKIT, HAS_POLKIT_AGENT, HAS_FLATPAK, HAS_DOCKER,
                                 HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
 from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linux, fmt_size
 from core.scanner    import SecurityScanner
 from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
+from utils.updater import UpdateDialog, UpdateBadge
 from core.analyzer import get_network_processes, IdleScheduler
 from core.booster import (free_ram, memory_tune, memory_tune_restore,
                           clear_disk_cache, kill_bloat,
@@ -94,7 +101,8 @@ if CLEANER is None:
     _msg.setText(
         f'CyberClean does not support {_plat.system()} yet.\n\n'
         'Supported platforms: Windows 10/11 · Linux (all major distros)\n\n'
-        'macOS support is planned for a future release.'
+        'macOS support is planned — track progress:\n'
+        'https://github.com/vuphitung/CyberClean/issues'
     )
     _msg.exec()
     sys.exit(1)
@@ -902,7 +910,7 @@ class _AutoCleanWorker(QThread):
 # ═════════════════════════════════════════════════════════════
 class CyberCleanApp(QMainWindow):
 
-    update_found = pyqtSignal(str)
+    update_found = pyqtSignal(str, str)  # version, release_body (markdown)
 
     # Icon name per tab — maps to _ICON_FN keys
     _TAB_ICONS = {
@@ -937,6 +945,9 @@ class CyberCleanApp(QMainWindow):
         self._charts  = {}
         self._snap    = None
         self._last_refresh_time = 0.0
+        self._settings = QSettings()
+        self._pending_update_ver = ""
+        self._pending_update_body = ""
 
         self._init_palette()
         self._build_ui()
@@ -1126,13 +1137,15 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self._os_info_lbl)
         lay.addStretch()
 
-        # Update notice label (hidden until update found)
-        self._upd_lbl = QLabel('')
+        # Update badge (hidden until GitHub release > current version)
+        self._upd_lbl = UpdateBadge()
         self._upd_lbl.setStyleSheet(
             f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
-            f'font-family:{MONO};padding:3px 0;border:none;'
+            f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
+            f'padding:3px 8px;border-radius:2px;'
         )
         self._upd_lbl.setVisible(False)
+        self._upd_lbl.clicked.connect(self._open_update_dialog)
 
         # Status dot
         status_frame = QFrame()
@@ -1258,6 +1271,11 @@ class CyberCleanApp(QMainWindow):
                 f'PKG: {info["pkg_manager"] or "n/a"}\n'
                 f'PY: {info["python"]}'
             )
+            if info.get('is_wsl'):
+                pi_text += (
+                    '\n\nWSL: Some features are limited (TRIM, drop_cache,'
+                    '\n     full booster) — use on bare metal for best results.'
+                )
         pi_lbl = QLabel(pi_text)
         pi_lbl.setStyleSheet(
             f'color:{C["text3"]};font-size:10px;letter-spacing:1px;'
@@ -1851,13 +1869,22 @@ class CyberCleanApp(QMainWindow):
         )
         self._rollback_clr_btn = _btn(f"✕ {_t('btn_clear','CLEAR')}", 'red', small=True)
         self._rollback_clr_btn.clicked.connect(self._clear_rollback)
-        hdr.addWidget(self._lbl_rollback_title); hdr.addStretch(); hdr.addWidget(self._rollback_clr_btn)
+        self._rollback_folder_btn = _btn(
+            f"📁 {_t('rollback_open_folder', 'OPEN LOG FOLDER')}", 'cyan', small=True
+        )
+        self._rollback_folder_btn.clicked.connect(self._open_logs_folder)
+        hdr.addWidget(self._lbl_rollback_title)
+        hdr.addStretch()
+        hdr.addWidget(self._rollback_folder_btn)
+        hdr.addWidget(self._rollback_clr_btn)
         lay.addLayout(hdr)
         lay.addWidget(_divider())
         lay.addSpacing(8)
 
-        self._lbl_rollback_hint = QLabel(_t('rollback_hint',
-            'Cache files auto-rebuild. Package restores: use the command in the NOTE column.'))
+        self._lbl_rollback_hint = QLabel(_t(
+            'rollback_hint',
+            'These entries are a record of what was removed — files are not kept for restore.',
+        ))
         self._lbl_rollback_hint.setStyleSheet(f'color:{C["text3"]};font-size:11px;font-family:{MONO};')
         self._lbl_rollback_hint.setWordWrap(True)
         lay.addWidget(self._lbl_rollback_hint)
@@ -2525,6 +2552,37 @@ class CyberCleanApp(QMainWindow):
             ROLLBACK_FILE.unlink(missing_ok=True)
             self.rollback_table.setRowCount(0)
 
+    def _open_logs_folder(self):
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR.resolve())))
+
+    def _hide_to_tray(self, event, notify=True):
+        event.ignore()
+        self.hide()
+        if hasattr(self, '_si_worker'):
+            self._si_worker.paused = True
+        if hasattr(self, '_clock_timer'):
+            self._clock_timer.stop()
+        if notify and hasattr(self, 'tray'):
+            self.tray.showMessage(
+                'CyberClean',
+                _t('tray_running_bg', 'Running in background. Auto-clean every 6h.'),
+                QSystemTrayIcon.MessageIcon.Information,
+                2000,
+            )
+
+    def _reset_close_preference(self):
+        self._settings.remove('autoclean_close_behavior')
+        self._settings.sync()
+        QMessageBox.information(
+            self,
+            _t('close_pref_reset_title', 'Preference reset'),
+            _t('close_pref_reset_body', 'You will be asked again the next time you close the window.'),
+        )
+
     class BoosterWorker(QThread):
         log_signal  = pyqtSignal(str, str)
         done_signal = pyqtSignal(object)
@@ -2696,6 +2754,16 @@ class CyberCleanApp(QMainWindow):
         show_act.triggered.connect(self._show_from_tray)
         clean_act = QAction('⚡  Quick Clean', self)
         clean_act.triggered.connect(lambda: (self._show_from_tray(), self._nav('clean')))
+        self._tray_update_act = QAction(_t('tray_view_update', '⬆  View update…'), self)
+        self._tray_update_act.setVisible(False)
+        self._tray_update_act.triggered.connect(
+            lambda: (self._show_from_tray(), self._open_update_dialog())
+        )
+        self._tray_reset_close_act = QAction(
+            _t('tray_reset_close_pref', 'Reset close-window preference…'), self
+        )
+        self._tray_reset_close_act.triggered.connect(self._reset_close_preference)
+
         quit_act  = QAction('✕  Quit', self)
 
         def _quit():
@@ -2706,6 +2774,9 @@ class CyberCleanApp(QMainWindow):
         self.tray_menu.addAction(show_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(clean_act)
+        self.tray_menu.addAction(self._tray_update_act)
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(self._tray_reset_close_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(quit_act)
         self.tray.setContextMenu(self.tray_menu)
@@ -2720,30 +2791,53 @@ class CyberCleanApp(QMainWindow):
         if not event.spontaneous():
             self._shutdown(); event.accept(); return
 
+        tray_ok = QSystemTrayIcon.isSystemTrayAvailable() and hasattr(self, 'tray')
         is_auto = hasattr(self, '_auto_clean_timer') and self._auto_clean_timer.isActive()
 
-        if not is_auto:
+        if not is_auto or not tray_ok:
             self._shutdown(); event.accept(); return
 
-        reply = QMessageBox.question(self,
-            _t('confirm_close_title', 'Background Mode'),
-            _t('confirm_close_msg',
-               "Auto-clean (6h) is enabled.\n\n"
-               "• YES: Hide to system tray and keep running\n"
-               "• NO: Quit completely (disables auto-clean)"),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes)
+        behavior = self._settings.value('autoclean_close_behavior', 'ask')
+        if behavior == 'tray':
+            if tray_ok:
+                self._hide_to_tray(event, notify=False)
+            else:
+                self._shutdown(); event.accept()
+            return
+        if behavior == 'quit':
+            self._shutdown(); event.accept(); return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(_t('confirm_close_title', 'Background Mode'))
+        msg.setText(
+            _t(
+                'confirm_close_msg',
+                'Auto-clean (6h) is enabled.\n\n'
+                '• YES: Hide to system tray and keep running\n'
+                '• NO: Quit completely (stops background auto-clean)',
+            )
+        )
+        cb = QCheckBox(_t('remember_close_choice', 'Remember my choice — skip this dialog next time'))
+        cb.setChecked(True)
+        msg.setCheckBox(cb)
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        msg.setStyleSheet(
+            f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;'
+        )
+        reply = msg.exec()
 
         if reply == QMessageBox.StandardButton.Yes:
-            event.ignore()
-            self.hide()
-            if hasattr(self, '_si_worker'): self._si_worker.paused = True
-            if hasattr(self, '_clock_timer'): self._clock_timer.stop()
-            if hasattr(self, 'tray'):
-                self.tray.showMessage('CyberClean',
-                    'Running in background. Auto-clean every 6h.',
-                    QSystemTrayIcon.MessageIcon.Information, 2000)
+            if cb.isChecked():
+                self._settings.setValue('autoclean_close_behavior', 'tray')
+                self._settings.sync()
+            self._hide_to_tray(event, notify=True)
         else:
+            if cb.isChecked():
+                self._settings.setValue('autoclean_close_behavior', 'quit')
+                self._settings.sync()
             self._shutdown(); event.accept()
 
     def _show_from_tray(self):
@@ -2892,9 +2986,23 @@ class CyberCleanApp(QMainWindow):
             self._lbl_rollback_title.setText(_t('rollback_title', 'ROLLBACK LIST'))
         if hasattr(self, '_rollback_clr_btn'):
             self._rollback_clr_btn.setText(f"✕ {_t('btn_clear','CLEAR')}")
+        if hasattr(self, '_rollback_folder_btn'):
+            self._rollback_folder_btn.setText(f"📁 {_t('rollback_open_folder', 'OPEN LOG FOLDER')}")
         if hasattr(self, '_lbl_rollback_hint'):
-            self._lbl_rollback_hint.setText(_t('rollback_hint',
-                'Cache files auto-rebuild. Package restores: use the command in the NOTE column.'))
+            self._lbl_rollback_hint.setText(_t(
+                'rollback_hint',
+                'These entries are a record of what was removed — files are not kept for restore.',
+            ))
+        if hasattr(self, '_tray_reset_close_act'):
+            self._tray_reset_close_act.setText(
+                _t('tray_reset_close_pref', 'Reset close-window preference…')
+            )
+        if hasattr(self, '_tray_update_act'):
+            self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
+        if hasattr(self, '_upd_lbl') and self._upd_lbl.isVisible():
+            ver = getattr(self, '_pending_update_ver', '')
+            if ver:
+                self._upd_lbl.setText(_t('upd_badge', '⬆ v{ver} UPDATE', ver=ver))
         if hasattr(self, 'rollback_table'):
             self.rollback_table.setHorizontalHeaderLabels([
                 _t('col_time','TIME'), _t('col_type','TYPE'),
@@ -3098,26 +3206,43 @@ class CyberCleanApp(QMainWindow):
 
     def _fetch_update(self):
         try:
-            req  = urlopen(self.GITHUB_LATEST, timeout=5)
+            req = urlopen(self.GITHUB_LATEST, timeout=8)
             data = json.loads(req.read().decode())
-            latest = data.get('tag_name', '').lstrip('v')
-            if latest and latest != self.CURRENT_VER:
-                self.update_found.emit(latest)
-        except:
+            latest = data.get("tag_name", "").lstrip("v")
+            body = data.get("body") or ""
+            if latest and version_is_newer(latest, self.CURRENT_VER):
+                self.update_found.emit(latest, body)
+        except Exception:
             pass
 
-    def _show_update_notice(self, ver):
-        self._upd_lbl.setText(f'⬆ v{ver} AVAILABLE')
+    def _show_update_notice(self, ver: str, body: str):
+        self._pending_update_ver = ver
+        self._pending_update_body = body
+        self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
         self._upd_lbl.setStyleSheet(
             f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
             f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
             f'padding:3px 8px;border-radius:2px;'
         )
         self._upd_lbl.setVisible(True)
-        if hasattr(self, 'tray'):
-            self.tray.showMessage('CyberClean — Update Available',
-                                  f'v{ver} is available! github.com/vuphitung/CyberClean',
-                                  QSystemTrayIcon.MessageIcon.Information, 5000)
+        if hasattr(self, "_tray_update_act"):
+            self._tray_update_act.setVisible(True)
+            self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
+        if hasattr(self, "tray"):
+            self.tray.showMessage(
+                "CyberClean — Update available",
+                _t("tray_upd_msg", f"v{ver}: click the header badge or tray → View update…", ver=ver),
+                QSystemTrayIcon.MessageIcon.Information,
+                6000,
+            )
+
+    def _open_update_dialog(self):
+        ver = getattr(self, "_pending_update_ver", "") or ""
+        body = getattr(self, "_pending_update_body", "") or ""
+        if not ver:
+            return
+        dlg = UpdateDialog(self, version=ver, body=body)
+        dlg.exec()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3161,6 +3286,7 @@ if __name__ == '__main__':
             else:
                 sys.exit(0)
 
+    app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')
     app.setApplicationVersion(__version__)
 

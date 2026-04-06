@@ -11,16 +11,17 @@ FIX #8: _user_cache redesigned with 3-layer protection:
                   Catches unknown apps without needing their name in any list.
         Layer 3 — Recently-modified guard (< 30s): skip dirs active right now.
         _tmp_files: added is_fifo() to guard list (was missing — FIFOs are also runtime IPC).
-Supports: pacman · apt · dnf · zypper
-Extras:   Flatpak · Docker/Podman · yay/paru AUR cache
+Supports: pacman · apt · dnf · zypper · xbps (Void)
+Extras:   Flatpak · Docker/Podman · yay/paru AUR cache · snap old revisions
 """
-import subprocess, re, time, shutil
+import subprocess, re, time, shutil, shlex
 from pathlib import Path
 from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
 from .os_detect import (PKG_MANAGER, HAS_POLKIT, IS_ROOT, SUDO,
                          HAS_FLATPAK, HAS_DOCKER, HAS_YAY, HAS_PARU,
                          CONTAINER_TOOL,
-                         safe_delete, HAS_POLKIT_AGENT)
+                         safe_delete, HAS_POLKIT_AGENT,
+                         HAS_JOURNALCTL, HAS_SNAP, HAS_XBPS)
 
 JOURNAL_DAYS = 7
 PACMAN_KEEP  = 1
@@ -108,6 +109,13 @@ class LinuxCleaner(BaseCleaner):
                 CleanTarget('zypper_cache', 'Zypper Cache',
                     'Downloaded packages in /var/cache/zypp',              'safe', needs_root=True),
             ]
+        elif PKG_MANAGER == 'xbps' and HAS_XBPS:
+            targets += [
+                CleanTarget('xbps_cache', 'XBPS Package Cache',
+                    'Obsolete packages in /var/cache/xbps (xbps-remove -o)', 'safe', needs_root=True),
+                CleanTarget('xbps_orphaned', 'XBPS Orphaned Packages',
+                    'Packages no longer required (xbps-remove -O)',        'caution', needs_root=True),
+            ]
 
         if HAS_YAY or HAS_PARU:
             targets.append(CleanTarget('aur_cache', 'AUR Build Cache',
@@ -121,9 +129,17 @@ class LinuxCleaner(BaseCleaner):
             targets.append(CleanTarget('docker', 'Docker/Podman Prune',
                 'Dangling images, stopped containers, unused volumes',     'caution'))
 
+        if HAS_SNAP:
+            targets.append(CleanTarget('snap_old', 'Snap Old Revisions',
+                'Disabled snap revisions only (current install kept)',      'caution', needs_root=True))
+
+        if HAS_JOURNALCTL:
+            targets.append(
+                CleanTarget('journal', 'Journal Logs',
+                    f'systemd logs older than {JOURNAL_DAYS} days',       'safe'),
+            )
+
         targets += [
-            CleanTarget('journal',       'Journal Logs',
-                f'systemd logs older than {JOURNAL_DAYS} days',           'safe'),
             CleanTarget('user_cache',    'User Cache (~/.cache)',
                 'App caches — 3-layer guard: name list + socket detect + activity check', 'safe'),
             CleanTarget('chrome_cache',  'Chrome / Chromium Cache',
@@ -156,9 +172,12 @@ class LinuxCleaner(BaseCleaner):
                 'apt_autoremove':self._apt_autoremove,
                 'dnf_cache':     self._dnf_cache,
                 'zypper_cache':  self._zypper_cache,
+                'xbps_cache':    self._xbps_cache,
+                'xbps_orphaned': self._xbps_orphaned,
                 'aur_cache':     self._aur_cache,
                 'flatpak':       self._flatpak,
                 'docker':        self._docker,
+                'snap_old':      self._snap_old,
                 'journal':       self._journal,
                 'user_cache':    self._user_cache,
                 'chrome_cache':  lambda d: self._browser_or_thumbs('chrome_cache', d),
@@ -259,6 +278,61 @@ class LinuxCleaner(BaseCleaner):
             if code != 0: r.error = 'Need root'
         return r
 
+    # ── XBPS (Void Linux) ─────────────────────────────────
+    def _xbps_cache(self, dry):
+        r = CleanResult('xbps_cache')
+        out, _ = run('du -sb /var/cache/xbps 2>/dev/null')
+        try:
+            r.freed_bytes = int(out.split()[0])
+        except (ValueError, IndexError):
+            pass
+        if not dry:
+            _, code = run_privileged('xbps-clean-cache')
+            if code != 0:
+                r.error = 'Need root or install.sh helper with xbps-clean-cache'
+        return r
+
+    def _xbps_orphaned(self, dry):
+        r = CleanResult('xbps_orphaned')
+        out, _ = run('xbps-remove -n -O 2>/dev/null')
+        pkgs = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        r.files_removed = len(pkgs)
+        if not dry and pkgs:
+            _, code = run_privileged('xbps-orphans')
+            if code != 0:
+                r.error = 'Need root or install.sh helper with xbps-orphans'
+        return r
+
+    # ── Snap (disabled revisions) ─────────────────────────
+    def _snap_old(self, dry):
+        r = CleanResult('snap_old')
+        out, _ = run('LANG=C snap list --all 2>/dev/null')
+        pairs = []
+        for line in out.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 4 or parts[-1] != 'disabled':
+                continue
+            name, rev = parts[0], parts[2]
+            if not rev.isdigit():
+                continue
+            pairs.append((name, rev))
+        r.files_removed = len(pairs)
+        du, _ = run('du -sb /var/lib/snapd/snap 2>/dev/null')
+        try:
+            base = int(du.split()[0])
+            r.freed_bytes = min(base // 4, base) if pairs else 0
+        except (ValueError, IndexError):
+            r.freed_bytes = 0
+        if not dry and pairs:
+            h = '/usr/local/bin/cyber-clean-helper'
+            for name, rev in pairs:
+                qn, qr = shlex.quote(name), shlex.quote(rev)
+                _, code = run(f'sudo -n {h} snap-remove-rev {qn} {qr} 2>/dev/null', timeout=120)
+                if code != 0:
+                    r.error = 'Need root / NOPASSWD helper (snap-remove-rev) — run install.sh'
+                    break
+        return r
+
     # ── AUR cache (yay / paru) ────────────────────────────
     def _aur_cache(self, dry):
         r = CleanResult('aur_cache')
@@ -346,6 +420,9 @@ class LinuxCleaner(BaseCleaner):
         Removed hardcoded -10MB estimate which was wildly inaccurate.
         """
         r = CleanResult('journal')
+        if not HAS_JOURNALCTL:
+            r.error = 'journalctl not available (non-systemd / minimal init)'
+            return r
 
         def _parse_size(text):
             m = re.search(r'([\d.]+)\s*(M|G|K|B)', text)

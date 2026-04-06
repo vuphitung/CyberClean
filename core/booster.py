@@ -548,11 +548,14 @@ def _get_gpu_vram_gb() -> float:
         return 0.0
 
     elif IS_WINDOWS:
-        try:
+        import platform as _plat
+        _arm = _plat.machine().lower() in ("arm64", "aarch64")
+
+        def _vram_from_wmic():
             out = subprocess.run(
-                'wmic path Win32_VideoController get AdapterRAM /value',
+                "wmic path Win32_VideoController get AdapterRAM /value",
                 shell=True, capture_output=True, text=True,
-                creationflags=0x08000000, timeout=8
+                creationflags=0x08000000, timeout=8,
             ).stdout
             max_vram = 0
             for line in out.splitlines():
@@ -562,7 +565,36 @@ def _get_gpu_vram_gb() -> float:
                         max_vram = max(max_vram, val)
                     except ValueError:
                         pass
-            return max_vram / (1024 ** 3) if max_vram else 0.0
+            return max_vram / (1024**3) if max_vram else 0.0
+
+        def _vram_from_cim():
+            ps = (
+                "(Get-CimInstance Win32_VideoController | "
+                "ForEach-Object { $_.AdapterRAM } | Measure-Object -Maximum).Maximum"
+            )
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True, text=True, creationflags=0x08000000, timeout=10,
+            )
+            txt = (r.stdout or "").strip()
+            if r.returncode != 0 or not txt:
+                return 0.0
+            try:
+                val = int(txt)
+            except ValueError:
+                return 0.0
+            if val <= 0:
+                return 0.0
+            return val / (1024**3)
+
+        try:
+            if _arm:
+                g = _vram_from_cim()
+                return g if g > 0 else 0.0
+            try:
+                return _vram_from_wmic()
+            except OSError:
+                return _vram_from_cim()
         except Exception:
             return 0.0
     return 0.0

@@ -120,6 +120,19 @@ HAS_DOCKER     = HAS_PODMAN or HAS_DOCKER_BIN
 CONTAINER_TOOL = 'podman' if HAS_PODMAN else ('docker' if HAS_DOCKER_BIN else '')
 HAS_YAY        = IS_LINUX and bool(shutil.which('yay'))
 HAS_PARU       = IS_LINUX and bool(shutil.which('paru'))
+HAS_JOURNALCTL = IS_LINUX and bool(shutil.which('journalctl'))
+HAS_SNAP       = IS_LINUX and bool(shutil.which('snap'))
+HAS_XBPS       = IS_LINUX and bool(shutil.which('xbps-remove'))
+
+
+def _is_wsl() -> bool:
+    try:
+        return 'microsoft' in Path('/proc/version').read_text(encoding='utf-8', errors='ignore').lower()
+    except OSError:
+        return False
+
+
+IS_WSL = IS_LINUX and _is_wsl()
 
 try:
     import send2trash as _s2t
@@ -171,4 +184,7 @@ def platform_info() -> dict:
         'has_yay':       HAS_YAY,
         'has_send2trash': HAS_SEND2TRASH,
         'python':        platform.python_version(),
+        'is_wsl':        IS_WSL,
+        'has_journalctl': HAS_JOURNALCTL,
+        'has_snap':      HAS_SNAP,
     }
