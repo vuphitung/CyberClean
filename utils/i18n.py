@@ -1245,6 +1245,13 @@ class Translator:
 # Global singleton
 T = Translator()
 
-def _t(key: str, default: str = '') -> str:
-    """Translate a key. Falls back to English, then to default, then to key itself."""
-    return T.get(key, default)
+def _t(key: str, default: str = '', **kwargs) -> str:
+    """Translate a key. Falls back to English, then to default, then to key itself.
+    If kwargs are given, they are applied with str.format (e.g. placeholders like {ver})."""
+    text = T.get(key, default)
+    if kwargs:
+        try:
+            text = text.format(**kwargs)
+        except (KeyError, ValueError):
+            pass
+    return text

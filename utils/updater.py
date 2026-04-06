@@ -53,6 +53,39 @@ def _t(key: str, default: str = '', **kwargs) -> str:
 REPO = "vuphitung/CyberClean"
 
 
+def _parse_version_tuple(ver: str) -> tuple:
+    """Same rules as version.parse_version_tuple — duplicated so update check works in any thread/bundle."""
+    s = (ver or "").strip().lstrip("v")
+    parts: list = []
+    for segment in s.split("."):
+        num = ""
+        for c in segment:
+            if c.isdigit():
+                num += c
+            else:
+                break
+        if num:
+            parts.append(int(num))
+        else:
+            break
+    return tuple(parts) if parts else (0,)
+
+
+def _version_is_newer(remote: str, current: str) -> bool:
+    return _parse_version_tuple(remote) > _parse_version_tuple(current)
+
+
+def _fetch_github_json(url: str, headers: dict) -> object | None:
+    """GET JSON from GitHub API; returns dict/list or None on failure."""
+    try:
+        req = Request(url, headers=headers)
+        with urlopen(req, timeout=25) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 def _github_api_headers(current_ver: str) -> dict[str, str]:
     """GitHub REST v3 requires a non-empty User-Agent; also request JSON explicitly."""
     return {
@@ -78,18 +111,21 @@ class UpdateCheckThread(QThread):
         self._repo = repo
 
     def run(self):
-        try:
-            from version import version_is_newer
-        except ImportError:
+        cur = (self._current or "").strip()
+        headers = _github_api_headers(cur)
+
+        # 1) /releases/latest — one object; works when "Latest" on GitHub is the new stable.
+        latest_url = f"https://api.github.com/repos/{self._repo}/releases/latest"
+        data = _fetch_github_json(latest_url, headers)
+        if isinstance(data, dict) and data.get("tag_name"):
+            tag = str(data["tag_name"]).lstrip("v").strip()
+            if tag and _version_is_newer(tag, cur):
+                self.found.emit(tag, data.get("body") or "")
             return
-        url = f"https://api.github.com/repos/{self._repo}/releases?per_page=30"
-        try:
-            req = Request(url, headers=_github_api_headers(self._current))
-            with urlopen(req, timeout=25) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-        except Exception:
-            return
+
+        # 2) Full list — prereleases, or if /latest failed (rate limit returns {message:...}).
+        list_url = f"https://api.github.com/repos/{self._repo}/releases?per_page=30"
+        data = _fetch_github_json(list_url, headers)
         if not isinstance(data, list):
             return
         best_tag = ""
@@ -97,10 +133,10 @@ class UpdateCheckThread(QThread):
         for rel in data:
             if not isinstance(rel, dict) or rel.get("draft"):
                 continue
-            tag = (rel.get("tag_name") or "").lstrip("v")
-            if not tag or not version_is_newer(tag, self._current):
+            tag = (rel.get("tag_name") or "").lstrip("v").strip()
+            if not tag or not _version_is_newer(tag, cur):
                 continue
-            if not best_tag or version_is_newer(tag, best_tag):
+            if not best_tag or _version_is_newer(tag, best_tag):
                 best_tag = tag
                 best_body = rel.get("body") or ""
         if best_tag:

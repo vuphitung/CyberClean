@@ -3264,23 +3264,27 @@ class CyberCleanApp(QMainWindow):
     def _check_update_async(self):
         # QThread (not threading.Thread): emitting from std threads can crash Qt on some Linux setups.
         self._upd_check_thread = UpdateCheckThread(self.CURRENT_VER, parent=self)
-        self._upd_check_thread.found.connect(self._show_update_notice)
+        self._upd_check_thread.found.connect(
+            self._show_update_notice,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._upd_check_thread.start()
 
     def _show_update_notice(self, ver: str, body: str):
+        self._pending_update_ver = ver
+        self._pending_update_body = body
+        self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
+        self._upd_lbl.setStyleSheet(
+            f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
+            f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
+            f'padding:3px 8px;border-radius:2px;'
+        )
+        self._upd_lbl.setVisible(True)
+        self._upd_lbl.raise_()
+        if hasattr(self, "_tray_update_act"):
+            self._tray_update_act.setVisible(True)
+            self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
         try:
-            self._pending_update_ver = ver
-            self._pending_update_body = body
-            self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
-            self._upd_lbl.setStyleSheet(
-                f'color:{C["yellow"]};font-size:10px;letter-spacing:1.5px;'
-                f'font-family:{MONO};border:1px solid {C["yellow"]}50;'
-                f'padding:3px 8px;border-radius:2px;'
-            )
-            self._upd_lbl.setVisible(True)
-            if hasattr(self, "_tray_update_act"):
-                self._tray_update_act.setVisible(True)
-                self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
             if hasattr(self, "tray"):
                 self.tray.showMessage(
                     "CyberClean — Update available",
