@@ -65,7 +65,7 @@ fi
 if [[ -z "$VERSION" ]]; then
     # Fallback: dùng version hardcode nếu API không trả về
     # Cập nhật dòng này khi release nhưng không phải điểm fail chính
-    VERSION="2.2.2"
+    VERSION="2.2.3"
     warn "GitHub API unavailable — using fallback version ${VERSION}"
 else
     ok "Latest version: v${VERSION}"

@@ -1151,7 +1151,7 @@ def _has_active_children(pid: int) -> bool:
     return False
 
 
-def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None) -> BoostResult:
+def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, protected_extra: Optional[set] = None) -> BoostResult:
     """
     Dừng (SIGSTOP) hoặc kill process bloat của USER HIỆN TẠI.
 
@@ -1173,6 +1173,7 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None) 
     log("Scanning for background bloat...", "head")
 
     protected         = get_de_protected()
+    _protected_pids   = set(protected_extra) if protected_extra else set()
     frozen_pids: dict = {}
 
     # Dynamic threshold — scales with available RAM
@@ -1209,6 +1210,8 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None) 
                 nm = p.name().lower().replace(".exe", "")
 
                 if nm in protected or _is_protected(nm):
+                    continue
+                if _protected_pids and p.pid in _protected_pids:
                     continue
                 if nm in _BLOAT_SKIP_ALWAYS:
                     continue
@@ -2277,6 +2280,7 @@ def game_mode_on(log) -> dict:
     # ── Detect running games (includes CPU warm-up) ────────────
     log("  . Checking for active game processes...", "text")
     running_games, cpu_samples = _detect_running_games()
+    running_game_names = {g_nm.lower().replace(".exe", "") for _, g_nm in running_games}
     has_game = len(running_games) > 0
 
     if has_game:
@@ -2370,6 +2374,11 @@ def game_mode_on(log) -> dict:
                         jailed += 1
                         log(f"  v Bloat: {nm} → core {trash_cores} + idle", "warn")
 
+                    elif nm in running_game_names:
+                        # This is a detected game process — NEVER touch its affinity.
+                        # It gets boosted below in the game_priority block.
+                        continue
+
                     elif nm in COMMS_MEDIA_APPS and has_game:
                         if cpu_now > ACTIVE_CPU_THRESHOLD:
                             # App is ACTIVELY being used (call encoding, music decoding,
@@ -2383,22 +2392,26 @@ def game_mode_on(log) -> dict:
                             soft_throttled += 1
                             log(f"  ~ Active: {nm} ({cpu_now:.1f}% CPU) → soft throttle only (no jail)", "ok")
                         else:
-                            # App is idle — safe to restrict to fewer cores
-                            # But still give it half the cores so it can wake up fast
-                            # (Discord receiving a voice packet, Spotify next song buffer)
-                            if cores >= 6:
-                                idle_cores = list(range(cores // 2, cores))
-                            else:
-                                idle_cores = [cores - 1]
-                            saved["affinity"][p.pid] = p.cpu_affinity()
-                            p.cpu_affinity(idle_cores)
+                            # Idle comms/media can still suddenly become active (voice/chat/video).
+                            # On Windows, avoid affinity jail to prevent capture/overlay instability.
                             saved["nice"][p.pid] = p.nice()
                             if IS_WINDOWS:
                                 p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                                soft_throttled += 1
+                                log(f"  ~ Idle: {nm} → priority only (no affinity jail on Windows)", "ok")
                             elif IS_LINUX and os.geteuid() == 0:
+                                if cores >= 6:
+                                    idle_cores = list(range(cores // 2, cores))
+                                else:
+                                    idle_cores = [cores - 1]
+                                saved["affinity"][p.pid] = p.cpu_affinity()
+                                p.cpu_affinity(idle_cores)
                                 p.nice(10)
-                            jailed += 1
-                            log(f"  v Idle: {nm} → cores {idle_cores} (was idle at {cpu_now:.1f}%)", "warn")
+                                jailed += 1
+                                log(f"  v Idle: {nm} → cores {idle_cores} (was idle at {cpu_now:.1f}%)", "warn")
+                            else:
+                                soft_throttled += 1
+                                log(f"  ~ Idle: {nm} → priority only", "ok")
 
             except (psutil.NoSuchProcess, psutil.AccessDenied,
                     NotImplementedError, AttributeError):
@@ -2420,7 +2433,18 @@ def game_mode_on(log) -> dict:
 
         # Kill bloat — reuse cpu_samples to skip 0.6s warm-up
         log("  . Scanning for idle background processes...", "text")
-        bloat_result = kill_bloat(log, use_sigstop=IS_LINUX, cpu_cache=cpu_samples)
+        # Pass detected game PIDs so kill_bloat never freezes them
+        _game_pid_set = set()
+        for game_pid, _ in running_games:
+            _game_pid_set.add(game_pid)
+            try:
+                gp = psutil.Process(game_pid)
+                for child in gp.children(recursive=True):
+                    _game_pid_set.add(child.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        bloat_result = kill_bloat(log, use_sigstop=IS_LINUX, cpu_cache=cpu_samples,
+                                  protected_extra=_game_pid_set)
         if bloat_result.rollback:
             saved["frozen"] = bloat_result.rollback[0].get("frozen_pids", {})
 

@@ -2797,47 +2797,114 @@ class CyberCleanApp(QMainWindow):
         if not is_auto or not tray_ok:
             self._shutdown(); event.accept(); return
 
-        behavior = self._settings.value('autoclean_close_behavior', 'ask')
-        if behavior == 'tray':
-            if tray_ok:
-                self._hide_to_tray(event, notify=False)
-            else:
-                self._shutdown(); event.accept()
+        import platform as _plat
+        default_behavior = 'tray' if _plat.system() == 'Windows' else 'ask'
+        behavior = self._settings.value('autoclean_close_behavior', default_behavior)
+
+        # Windows UX: never show close dialog, behave like cleaner apps.
+        # Users can still fully quit from tray menu (Quit).
+        if _plat.system() == 'Windows':
+            if behavior == 'quit':
+                self._shutdown(); event.accept(); return
+            self._hide_to_tray(event, notify=False)
             return
+
+        if behavior == 'tray':
+            self._hide_to_tray(event, notify=True); return
         if behavior == 'quit':
             self._shutdown(); event.accept(); return
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle(_t('confirm_close_title', 'Background Mode'))
-        msg.setText(
-            _t(
-                'confirm_close_msg',
-                'Auto-clean (6h) is enabled.\n\n'
-                '• YES: Hide to system tray and keep running\n'
-                '• NO: Quit completely (stops background auto-clean)',
-            )
+        # ── Custom styled close dialog ─────────────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle(_t('confirm_close_title', 'Background Mode'))
+        dlg.setMinimumWidth(420)
+        dlg.setModal(True)
+        dlg.setStyleSheet(
+            f"QDialog{{background:{C['bg2']};color:{C['text']};}}"
+            f"QLabel{{color:{C['text']};font-family:{MONO};font-size:12px;}}"
+            f"QCheckBox{{color:{C['text3']};font-family:{MONO};font-size:11px;}}"
+            f"QCheckBox::indicator{{width:13px;height:13px;border:1px solid {C['border3']};"
+            f"border-radius:2px;background:{C['bg3']};}}"
+            f"QCheckBox::indicator:checked{{background:{C['cyan']};border-color:{C['cyan']};}}"
         )
-        cb = QCheckBox(_t('remember_close_choice', 'Remember my choice — skip this dialog next time'))
-        cb.setChecked(True)
-        msg.setCheckBox(cb)
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        msg.setStyleSheet(
-            f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;'
-        )
-        reply = msg.exec()
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(12)
 
-        if reply == QMessageBox.StandardButton.Yes:
-            if cb.isChecked():
-                self._settings.setValue('autoclean_close_behavior', 'tray')
-                self._settings.sync()
+        # Icon + title row
+        title_row = QHBoxLayout()
+        icon_lbl = QLabel('◈')
+        icon_lbl.setStyleSheet(f'color:{C["cyan"]};font-size:22px;font-family:{MONO};')
+        title_row.addWidget(icon_lbl)
+        title_lbl = QLabel(_t('confirm_close_title', 'Background Mode').upper())
+        title_lbl.setStyleSheet(
+            f'color:{C["cyan"]};font-size:13px;letter-spacing:2px;font-family:{MONO};font-weight:bold;'
+        )
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        lay.addLayout(title_row)
+
+        # Divider
+        div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet(f'background:{C["border3"]};max-height:1px;border:none;')
+        lay.addWidget(div)
+
+        # Message
+        msg_text = _t('confirm_close_msg',
+            'Auto-clean (6h) is enabled.\n\n'
+            '\u2022 YES: Hide to system tray and keep running\n'
+            '\u2022 NO: Quit completely (stops background auto-clean)')
+        msg_lbl = QLabel(msg_text)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet(f'color:{C["text2"]};font-size:12px;font-family:{MONO};line-height:1.6;')
+        lay.addWidget(msg_lbl)
+
+        # Remember checkbox
+        cb = QCheckBox(_t('remember_close_choice', 'Remember — skip this dialog next time'))
+        cb.setChecked(True)
+        lay.addWidget(cb)
+
+        lay.addSpacing(4)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_quit = QPushButton(_t('close_btn_quit', 'QUIT'))
+        btn_quit.setStyleSheet(
+            f'background:transparent;color:{C["text3"]};border:1px solid {C["border3"]};'
+            f'padding:7px 18px;font-family:{MONO};font-size:11px;border-radius:3px;'
+        )
+        btn_tray = QPushButton(_t('close_btn_tray', 'HIDE TO TRAY'))
+        btn_tray.setStyleSheet(
+            f'background:{C["cyan"]}22;color:{C["cyan"]};border:1px solid {C["cyan"]};'
+            f'padding:7px 22px;font-family:{MONO};font-size:11px;font-weight:bold;border-radius:3px;'
+        )
+        btn_row.addWidget(btn_quit)
+        btn_row.addWidget(btn_tray)
+        lay.addLayout(btn_row)
+
+        _choice = ['tray']
+
+        def _go_tray():
+            _choice[0] = 'tray'; dlg.accept()
+
+        def _go_quit():
+            _choice[0] = 'quit'; dlg.accept()
+
+        btn_tray.clicked.connect(_go_tray)
+        btn_quit.clicked.connect(_go_quit)
+        btn_tray.setDefault(True)
+
+        dlg.exec()
+
+        choice = _choice[0]
+        if cb.isChecked():
+            self._settings.setValue('autoclean_close_behavior', choice)
+            self._settings.sync()
+
+        if choice == 'tray':
             self._hide_to_tray(event, notify=True)
         else:
-            if cb.isChecked():
-                self._settings.setValue('autoclean_close_behavior', 'quit')
-                self._settings.sync()
             self._shutdown(); event.accept()
 
     def _show_from_tray(self):
