@@ -584,16 +584,22 @@ def _md_to_plain(md: str) -> str:
 def _restart_app():
     """Replace current process with the newly-installed binary."""
     if sys.platform == "win32":
-        pf      = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        new_exe = Path(pf) / "CyberClean" / "CyberClean.exe"
-        flags   = _no_window_flags()
-        if new_exe.exists():
-            subprocess.Popen([str(new_exe)], creationflags=flags)
-        else:
-            subprocess.Popen(
-                ["schtasks", "/run", "/tn", "CyberClean_AutoAdmin"],
-                creationflags=flags,
+        # Find the installed exe - check both Program Files locations
+        candidates = [
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "CyberClean" / "CyberClean.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "CyberClean" / "CyberClean.exe",
+        ]
+        new_exe = next((p for p in candidates if p.exists()), None)
+
+        if new_exe:
+            # Use ShellExecuteW with "runas" so Windows shows UAC properly
+            # instead of Popen which launches without elevation and fails silently
+            import ctypes
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", str(new_exe), None, None, 1
             )
+        # No else fallback to schtasks -- schtasks triggers Defender
+
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
         sys.exit(0)
