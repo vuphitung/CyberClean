@@ -220,7 +220,7 @@ def _generate_inno_script(exe: Path):
         'Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"',
         '',
         '[Files]',
-        f'Source: "dist\\{APP}.exe"; DestDir: "{{app}}"; Flags: ignoreversion',
+        f'Source: "dist\\{APP}\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs',
         '',
         '[Icons]',
         '; Shortcut trực tiếp vào .exe — không dùng schtasks',
