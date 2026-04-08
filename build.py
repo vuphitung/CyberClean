@@ -151,17 +151,20 @@ def build_windows(make_inno: bool = False):
         return False
 
     DIST.mkdir(exist_ok=True)
-    cmd = _pyinstaller_cmd(onefile=True, icon=ICON_ICO)
+    # onedir (not onefile): keeps DLLs next to exe instead of extracting to %TEMP%
+    # onefile extracts python312.dll etc to %TEMP% at runtime -> AV blocks it
+    cmd = _pyinstaller_cmd(onefile=False, icon=ICON_ICO)
     if run(cmd).returncode != 0:
         err('Build failed')
         return False
 
-    exe = DIST / f'{APP}.exe'
+    app_dir = DIST / APP
+    exe = app_dir / f'{APP}.exe'
     if not exe.exists():
         err(f'{exe} not found after build')
         return False
 
-    ok(f'Built: {exe}  ({exe.stat().st_size/1024/1024:.1f} MB)')
+    ok(f'Built: {app_dir}  ({sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1024/1024:.1f} MB total)')
     if make_inno:
         _generate_inno_script(exe)
     return True
@@ -197,6 +200,9 @@ def _generate_inno_script(exe: Path):
         f'OutputBaseFilename={APP}_Setup_v{VERSION}',
         icon_line,
         'Compression=lzma',
+        'CloseApplications=yes',                    # Báo Setup đóng app đang chạy
+        'RestartApplications=no',                   # Không tự restart app sau khi cài
+        'AppMutex=CyberClean_Single_Instance_Lock', # Tên mutex — Setup dùng để detect process cũ
         'SolidCompression=yes',
         'WizardStyle=modern',
         'PrivilegesRequired=admin',

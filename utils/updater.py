@@ -604,11 +604,11 @@ def _md_to_plain(md: str) -> str:
 def _restart_app():
     """Replace current process with the newly-installed binary."""
     if sys.platform == "win32":
-        # Windows Inno Setup installer chịu trách nhiệm mở app mới sau khi ghi đè.
-        # Ở đây chỉ cần thoát hẳn process cũ để tránh "đụng xe" khi file đang bị ghi.
-        from PyQt6.QtWidgets import QApplication
-        QApplication.quit()
-        sys.exit(0)
+        # Windows: Inno Setup tự lo việc mở app mới sau khi cài.
+        # Phải dùng os._exit(0) — KHÔNG dùng QApplication.quit() hay sys.exit(0).
+        # sys.exit() chỉ raise SystemExit trong thread hiện tại, không kill process.
+        # os._exit(0) mới thật sự "rút ống thở" ngay lập tức, giải phóng file lock.
+        os._exit(0)
 
     # Linux: binary was replaced in-place — exec the new one
     exe_opt = _linux_opt_install_dir()
