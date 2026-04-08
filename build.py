@@ -224,7 +224,7 @@ def _generate_inno_script(exe: Path):
         '',
         '[Run]',
         '; Launch app sau khi cài xong',
-        f'Filename: "{{app}}\\{APP}.exe"; Description: "Launch {APP}"; Flags: nowait postinstall skipifsilent',
+        f'Filename: "{{app}}\\{APP}.exe"; Description: "Launch {APP}"; Flags: nowait postinstall',
         '',
         '[UninstallDelete]',
         f'Type: filesandordirs; Name: "{{localappdata}}\\{APP}"',

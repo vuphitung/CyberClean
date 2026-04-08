@@ -2783,6 +2783,14 @@ class CyberCleanApp(QMainWindow):
         if not event.spontaneous():
             self._shutdown(); event.accept(); return
 
+        # If OTA update is running, never minimize-to-tray; always shut down.
+        try:
+            upd_until = int(self._settings.value("upd_in_progress_until", 0) or 0)
+        except Exception:
+            upd_until = 0
+        if upd_until > int(time.time()):
+            self._shutdown(); event.accept(); return
+
         tray_ok = QSystemTrayIcon.isSystemTrayAvailable() and hasattr(self, 'tray')
         is_auto = hasattr(self, '_auto_clean_timer') and self._auto_clean_timer.isActive()
 
@@ -3308,11 +3316,33 @@ class CyberCleanApp(QMainWindow):
 if __name__ == '__main__':
     from PyQt6.QtCore import QSharedMemory
     app = QApplication(sys.argv)
+    # Set QSettings identity early so the single-instance conflict branch can
+    # detect "update in progress" and avoid the kill prompt.
+    app.setOrganizationName('CyberClean')
+    app.setApplicationName('CyberClean')
+    app.setApplicationVersion(__version__)
     _lock = QSharedMemory("CyberClean_Single_Instance_Lock")
     if not _lock.create(1):
         try: _lock.attach(); _lock.detach()
         except: pass
         if not _lock.create(1):
+            # Windows OTA: if update is in progress, don't ask the user to kill.
+            # The update itself will restart the app after installation.
+            try:
+                upd_until = int(QSettings().value("upd_in_progress_until", 0) or 0)
+            except Exception:
+                upd_until = 0
+            if upd_until > int(time.time()):
+                msg = QMessageBox()
+                msg.setWindowTitle('CyberClean — Updating')
+                msg.setIcon(QMessageBox.Icon.Information)
+                msg.setText(
+                    'CyberClean đang cập nhật phiên bản mới. Vui lòng đợi vài phút rồi mở lại sau.'
+                )
+                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                msg.exec()
+                sys.exit(0)
+
             _dark = f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;'
             msg = QMessageBox()
             msg.setWindowTitle(_t('zombie_title', 'Background Process Detected'))
@@ -3344,6 +3374,13 @@ if __name__ == '__main__':
                     sys.exit(1)
             else:
                 sys.exit(0)
+
+    # If we successfully acquired the single-instance lock, it's safe to clear
+    # the "update in progress" flag (fresh start after OTA restart).
+    try:
+        QSettings().remove("upd_in_progress_until")
+    except Exception:
+        pass
 
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import sys
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -330,8 +331,9 @@ class UpdateWorker(QThread):
                     "Installer too small — asset name may differ on GitHub.")
 
             self.progress.emit(70, _t("upd_launching", "Launching installer…"))
+            # Use /SILENT so user vẫn thấy installer chạy, tránh cảm giác app "đơ".
             subprocess.Popen(
-                [str(installer), "/VERYSILENT", "/NORESTART", "/CLOSEAPPLICATIONS"],
+                [str(installer), "/SILENT", "/NORESTART", "/CLOSEAPPLICATIONS"],
                 creationflags=_no_window_flags(),
             )
             self.progress.emit(90, _t("upd_installer_run",
@@ -377,6 +379,7 @@ class UpdateDialog(QDialog):
         self.version = version
         self.body    = body or ""
         self._worker: UpdateWorker | None = None
+        self._installed_ver = ""
 
         self.setWindowTitle(f"CyberClean — Update v{version}")
         self.setMinimumWidth(640)
@@ -442,6 +445,7 @@ class UpdateDialog(QDialog):
             from version import __version__ as cur
         except ImportError:
             cur = "?"
+        self._installed_ver = cur
         cur_lbl = QLabel(_t("upd_installed", f"Installed: v{cur}   →   New: v{self.version}",
                             cur=cur, ver=self.version))
         cur_lbl.setStyleSheet(f"color:{C['text3']};font-size:11px;font-family:{MONO};")
@@ -496,6 +500,14 @@ class UpdateDialog(QDialog):
         lay.addLayout(row)
 
     def _start_update(self):
+        # Mark update in progress so a user clicking the app again on Windows
+        # doesn't trigger the "Background Process Detected" kill prompt.
+        try:
+            _s = QSettings()
+            _s.setValue("upd_in_progress_until", int(time.time()) + 600)  # 10 minutes
+        except Exception:
+            pass
+
         self._skip_btn.setText(_t("upd_btn_cancel", "CANCEL"))
         try:
             self._skip_btn.clicked.disconnect()
@@ -519,6 +531,10 @@ class UpdateDialog(QDialog):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(3000)
+        try:
+            QSettings().remove("upd_in_progress_until")
+        except Exception:
+            pass
         self.reject()
 
     def _on_progress(self, pct: int, msg: str):
@@ -545,6 +561,10 @@ class UpdateDialog(QDialog):
             except TypeError:
                 pass
             self._skip_btn.clicked.connect(self.reject)
+            try:
+                QSettings().remove("upd_in_progress_until")
+            except Exception:
+                pass
             return
 
         self._prog_lbl.setText(_t("upd_done", "✓  Done — restarting…"))
@@ -584,22 +604,8 @@ def _md_to_plain(md: str) -> str:
 def _restart_app():
     """Replace current process with the newly-installed binary."""
     if sys.platform == "win32":
-        # Find the installed exe - check both Program Files locations
-        candidates = [
-            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "CyberClean" / "CyberClean.exe",
-            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "CyberClean" / "CyberClean.exe",
-        ]
-        new_exe = next((p for p in candidates if p.exists()), None)
-
-        if new_exe:
-            # Use ShellExecuteW with "runas" so Windows shows UAC properly
-            # instead of Popen which launches without elevation and fails silently
-            import ctypes
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", str(new_exe), None, None, 1
-            )
-        # No else fallback to schtasks -- schtasks triggers Defender
-
+        # Windows Inno Setup installer chịu trách nhiệm mở app mới sau khi ghi đè.
+        # Ở đây chỉ cần thoát hẳn process cũ để tránh "đụng xe" khi file đang bị ghi.
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
         sys.exit(0)
