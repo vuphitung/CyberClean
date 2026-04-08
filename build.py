@@ -132,6 +132,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         '--exclude-module tkinter',
         '--exclude-module matplotlib',
         '--exclude-module numpy',
+        '--exclude-module gi',
     ]
     if icon and icon.exists():
         parts.append(f'--icon "{icon}"')

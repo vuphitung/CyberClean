@@ -137,7 +137,9 @@ IS_WSL = IS_LINUX and _is_wsl()
 try:
     import send2trash as _s2t
     HAS_SEND2TRASH = True
-except ImportError:
+except Exception:
+    # Some Linux/PyInstaller combos (notably GI/GLib overrides) raise
+    # non-ImportError exceptions during send2trash import.
     HAS_SEND2TRASH = False
 
 
@@ -145,8 +147,16 @@ def safe_delete(path: Path, use_trash: bool = True) -> bool:
     """Move to Trash (recoverable) if send2trash available, else permanent delete."""
     try:
         if HAS_SEND2TRASH and use_trash:
-            import send2trash
-            send2trash.send2trash(str(path))
+            try:
+                import send2trash
+                send2trash.send2trash(str(path))
+            except Exception:
+                # If trash backend fails at runtime, fall back to hard delete
+                # instead of crashing the whole app.
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
         else:
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
