@@ -218,11 +218,11 @@ def _set_ecoqos(pid: int, enable: bool) -> bool:
     """Apply or remove EcoQoS (power efficiency mode) for a process."""
     if not IS_WINDOWS:
         return False
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x0200 | 0x0400, False, pid)
+    if not handle:
+        return False
     try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x0200 | 0x0400, False, pid)
-        if not handle:
-            return False
         state = _PROCESS_POWER_THROTTLING_STATE(
             Version=_PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask=_PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
@@ -234,10 +234,9 @@ def _set_ecoqos(pid: int, enable: bool) -> bool:
             ctypes.byref(state),
             ctypes.sizeof(state),
         )
-        kernel32.CloseHandle(handle)
         return bool(ok)
-    except Exception:
-        return False
+    finally:
+        kernel32.CloseHandle(handle)  # ALWAYS close handle to prevent leak
 
 
 def _is_windows_11() -> bool:
@@ -734,16 +733,18 @@ def _trim_working_sets(log) -> int:
             handle = kernel32.OpenProcess(0x0008 | 0x0400, False, p.pid)
             if not handle:
                 continue
-            # SetProcessWorkingSetSizeEx(-1, -1, 0) = trim to minimum
-            ok = kernel32.SetProcessWorkingSetSizeEx(
-                handle,
-                ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),   # SIZE_MAX = trim
-                ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),
-                ctypes.c_ulong(0)
-            )
-            kernel32.CloseHandle(handle)
-            if ok:
-                trimmed += 1
+            try:
+                # SetProcessWorkingSetSizeEx(-1, -1, 0) = trim to minimum
+                ok = kernel32.SetProcessWorkingSetSizeEx(
+                    handle,
+                    ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),   # SIZE_MAX = trim
+                    ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),
+                    ctypes.c_ulong(0)
+                )
+                if ok:
+                    trimmed += 1
+            finally:
+                kernel32.CloseHandle(handle)  # ALWAYS close handle
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             pass
 
@@ -955,14 +956,14 @@ class _MEMORY_PRIORITY_INFO(ctypes.Structure):
 def _set_process_memory_priority(pid: int, priority: int) -> bool:
     if not IS_WINDOWS:
         return False
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(
+        _PROCESS_SET_INFORMATION | _PROCESS_QUERY_INFORMATION,
+        False, pid
+    )
+    if not handle:
+        return False
     try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(
-            _PROCESS_SET_INFORMATION | _PROCESS_QUERY_INFORMATION,
-            False, pid
-        )
-        if not handle:
-            return False
         info = _MEMORY_PRIORITY_INFO(MemoryPriority=priority)
         ok = kernel32.SetProcessInformation(
             handle,
@@ -970,10 +971,9 @@ def _set_process_memory_priority(pid: int, priority: int) -> bool:
             ctypes.byref(info),
             ctypes.sizeof(info)
         )
-        kernel32.CloseHandle(handle)
         return bool(ok)
-    except Exception:
-        return False
+    finally:
+        kernel32.CloseHandle(handle)  # ALWAYS close handle to prevent leak
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1027,14 +1027,17 @@ def _detect_cgroup_path() -> Optional[str]:
     return None
 
 
-def _cg_write(cg_path: str, filename: str, value: str) -> bool:
+def _cg_write(cg_path: str, filename: str, value: str, log=None) -> bool:
     try:
         p = Path(cg_path) / filename
         if p.exists():
             p.write_text(value)
             return True
-    except (OSError, PermissionError):
-        pass
+        elif log:
+            log(f"  ~ cgroup file not found: {filename}", "warn")
+    except (OSError, PermissionError) as e:
+        if log:
+            log(f"  ~ cgroup write failed {filename}: {e}", "warn")
     return False
 
 
@@ -1047,9 +1050,9 @@ def _cgroup_create(log) -> Optional[str]:
         return None
     try:
         os.makedirs(cg_path, exist_ok=True)
-        _cg_write(cg_path, "cpu.weight", "20")
-        _cg_write(cg_path, "io.weight",  "20")
-        _cg_write(cg_path, "memory.low", str(512 * 1024 * 1024))
+        _cg_write(cg_path, "cpu.weight", "20", log)
+        _cg_write(cg_path, "io.weight", "20", log)
+        _cg_write(cg_path, "memory.low", str(512 * 1024 * 1024), log)
         log("  + cgroup created: cpu.weight=20 io.weight=20 memory.low=512MB", "ok")
         return cg_path
     except PermissionError:
@@ -2177,6 +2180,8 @@ def _restore_dns_windows(changed: list, log):
 
 _PSI_MONITOR_THREAD: Optional[object] = None
 _PSI_STOP_EVENT: Optional[object] = None
+import threading
+_PSI_LOCK = threading.Lock()  # Thread safety for PSI monitor
 
 
 def _start_psi_monitor(log_queue=None):
@@ -2206,10 +2211,11 @@ def _start_psi_monitor(log_queue=None):
                         parts = dict(p.split("=") for p in line.split() if "=" in p)
                         avg10 = float(parts.get("avg10", 0))
                         if avg10 > 40.0:
-                            # High memory pressure — silently kill bloat
-                            logs = []
-                            kill_bloat(lambda m, l='text': logs.append(m),
-                                       use_sigstop=True)
+                            # High memory pressure — safely kill bloat with lock
+                            with _PSI_LOCK:
+                                logs = []
+                                kill_bloat(lambda m, l='text': logs.append(m),
+                                           use_sigstop=True)
             except Exception:
                 pass
 
@@ -2359,7 +2365,9 @@ def game_mode_on(log) -> dict:
         # Take a second sample 0.3s after game detection warm-up for accuracy
         _t.sleep(0.3)
 
-        for p in psutil.process_iter(["pid", "name"]):
+        # PERFORMANCE FIX: Collect all processes first to avoid O(n²) nested iteration
+        all_processes = list(psutil.process_iter(["pid", "name"]))
+        for p in all_processes:
             try:
                 nm = (p.info["name"] or "").lower().replace(".exe", "")
                 if nm in protected or _is_protected(nm):

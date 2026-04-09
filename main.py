@@ -3314,66 +3314,29 @@ class CyberCleanApp(QMainWindow):
 
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    from PyQt6.QtCore import QSharedMemory
     app = QApplication(sys.argv)
     # Set QSettings identity early so the single-instance conflict branch can
     # detect "update in progress" and avoid the kill prompt.
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')
     app.setApplicationVersion(__version__)
-    _lock = QSharedMemory("CyberClean_Single_Instance_Lock")
-    if not _lock.create(1):
-        try: _lock.attach(); _lock.detach()
-        except: pass
-        if not _lock.create(1):
-            # Windows OTA: if update is in progress, don't ask the user to kill.
-            # The update itself will restart the app after installation.
-            try:
-                upd_until = int(QSettings().value("upd_in_progress_until", 0) or 0)
-            except Exception:
-                upd_until = 0
-            if upd_until > int(time.time()):
-                msg = QMessageBox()
-                msg.setWindowTitle('CyberClean — Updating')
-                msg.setIcon(QMessageBox.Icon.Information)
-                msg.setText(
-                    'CyberClean đang cập nhật phiên bản mới. Vui lòng đợi vài phút rồi mở lại sau.'
-                )
-                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg.exec()
-                sys.exit(0)
-
-            _dark = f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;'
-            msg = QMessageBox()
-            msg.setWindowTitle(_t('zombie_title', 'Background Process Detected'))
-            msg.setText(_t('zombie_msg', 'CyberClean is running in the background but cannot be shown.\n\nForce kill the old process and open safely?'))
-            msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-            msg.setStyleSheet(_dark)
-            if msg.exec() == QMessageBox.StandardButton.Yes:
-                import psutil as _ps, os as _os, time as _time
-                _cur = _os.getpid()
-                _my_path = _os.path.abspath(__file__).lower()
-                for _p in _ps.process_iter(['pid', 'name', 'cmdline']):
-                    try:
-                        _nm = (_p.info['name'] or '').lower()
-                        _cmd = ' '.join(_p.info['cmdline'] or []).lower()
-                        if _p.pid != _cur and ('cyberclean' in _nm or _my_path in _cmd):
-                            _p.kill()
-                    except: pass
-                _time.sleep(0.5)
-                try: _lock.attach(); _lock.detach()
-                except: pass
-                if not _lock.create(1):
-                    err = QMessageBox()
-                    err.setWindowTitle('CyberClean')
-                    err.setText(_t('zombie_err', 'Could not kill old process. Please restart your computer.'))
-                    err.setStyleSheet(_dark)
-                    err.exec()
-                    sys.exit(1)
-            else:
-                sys.exit(0)
+    
+    # Windows OTA: if update is in progress, don't ask the user to kill.
+    # The update itself will restart the app after installation.
+    try:
+        upd_until = int(QSettings().value("upd_in_progress_until", 0) or 0)
+    except Exception:
+        upd_until = 0
+    if upd_until > int(time.time()):
+        msg = QMessageBox()
+        msg.setWindowTitle('CyberClean - Updating')
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            'CyberClean đang cập nhật phiên bản mới. Vui lòng đợi vài phút rồi mở lại sau.'
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        sys.exit(0)
 
     # If we successfully acquired the single-instance lock, it's safe to clear
     # the "update in progress" flag (fresh start after OTA restart).
@@ -3381,6 +3344,33 @@ if __name__ == '__main__':
         QSettings().remove("upd_in_progress_until")
     except Exception:
         pass
+
+    # Single instance lock (Anti-Zombie)
+    if IS_LINUX:
+        import fcntl
+        _linux_lock_file = open("/tmp/cyberclean.lock", "w")
+        try:
+            fcntl.flock(_linux_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError:
+            print("CyberClean is already running.")
+            sys.exit(0)
+    else:
+        from PyQt6.QtCore import QSharedMemory
+        import sys
+        from PyQt6.QtWidgets import QMessageBox
+        _lock = QSharedMemory("CyberClean_Single_Instance_Lock")
+        if not _lock.create(1):
+            try: 
+                _lock.attach()
+                _lock.detach()
+            except: 
+                pass
+            if not _lock.create(1):
+                err = QMessageBox()
+                err.setWindowTitle('CyberClean')
+                err.setText('CyberClean is already running. Please restart your computer if stuck.')
+                err.exec()
+                sys.exit(1)
 
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')

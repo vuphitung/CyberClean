@@ -79,8 +79,13 @@ def _version_is_newer(remote: str, current: str) -> bool:
 def _fetch_github_json(url: str, headers: dict) -> object | None:
     """GET JSON from GitHub API; returns dict/list or None on failure."""
     try:
+        import ssl
         req = Request(url, headers=headers)
-        with urlopen(req, timeout=25) as resp:
+        # SECURITY: Create secure SSL context with proper validation
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        with urlopen(req, timeout=25, context=ssl_context) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw)
     except Exception:
@@ -206,8 +211,13 @@ class UpdateWorker(QThread):
         self._cancelled = True
 
     def _download(self, url: str, dest: Path):
+        import ssl
         req = Request(url, headers={"User-Agent": f"CyberClean-Updater/{self.version}"})
-        with urlopen(req, timeout=120) as resp:
+        # SECURITY: Create secure SSL context with proper validation
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        with urlopen(req, timeout=120, context=ssl_context) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             done  = 0
             with open(dest, "wb") as f:
@@ -257,11 +267,23 @@ class UpdateWorker(QThread):
             extract_dir = tmp_dir / "extracted"
             extract_dir.mkdir()
             with tarfile.open(tar_path, "r:gz") as tf:
-                # BUG FIX 2: filter='data' prevents path traversal attacks (Python 3.12+)
+                # SECURITY FIX: Path traversal protection for all Python versions
                 try:
                     tf.extractall(extract_dir, filter="data")
                 except TypeError:
-                    tf.extractall(extract_dir)  # Python 3.11 fallback
+                    # Manual path validation for Python < 3.12
+                    for member in tf.getmembers():
+                        # SECURITY: Block path traversal attempts
+                        if '..' in member.name or member.name.startswith('/'):
+                            continue
+                        # SECURITY: Ensure resolved path stays within extract_dir
+                        try:
+                            target_path = (extract_dir / member.name).resolve()
+                            if not str(target_path).startswith(str(extract_dir.resolve())):
+                                continue
+                        except (OSError, ValueError):
+                            continue
+                        tf.extract(member, extract_dir)
 
             extracted_app = extract_dir / "CyberClean" / "CyberClean"
             if not extracted_app.exists():
