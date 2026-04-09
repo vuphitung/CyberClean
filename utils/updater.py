@@ -597,28 +597,29 @@ class UpdateDialog(QDialog):
                 pass
             return
 
-        self.progress.emit(100, _t("upd_done", "Update complete!"))
-        
-        # COUNTDOWN: Hiên thông báo ngm dn cho user
-        self._prog_lbl.setText(_t("upd_restart_countdown", "Restarting in 3... 2... 1..."))
         self._prog_bar.setValue(100)
         self._update_btn.setVisible(False)
         self._skip_btn.setEnabled(False)
-        
-        # p giao diên hiên thông báo cuôi cùng
-        QApplication.processEvents()
-        
-        # Thêm countdown 3 giây trc khi restart
-        for i in range(3, 0, -1):
-            self._prog_lbl.setText(f"{_t('upd_restart_countdown', 'Restarting in')} {i}...")
-            QApplication.processEvents()
-            import time
-            time.sleep(0.8)  # 0.8s instead of 1s to make it feel faster
-        
-        self._prog_lbl.setText(_t("upd_final_message", "Launching new version..."))
-        QApplication.processEvents()
-        
-        QTimer.singleShot(500, _restart_app)  # Faster restart: 500ms instead of 1200ms
+        self._prog_lbl.setText(_t("upd_done", "✓  Done — restarting…"))
+        self._prog_lbl.setStyleSheet(
+            f"color:{C['green']};font-size:11px;font-family:{MONO};"
+        )
+        # Use QTimer for countdown — NEVER sleep() on the Qt main thread.
+        # sleep() blocks the event loop, freezes the UI, and can cause
+        # the subsequent os._exit(0) to kill the subprocess before it detaches.
+        self._countdown = 3
+        self._tick()
+
+    def _tick(self):
+        if self._countdown > 0:
+            self._prog_lbl.setText(
+                f"{_t('upd_restart_countdown', 'Restarting in')} {self._countdown}…"
+            )
+            self._countdown -= 1
+            QTimer.singleShot(800, self._tick)
+        else:
+            self._prog_lbl.setText(_t("upd_final_message", "Launching new version…"))
+            QTimer.singleShot(400, _restart_app)
 
     # BUG FIX 3: override closeEvent so X button also cancels the worker
     def closeEvent(self, event):
@@ -647,46 +648,63 @@ def _md_to_plain(md: str) -> str:
 
 
 def _restart_app():
-    """Replace current process with the newly-installed binary."""
-    import os, sys, subprocess
-    from pathlib import Path
-    
-    if sys.platform == "win32":
-        # Windows: Inno Setup tự lo việc mở app mới sau khi cài.
-        os._exit(0)
+    """
+    Replace current process with the newly-installed binary.
 
-    # LINUX: Giải pháp "Vê sầu thoát xác" siêu tốc
+    Linux: os.execv() atomically replaces the current process.
+    No subprocess spawning, no shell, no race condition with os._exit().
+    The flag 'upd_in_progress_until' is cleared first so the new instance
+    starts clean without the "updating" block.
+
+    Windows: ShellExecuteW runas launches new exe with UAC, then we exit.
+    """
+    import os, sys, ctypes
+    from pathlib import Path
+
+    # Clear update flag BEFORE exec/exit so the new instance never sees it
     try:
-        # Đường dẫn file chạy hiện tại
-        current_script = sys.argv[0]
-        
-        # PHÂN BIÊT: Running from source vs installed binary
-        is_running_from_source = current_script.endswith('main.py')
-        
-        # LNH THN THÁNH: Xóa cõ chuân 100% (Phãi xung tên App)
-        clear_flag_cmd = "python3 -c \"from PyQt6.QtCore import QSettings; s = QSettings('CyberClean', 'CyberClean'); s.remove('upd_in_progress_until'); s.sync()\""
-        
-        if is_running_from_source:
-            # Chây bang code nháp
-            cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup python3 {current_script} >/dev/null 2>&1 &"
-        else:
-            # Chây bang file Binary dã cài
-            installed_binary = None
-            for install_path in ["/opt/CyberClean/CyberClean", f"{Path.home()}/.local/CyberClean/CyberClean"]:
-                if Path(install_path).exists():
-                    installed_binary = install_path
-                    break
-            
-            if installed_binary:
-                cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup {installed_binary} >/dev/null 2>&1 &"
-            else:
-                # Fallback
-                cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup {current_script} >/dev/null 2>&1 &"
-        
-        # Bân lnh ra hê thông
-        subprocess.Popen(cmd, shell=True, start_new_session=True)
-    except Exception as e:
-        print(f"Restart failed: {e}")
-    finally:
-        # Tú sát ngay lâp tuc
-        os._exit(0)
+        from PyQt6.QtCore import QSettings
+        s = QSettings('CyberClean', 'CyberClean')
+        s.remove('upd_in_progress_until')
+        s.sync()
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        candidates = [
+            Path(os.environ.get("PROGRAMFILES",      r"C:\Program Files"))       / "CyberClean" / "CyberClean.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "CyberClean" / "CyberClean.exe",
+            Path(os.environ.get("ProgramW6432",       r"C:\Program Files"))       / "CyberClean" / "CyberClean.exe",
+        ]
+        new_exe = next((p for p in candidates if p.exists()), None)
+        if new_exe:
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", str(new_exe), None, None, 1
+            )
+        from PyQt6.QtWidgets import QApplication
+        QApplication.quit()
+        sys.exit(0)
+        return
+
+    # ── Linux ─────────────────────────────────────────────
+    # Candidate binary locations (onedir bundle structure)
+    candidates = [
+        Path("/opt/CyberClean/CyberClean/CyberClean"),          # standard install.sh path
+        Path.home() / ".local/CyberClean/CyberClean/CyberClean",# user-local fallback
+    ]
+    binary = next((p for p in candidates if p.is_file()), None)
+
+    if binary:
+        # os.execv() replaces this process in-place — atomic, no race condition.
+        # The new process inherits the same PID slot; no zombie, no double-launch.
+        os.execv(str(binary), [str(binary)] + sys.argv[1:])
+        # execv never returns on success; only reaches here on error
+
+    # Running from source (python main.py) — re-exec python
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except OSError:
+        pass
+
+    # Last resort if execv failed for any reason
+    sys.exit(0)
