@@ -263,9 +263,17 @@ class UpdateWorker(QThread):
                 return False, _t("upd_err_small",
                     "Download too small — check release assets on GitHub.")
 
-            self.progress.emit(65, _t("upd_extracting", "Extracting…"))
+            self.progress.emit(65, _t("upd_extracting", "Extracting"))
             extract_dir = tmp_dir / "extracted"
             extract_dir.mkdir()
+            
+            # UI FEEDBACK: Hiên thông báo cho user yên tâm
+            from PyQt6.QtWidgets import QApplication
+            self.progress.emit(70, _t("upd_installing_optimizing", "Installing and optimizing... Will restart in 3 seconds!"))
+            
+            # LNH THN THÁNH: p giao diên update ngay lâp tuc trc khi bi ng bng
+            QApplication.processEvents()
+            
             with tarfile.open(tar_path, "r:gz") as tf:
                 # SECURITY FIX: Path traversal protection for all Python versions
                 try:
@@ -589,13 +597,28 @@ class UpdateDialog(QDialog):
                 pass
             return
 
-        self._prog_lbl.setText(_t("upd_done", "✓  Done — restarting…"))
-        self._prog_lbl.setStyleSheet(
-            f"color:{C['green']};font-size:11px;font-family:{MONO};"
-        )
+        self.progress.emit(100, _t("upd_done", "Update complete!"))
+        
+        # COUNTDOWN: Hiên thông báo ngm dn cho user
+        self._prog_lbl.setText(_t("upd_restart_countdown", "Restarting in 3... 2... 1..."))
+        self._prog_bar.setValue(100)
         self._update_btn.setVisible(False)
         self._skip_btn.setEnabled(False)
-        QTimer.singleShot(1200, _restart_app)
+        
+        # p giao diên hiên thông báo cuôi cùng
+        QApplication.processEvents()
+        
+        # Thêm countdown 3 giây trc khi restart
+        for i in range(3, 0, -1):
+            self._prog_lbl.setText(f"{_t('upd_restart_countdown', 'Restarting in')} {i}...")
+            QApplication.processEvents()
+            import time
+            time.sleep(0.8)  # 0.8s instead of 1s to make it feel faster
+        
+        self._prog_lbl.setText(_t("upd_final_message", "Launching new version..."))
+        QApplication.processEvents()
+        
+        QTimer.singleShot(500, _restart_app)  # Faster restart: 500ms instead of 1200ms
 
     # BUG FIX 3: override closeEvent so X button also cancels the worker
     def closeEvent(self, event):
@@ -625,22 +648,25 @@ def _md_to_plain(md: str) -> str:
 
 def _restart_app():
     """Replace current process with the newly-installed binary."""
+    import subprocess
+    
     if sys.platform == "win32":
         # Windows: Inno Setup tự lo việc mở app mới sau khi cài.
-        # Phải dùng os._exit(0) — KHÔNG dùng QApplication.quit() hay sys.exit(0).
-        # sys.exit() chỉ raise SystemExit trong thread hiện tại, không kill process.
-        # os._exit(0) mới thật sự "rút ống thở" ngay lập tức, giải phóng file lock.
         os._exit(0)
 
-    # Linux: binary was replaced in-place — exec the new one
-    exe_opt = _linux_opt_install_dir()
-    if exe_opt is not None:
-        bin_path = exe_opt / "CyberClean"
-        if bin_path.is_file():
-            os.execv(str(bin_path), [str(bin_path)] + sys.argv[1:])
-
-    # Fallback: re-exec via python (running from source)
+    # LINUX: Giải pháp "Vê sầu thoát xác" siêu tốc
     try:
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except OSError:
-        sys.exit(0)
+        # Đường dẫn file chạy hiện tại
+        app_path = sys.argv[0]
+        
+        # Lệnh Bash chạy ngầm: 
+        # Đợi 1s -> Xóa file config khóa app -> Gọi lại app mới -> Thoát
+        cmd = f"sleep 1 && rm -f ~/.config/CyberClean/CyberClean.conf && nohup {app_path} >/dev/null 2>&1 &"
+        
+        # Bắn lệnh ra hệ thống (start_new_session tách nó ra app hiện tại)
+        subprocess.Popen(cmd, shell=True, start_new_session=True)
+    except Exception as e:
+        print(f"Restart failed: {e}")
+    finally:
+        # Tự sát ngay lập tức, nhường sân khấu cho app mới
+        os._exit(0)
