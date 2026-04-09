@@ -648,7 +648,8 @@ def _md_to_plain(md: str) -> str:
 
 def _restart_app():
     """Replace current process with the newly-installed binary."""
-    import subprocess
+    import os, sys, subprocess
+    from pathlib import Path
     
     if sys.platform == "win32":
         # Windows: Inno Setup tự lo việc mở app mới sau khi cài.
@@ -657,16 +658,35 @@ def _restart_app():
     # LINUX: Giải pháp "Vê sầu thoát xác" siêu tốc
     try:
         # Đường dẫn file chạy hiện tại
-        app_path = sys.argv[0]
+        current_script = sys.argv[0]
         
-        # Lệnh Bash chạy ngầm: 
-        # Đợi 1s -> Xóa file config khóa app -> Gọi lại app mới -> Thoát
-        cmd = f"sleep 1 && rm -f ~/.config/CyberClean/CyberClean.conf && nohup {app_path} >/dev/null 2>&1 &"
+        # PHÂN BIÊT: Running from source vs installed binary
+        is_running_from_source = current_script.endswith('main.py')
         
-        # Bắn lệnh ra hệ thống (start_new_session tách nó ra app hiện tại)
+        # LNH THN THÁNH: Xóa cõ chuân 100% (Phãi xung tên App)
+        clear_flag_cmd = "python3 -c \"from PyQt6.QtCore import QSettings; s = QSettings('CyberClean', 'CyberClean'); s.remove('upd_in_progress_until'); s.sync()\""
+        
+        if is_running_from_source:
+            # Chây bang code nháp
+            cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup python3 {current_script} >/dev/null 2>&1 &"
+        else:
+            # Chây bang file Binary dã cài
+            installed_binary = None
+            for install_path in ["/opt/CyberClean/CyberClean", f"{Path.home()}/.local/CyberClean/CyberClean"]:
+                if Path(install_path).exists():
+                    installed_binary = install_path
+                    break
+            
+            if installed_binary:
+                cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup {installed_binary} >/dev/null 2>&1 &"
+            else:
+                # Fallback
+                cmd = f"sleep 1.5 && {clear_flag_cmd} && nohup {current_script} >/dev/null 2>&1 &"
+        
+        # Bân lnh ra hê thông
         subprocess.Popen(cmd, shell=True, start_new_session=True)
     except Exception as e:
         print(f"Restart failed: {e}")
     finally:
-        # Tự sát ngay lập tức, nhường sân khấu cho app mới
+        # Tú sát ngay lâp tuc
         os._exit(0)
