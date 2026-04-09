@@ -533,8 +533,13 @@ def _has_only_ssd() -> bool:
 # GPU VRAM DETECTION
 # ══════════════════════════════════════════════════════════════
 
+_VRAM_CACHE: Optional[float] = None   # cached — GPU doesn't change during session
+
 def _get_gpu_vram_gb() -> float:
-    """Return GPU VRAM in GB. Returns 0.0 if detection fails."""
+    """Return GPU VRAM in GB. Returns 0.0 if detection fails. Result cached."""
+    global _VRAM_CACHE
+    if _VRAM_CACHE is not None:
+        return _VRAM_CACHE
     if IS_LINUX:
         try:
             # Most reliable: sysfs drm
@@ -542,9 +547,11 @@ def _get_gpu_vram_gb() -> float:
                 vram_file = card / "device/mem_info_vram_total"
                 if vram_file.exists():
                     vram_bytes = int(vram_file.read_text().strip())
-                    return vram_bytes / (1024 ** 3)
+                    _VRAM_CACHE = vram_bytes / (1024 ** 3)
+                    return _VRAM_CACHE
         except Exception:
             pass
+        _VRAM_CACHE = 0.0
         return 0.0
 
     elif IS_WINDOWS:
@@ -590,12 +597,15 @@ def _get_gpu_vram_gb() -> float:
         try:
             if _arm:
                 g = _vram_from_cim()
-                return g if g > 0 else 0.0
-            try:
-                return _vram_from_wmic()
-            except OSError:
-                return _vram_from_cim()
+                _VRAM_CACHE = g if g > 0 else 0.0
+            else:
+                try:
+                    _VRAM_CACHE = _vram_from_wmic()
+                except OSError:
+                    _VRAM_CACHE = _vram_from_cim()
+            return _VRAM_CACHE
         except Exception:
+            _VRAM_CACHE = 0.0
             return 0.0
     return 0.0
 
@@ -2386,19 +2396,24 @@ def game_mode_on(log) -> dict:
                             # softly so OS gives game preference during contention.
                             saved["nice"][p.pid] = p.nice()
                             if IS_WINDOWS:
-                                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                                # Active comms on Windows: do NOT lower priority.
+                                # WASAPI audio threads need normal priority.
+                                pass
                             elif IS_LINUX and os.geteuid() == 0:
                                 p.nice(5)
                             soft_throttled += 1
-                            log(f"  ~ Active: {nm} ({cpu_now:.1f}% CPU) → soft throttle only (no jail)", "ok")
+                            log(f"  ~ Active: {nm} ({cpu_now:.1f}% CPU) → untouched (audio-safe)", "ok")
                         else:
                             # Idle comms/media can still suddenly become active (voice/chat/video).
                             # On Windows, avoid affinity jail to prevent capture/overlay instability.
                             saved["nice"][p.pid] = p.nice()
                             if IS_WINDOWS:
-                                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                                # Keep NORMAL priority for comms/media on Windows.
+                                # BELOW_NORMAL deprioritizes WASAPI audio threads
+                                # -> Discord voice stutters, Spotify/YouTube cuts out.
+                                # Just track it as soft-throttled without touching priority.
                                 soft_throttled += 1
-                                log(f"  ~ Idle: {nm} → priority only (no affinity jail on Windows)", "ok")
+                                log(f"  ~ Kept: {nm} → normal priority (audio-safe on Windows)", "ok")
                             elif IS_LINUX and os.geteuid() == 0:
                                 if cores >= 6:
                                     idle_cores = list(range(cores // 2, cores))

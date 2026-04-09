@@ -5,7 +5,7 @@
 # Mọi file khác (main.py, build.py, install.sh) đều đọc từ đây.
 # ─────────────────────────────────────────────────────────────
 
-__version__ = "2.2.4"
+__version__ = "2.2.5"
 __build__   = "stable"   # "stable" | "beta" | "nightly"
 
 
