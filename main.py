@@ -3342,8 +3342,22 @@ if __name__ == '__main__':
     # the "update in progress" flag (fresh start after OTA restart).
     try:
         QSettings().remove("upd_in_progress_until")
+        QSettings().sync()
     except Exception:
         pass
+    # Belt+suspenders: also clear via winreg directly on Windows
+    # (QSettings may not flush if it was set by a dying process)
+    if sys.platform == 'win32':
+        try:
+            import winreg as _wr
+            _k = _wr.OpenKey(_wr.HKEY_CURRENT_USER,
+                             r'Software\CyberClean\CyberClean',
+                             0, _wr.KEY_SET_VALUE)
+            try: _wr.DeleteValue(_k, 'upd_in_progress_until')
+            except FileNotFoundError: pass
+            _wr.CloseKey(_k)
+        except Exception:
+            pass
 
     # Single instance lock (Anti-Zombie)
     if IS_LINUX:

@@ -534,7 +534,7 @@ class UpdateDialog(QDialog):
         # doesn't trigger the "Background Process Detected" kill prompt.
         try:
             _s = QSettings()
-            _s.setValue("upd_in_progress_until", int(time.time()) + 600)  # 10 minutes
+            _s.setValue("upd_in_progress_until", int(time.time()) + 120)  # 2 minutes max
         except Exception:
             pass
 
@@ -671,16 +671,26 @@ def _restart_app():
         pass
 
     if sys.platform == "win32":
-        candidates = [
-            Path(os.environ.get("PROGRAMFILES",      r"C:\Program Files"))       / "CyberClean" / "CyberClean.exe",
-            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "CyberClean" / "CyberClean.exe",
-            Path(os.environ.get("ProgramW6432",       r"C:\Program Files"))       / "CyberClean" / "CyberClean.exe",
-        ]
-        new_exe = next((p for p in candidates if p.exists()), None)
-        if new_exe:
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", str(new_exe), None, None, 1
+        # DO NOT try to launch new exe here — it doesn't exist yet.
+        # Inno Setup is still running and will launch the new exe itself
+        # via its [Run] postinstall entry once installation completes.
+        # All we need to do is:
+        # 1. Clear the update flag via winreg (reliable even during shutdown)
+        # 2. Exit the old app cleanly so Inno can overwrite it
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\CyberClean\CyberClean",
+                0, winreg.KEY_SET_VALUE
             )
+            try:
+                winreg.DeleteValue(key, "upd_in_progress_until")
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
         sys.exit(0)
