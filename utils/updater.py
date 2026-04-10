@@ -361,7 +361,33 @@ class UpdateWorker(QThread):
                     "Installer too small — asset name may differ on GitHub.")
 
             self.progress.emit(70, _t("upd_launching", "Launching installer…"))
-            # Use /SILENT so user vẫn thấy installer chạy, tránh cảm giác app "đơ".
+
+            # ── XÓA FLAG TRƯỚC KHI GỌI INNO ──────────────────────────────
+            # /CLOSEAPPLICATIONS khiến Inno kill app ngay lập tức (~0.5s).
+            # Nếu xóa flag sau (trong _restart_app), code đó không bao giờ chạy.
+            # Phải xóa ở đây, trước khi thả Inno ra.
+            try:
+                import winreg as _wr
+                _k = _wr.OpenKey(_wr.HKEY_CURRENT_USER,
+                                 r"Software\CyberClean\CyberClean",
+                                 0, _wr.KEY_SET_VALUE)
+                try:
+                    _wr.DeleteValue(_k, "upd_in_progress_until")
+                except FileNotFoundError:
+                    pass
+                _wr.CloseKey(_k)
+            except Exception:
+                pass
+            # ── Fallback: QSettings ────────────────────────────────────────
+            try:
+                from PyQt6.QtCore import QSettings as _QS
+                _s2 = _QS("CyberClean", "CyberClean")
+                _s2.remove("upd_in_progress_until")
+                _s2.sync()
+            except Exception:
+                pass
+            # ───────────────────────────────────────────────────────────────
+
             subprocess.Popen(
                 [str(installer), "/SILENT", "/NORESTART", "/CLOSEAPPLICATIONS"],
                 creationflags=_no_window_flags(),
