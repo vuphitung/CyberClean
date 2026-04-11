@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\CyberClean\\assets\\logo.ico'],
+    icon=['/home/tung/CyberClean/assets/logo.png'],
 )
 coll = COLLECT(
     exe,
