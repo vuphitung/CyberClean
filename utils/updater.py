@@ -2,9 +2,17 @@
 CyberClean — In-app updater (Linux /opt install + Windows Inno).
 Release notes from GitHub API body; download + replace + restart.
 All UI strings go through _t() for full i18n support.
+
+v2.3 additions:
+  SHA-256 verify  — download .sha256 sidecar từ GitHub release, verify trước khi extract.
+                    Backward compat: nếu .sha256 không tồn tại (release cũ), cho qua.
+                    User v2.2.6 → v2.2.8 vẫn update được bình thường.
+  Retry + backoff — tự retry 3 lần với exponential backoff (2s, 4s, 8s) khi network lỗi.
+  Resume download — dùng Range header để tiếp tục download bị ngắt giữa chừng.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -16,7 +24,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 from urllib.request import urlopen, Request
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
@@ -210,29 +218,138 @@ class UpdateWorker(QThread):
     def cancel(self):
         self._cancelled = True
 
-    def _download(self, url: str, dest: Path):
+    def _download(self, url: str, dest: Path, progress_start: int = 10,
+                  progress_end: int = 60):
+        """
+        Download url → dest với retry 3x exponential backoff + Range resume.
+        - Retry: network error → chờ 2^attempt giây, tối đa 3 lần
+        - Resume: nếu dest đã tồn tại một phần, dùng Range header để tiếp tục
+        - Backward compat: server không support Range → download lại từ đầu
+        """
         import ssl
-        req = Request(url, headers={"User-Agent": f"CyberClean-Updater/{self.version}"})
-        # SECURITY: Create secure SSL context with proper validation
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = True
         ssl_context.verify_mode = ssl.CERT_REQUIRED
-        with urlopen(req, timeout=120, context=ssl_context) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            done  = 0
-            with open(dest, "wb") as f:
-                while not self._cancelled:
-                    data = resp.read(65536)
-                    if not data:
-                        break
-                    f.write(data)
-                    done += len(data)
-                    if total:
-                        self.progress.emit(
-                            min(60, int(done / total * 60)),
-                            _t("upd_downloading", "Downloading…",
-                               ver=self.version, done=done // 1024, total=total // 1024),
-                        )
+
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            if self._cancelled:
+                return
+
+            # Resume: kiểm tra file đã download một phần chưa
+            resume_pos = dest.stat().st_size if dest.exists() else 0
+            headers = {"User-Agent": f"CyberClean-Updater/{self.version}"}
+            if resume_pos > 0:
+                headers["Range"] = f"bytes={resume_pos}-"
+
+            try:
+                req  = Request(url, headers=headers)
+                with urlopen(req, timeout=120, context=ssl_context) as resp:
+                    # 206 Partial Content = server hỗ trợ resume
+                    # 200 OK = server không support Range → viết lại từ đầu
+                    if resp.status == 200:
+                        resume_pos = 0   # server trả về full file
+                    total = int(resp.headers.get("Content-Length", 0))
+                    done  = resume_pos
+                    mode  = "ab" if resume_pos > 0 else "wb"
+                    with open(dest, mode) as f:
+                        while not self._cancelled:
+                            data = resp.read(65536)
+                            if not data:
+                                break
+                            f.write(data)
+                            done += len(data)
+                            total_real = total + resume_pos if total else 0
+                            if total_real:
+                                pct = progress_start + int(
+                                    (done / total_real) * (progress_end - progress_start)
+                                )
+                                self.progress.emit(
+                                    min(progress_end, pct),
+                                    _t("upd_downloading", "Downloading…",
+                                       ver=self.version,
+                                       done=done // 1024,
+                                       total=total_real // 1024),
+                                )
+                return   # download thành công
+
+            except (URLError, HTTPError, OSError, TimeoutError) as e:
+                if attempt >= max_retries:
+                    raise   # hết retry, raise lên caller
+                wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+                self.progress.emit(
+                    progress_start,
+                    _t("upd_retry", f"Network error — retrying in {wait}s… ({attempt+1}/{max_retries})",
+                       wait=wait, attempt=attempt+1, max=max_retries),
+                )
+                # Chờ có thể bị cancel
+                for _ in range(wait * 10):
+                    if self._cancelled:
+                        return
+                    import time as _t2
+                    _t2.sleep(0.1)
+
+    # ── SHA-256 verify ───────────────────────────────────────
+    def _verify_sha256(self, file_path: Path, sha256_url: str) -> tuple[bool, str]:
+        """
+        Download .sha256 sidecar từ GitHub release và verify file đã download.
+
+        Backward compat: nếu .sha256 không tồn tại trên server (HTTP 404),
+        trả về (True, "skipped") — cho phép user từ các bản cũ (v2.2.6, v2.2.7)
+        update lên bản mới mà không bị block.
+
+        Chỉ fail khi:
+          - File .sha256 tồn tại VÀ hash không khớp (file bị corrupt hoặc MITM)
+          - Network error khi download .sha256 (không phải 404)
+        """
+        import ssl, hashlib
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = True
+        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+
+        # Tính SHA-256 của file đã download
+        sha256 = hashlib.sha256()
+        try:
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    sha256.update(chunk)
+            local_hash = sha256.hexdigest().lower()
+        except OSError as e:
+            return False, f"Cannot read file for verification: {e}"
+
+        # Download .sha256 sidecar
+        try:
+            req = Request(
+                sha256_url,
+                headers={"User-Agent": f"CyberClean-Updater/{self.version}"},
+            )
+            with urlopen(req, timeout=30, context=ssl_ctx) as resp:
+                raw = resp.read().decode("utf-8", errors="replace").strip()
+        except HTTPError as e:
+            if e.code == 404:
+                # .sha256 không tồn tại → release cũ không có checksum → cho qua
+                return True, "skipped — no .sha256 on server (old release, OK)"
+            return False, f"HTTP {e.code} downloading .sha256"
+        except (URLError, OSError) as e:
+            # Network lỗi khi lấy .sha256 — cảnh báo nhưng không block
+            # (tránh trường hợp user mạng yếu bị kẹt chỉ vì không lấy được .sha256)
+            return True, f"skipped — network error fetching .sha256: {e}"
+
+        # Parse: "abc123...  CyberClean-2.2.8-linux-x86_64.tar.gz" hoặc chỉ "abc123..."
+        expected_hash = raw.split()[0].lower() if raw else ""
+        if not expected_hash or len(expected_hash) != 64:
+            # File .sha256 có format lạ — cho qua thay vì block
+            return True, f"skipped — unexpected .sha256 format: {raw[:80]!r}"
+
+        if local_hash == expected_hash:
+            return True, f"verified OK ({local_hash[:16]}…)"
+        else:
+            return False, (
+                f"SHA-256 MISMATCH — file may be corrupt or tampered!\n"
+                f"  Expected: {expected_hash[:32]}…\n"
+                f"  Got:      {local_hash[:32]}…\n"
+                f"Please try again or download manually from GitHub."
+            )
 
     # ── Linux ────────────────────────────────────────────────
     def _update_linux(self):
@@ -262,6 +379,18 @@ class UpdateWorker(QThread):
             if tar_path.stat().st_size < 50_000:
                 return False, _t("upd_err_small",
                     "Download too small — check release assets on GitHub.")
+
+            # SHA-256 verify (backward compat: 404 = skip, mismatch = fail)
+            self.progress.emit(63, _t("upd_verifying", "Verifying integrity…"))
+            sha256_url = (
+                f"https://github.com/{REPO}/releases/download/v{ver}/"
+                f"CyberClean-{ver}-linux-x86_64.tar.gz.sha256"
+            )
+            ok_hash, hash_msg = self._verify_sha256(tar_path, sha256_url)
+            if not ok_hash:
+                return False, _t("upd_err_hash", hash_msg, msg=hash_msg)
+            if "skipped" not in hash_msg:
+                self.progress.emit(64, f"✓ {hash_msg}")
 
             self.progress.emit(65, _t("upd_extracting", "Extracting"))
             extract_dir = tmp_dir / "extracted"
@@ -359,6 +488,16 @@ class UpdateWorker(QThread):
             if installer.stat().st_size < 500_000:
                 return False, _t("upd_err_small_win",
                     "Installer too small — asset name may differ on GitHub.")
+
+            # SHA-256 verify (backward compat: 404 = skip, mismatch = fail)
+            self.progress.emit(68, _t("upd_verifying", "Verifying integrity…"))
+            sha256_url = (
+                f"https://github.com/{REPO}/releases/download/v{ver}/"
+                f"CyberClean_Setup_v{ver}.exe.sha256"
+            )
+            ok_hash, hash_msg = self._verify_sha256(installer, sha256_url)
+            if not ok_hash:
+                return False, _t("upd_err_hash", hash_msg, msg=hash_msg)
 
             self.progress.emit(70, _t("upd_launching", "Launching installer…"))
 

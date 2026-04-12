@@ -2366,12 +2366,46 @@ def game_mode_on(log) -> dict:
         _t.sleep(0.3)
 
         # PERFORMANCE FIX: Collect all processes first to avoid O(n²) nested iteration
-        all_processes = list(psutil.process_iter(["pid", "name"]))
+        # FIX: thêm "cmdline" vào iter để detect GPU/renderer subprocess của Chromium/Electron
+        # (các subprocess này ăn 0% CPU khi idle nên Tier logic tưởng là rác → bóp cổ nhầm)
+        all_processes = list(psutil.process_iter(["pid", "name", "cmdline"]))
         for p in all_processes:
             try:
                 nm = (p.info["name"] or "").lower().replace(".exe", "")
                 if nm in protected or _is_protected(nm):
                     continue
+
+                # ── DYNAMIC GPU/RENDERER GUARD ─────────────────────────────────
+                # Chromium / Electron / CEF spawns subprocess với --type= flag.
+                # Những subprocess này đảm nhận:
+                #   gpu-process  → render WebGL, hardware video decode, camera QR scan
+                #   renderer     → render HTML/JS của từng tab / app window
+                #   ppapi        → Flash/NaCl plugins (hiếm nhưng vẫn có)
+                #   video-capture → camera feed cho QR scan, video call
+                #   utility      → network service, storage service
+                # Khi idle chúng ăn 0% CPU → Tier logic sẽ tưởng là bloat và jail.
+                # Jail gpu-process = màn hình trắng khi quét QR, video call đơ, WebGL đen.
+                # Fix: detect bằng cmdline, bypass HOÀN TOÀN mọi Tier nếu khớp.
+                _GPU_RENDERER_FLAGS = (
+                    "--type=gpu-process",
+                    "--type=renderer",
+                    "--type=ppapi",
+                    "--type=utility",
+                    "video-capture",
+                    "--gpu-process",       # format thay thế một số Electron build dùng
+                    "gpu_process",
+                )
+                try:
+                    _cmdline = p.info.get("cmdline") or []
+                    _cmdline_str = " ".join(_cmdline).lower() if _cmdline else ""
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    _cmdline_str = ""
+
+                if _cmdline_str and any(flag in _cmdline_str for flag in _GPU_RENDERER_FLAGS):
+                    # Subprocess này đang đảm nhận GPU/rendering — không đụng vào
+                    # dù nó thuộc app nào, dù đang idle hay active
+                    continue
+
                 with p.oneshot():
                     # Measure actual CPU activity right now
                     try:
