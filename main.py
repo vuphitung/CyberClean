@@ -958,9 +958,24 @@ class CyberCleanApp(QMainWindow):
         self.fix_btn.setToolTip(_t('scan_tooltip', 'Run scan first, then select findings to fix'))
         self.fix_btn.clicked.connect(self._fix_scan_results)
         self.fix_btn.setEnabled(False)
+        # NEW: Mark as safe — lets user whitelist false positives
+        self._safe_btn = _btn(f"✓  {_t('btn_mark_safe','MARK AS SAFE')}", 'green', small=True)
+        self._safe_btn.setMaximumWidth(160)   # cap width — text vừa với các ngôn ngữ dài
+        self._safe_btn.setToolTip(_t('safe_btn_tooltip', 'Mark selected finding as trusted — scanner will ignore it next time'))
+        self._safe_btn.clicked.connect(self._mark_scan_result_safe)
+        self._safe_btn.setEnabled(False)
+        # NEW: Watchlist badge — shows how many processes are being observed
+        self._watchlist_badge = QLabel('')
+        self._watchlist_badge.setStyleSheet(
+            f'color:{C["yellow"]};font-size:10px;font-family:{MONO};'
+            f'border:1px solid {C["yellow"]}50;padding:3px 8px;border-radius:2px;'
+        )
+        self._watchlist_badge.setVisible(False)
         br.addWidget(self.scan_btn)
         br.addWidget(self.fix_btn)
+        br.addWidget(self._safe_btn)
         br.addStretch()
+        br.addWidget(self._watchlist_badge)
         lay.addLayout(br)
         lay.addSpacing(14)
 
@@ -1605,16 +1620,32 @@ class CyberCleanApp(QMainWindow):
         self._scan_results = results
         sev_col = {'critical': C['red'], 'high': C['yellow'], 'medium': C['cyan'], 'info': C['text3']}
 
-        # Kết quả quét file cũ
+        # Populate findings table — include score in severity cell tooltip
         for r in results:
             row = self.scan_table.rowCount()
             self.scan_table.insertRow(row)
-            for i, val in enumerate([r.severity.upper(), r.category, r.path, r.detail]):
+            # Build severity label — append score if available
+            sev_label = r.severity.upper()
+            if hasattr(r, 'score') and r.score:
+                sev_label = f'{sev_label} [{r.score}]'
+            for i, val in enumerate([sev_label, r.category, r.path, r.detail]):
                 ti = QTableWidgetItem(val)
                 if i == 0:
                     ti.setForeground(QColor(sev_col.get(r.severity, C['text'])))
+                    # Tooltip: show full reasons list
+                    if hasattr(r, 'reasons') and r.reasons:
+                        ti.setToolTip('\n'.join(f'• {x}' for x in r.reasons))
                 self.scan_table.setItem(row, i, ti)
             self.scan_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, r)
+
+        # Update watchlist badge
+        watchlist_entries = [r for r in results if getattr(r, 'category', '') == 'watchlist']
+        if hasattr(self, '_watchlist_badge'):
+            if watchlist_entries:
+                self._watchlist_badge.setText(f'👁  {len(watchlist_entries)} watching')
+                self._watchlist_badge.setVisible(True)
+            else:
+                self._watchlist_badge.setVisible(False)
 
         # Network process results — show all suspicious (score >= 40)
         for net in net_results:
@@ -1661,6 +1692,9 @@ class CyberCleanApp(QMainWindow):
             for r in rows
         )
         self.fix_btn.setEnabled(fixable)
+        # Enable "Mark as safe" whenever any row is selected
+        if hasattr(self, '_safe_btn'):
+            self._safe_btn.setEnabled(bool(rows))
 
     def _fix_scan_results(self):
         rows = set(i.row() for i in self.scan_table.selectedItems())
@@ -1694,6 +1728,58 @@ class CyberCleanApp(QMainWindow):
             except Exception as e:
                 self._on_opt_log(f'  ✗  {r.fix_cmd}: {e}', 'err')
         self._run_scanner()
+
+    def _mark_scan_result_safe(self):
+        """
+        Mark selected scanner findings as safe (user whitelist).
+        Calls add_to_user_whitelist() from scanner.py — path written to
+        ~/.local/share/cyber-clean/user_whitelist.json.
+        Next scan: -50 points for whitelisted paths → almost never flagged again.
+        """
+        rows = set(i.row() for i in self.scan_table.selectedItems())
+        if not rows:
+            return
+        try:
+            from core.scanner import add_to_user_whitelist
+        except ImportError:
+            try:
+                from scanner import add_to_user_whitelist
+            except ImportError:
+                self._on_opt_log('  ✗  add_to_user_whitelist not available', 'err')
+                return
+
+        added = []
+        for row in rows:
+            item = self.scan_table.item(row, 0)
+            path_item = self.scan_table.item(row, 2)
+            if not path_item:
+                continue
+            path = path_item.text().strip()
+            if not path or path in ('—', ''):
+                continue
+            try:
+                add_to_user_whitelist(path, reason='user marked safe from scanner tab')
+                added.append(path)
+                # Grey out the row visually to show it's whitelisted
+                for col in range(self.scan_table.columnCount()):
+                    cell = self.scan_table.item(row, col)
+                    if cell:
+                        cell.setForeground(QColor(C['text3']))
+            except Exception as e:
+                self._on_opt_log(f'  ✗  Failed to whitelist {path}: {e}', 'err')
+
+        if added:
+            self._on_opt_log(
+                f'  ✓  Marked {len(added)} path(s) as safe — will be ignored in future scans:',
+                'ok'
+            )
+            for p in added:
+                self._on_opt_log(f'     {p}', 'dim')
+            self._on_opt_log(
+                '  ℹ  To undo: delete entry from '
+                '~/.local/share/cyber-clean/user_whitelist.json',
+                'info'
+            )
 
     def _on_opt_log(self, msg, level):
         cols = {'ok': C['green'], 'warn': C['yellow'], 'err': C['red'], 'head': C['cyan'], 'info': C['text3']}
@@ -2338,6 +2424,9 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, 'fix_btn'):
             self.fix_btn.setText(f"⚡  {_t('btn_autofix','AUTO-FIX SELECTED')}")
             self.fix_btn.setToolTip(_t('scan_tooltip', ''))
+        if hasattr(self, '_safe_btn'):
+            self._safe_btn.setText(f"✓  {_t('btn_mark_safe','MARK AS SAFE')}")
+            self._safe_btn.setToolTip(_t('safe_btn_tooltip', 'Mark selected finding as trusted — scanner will ignore it next time'))
         if hasattr(self, '_lbl_scan_output_sec'):
             self._lbl_scan_output_sec.setText(_t('lbl_scan_output', 'SCAN OUTPUT'))
         if hasattr(self, '_lbl_findings_sec'):
@@ -2557,6 +2646,43 @@ class CyberCleanApp(QMainWindow):
         if self._scheduler.should_run():
             self._do_background_clean(notify=True)
             self._scheduler.mark_completed()
+
+        # Check watchlist escalations — processes that were "suspicious"
+        # on previous scans and may have become confirmed threats now
+        self._check_watchlist_escalations()
+
+    def _check_watchlist_escalations(self):
+        """
+        Called every 5 minutes by auto-clean timer.
+        If any watchlist entry has escalated (seen multiple times + score high),
+        show a tray notification alerting the user to re-run the scanner.
+        Does NOT auto-kill — always requires user confirmation.
+        """
+        try:
+            from core.scanner import check_watchlist_escalations
+        except ImportError:
+            try:
+                from scanner import check_watchlist_escalations
+            except ImportError:
+                return
+
+        try:
+            escalated = check_watchlist_escalations()
+        except Exception:
+            return
+
+        if not escalated:
+            return
+
+        names = [e.get('path', '?').split('/')[-1].split('\\')[-1] for e in escalated[:3]]
+        msg   = f'⚠ {len(escalated)} watchlisted process(es) may now be threats: {", ".join(names)}'
+        if hasattr(self, 'tray'):
+            self.tray.showMessage(
+                'CyberClean — Threat Alert',
+                msg + ' — run Security Scanner to review.',
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000,
+            )
 
     def _do_background_clean(self, notify=True):
         safe_targets = [
