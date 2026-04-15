@@ -10,7 +10,7 @@
 ```
 
 **Smart System Cleaner & Performance Optimizer**
-**Windows · Linux · Cross-platform · v2.2.4**
+**Windows · Linux · Cross-platform · v2.2.9**
 
 <br/>
 
@@ -94,11 +94,9 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Installer
 
-**[⬇ Download CyberClean Setup v2.2.4 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Download CyberClean Setup v2.2.9 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 > UAC elevation on **first install only** · No background services · Uninstall via `Settings → Apps → CyberClean`
-
-> 💡 **Tip:** Always launch CyberClean from the **Desktop or Start Menu shortcut** to avoid UAC prompts. Pinning the running app directly to the Taskbar bypasses the Auto-Admin rule and will trigger UAC on next launch — this is a Windows limitation shared by apps like MSI Afterburner and Rufus.
 
 ---
 
@@ -124,32 +122,46 @@ Live system monitoring, auto-refreshes every 4 seconds.
 Safe, reversible disk cleanup with dry-run preview before touching anything.
 Every deletion is logged for manual rollback. Each target is labelled **Safe / Caution / Danger**.
 
-| Target | Linux | Windows |
-|--------|:-----:|:-------:|
-| Package manager cache (pacman / apt / dnf / zypper) | ✅ | — |
-| Orphaned packages | ✅ | — |
-| AUR build cache (yay / paru) | ✅ | — |
-| Flatpak unused runtimes | ✅ | — |
-| Docker / Podman dangling images | ✅ | — |
-| systemd journal logs (>7 days) | ✅ | — |
-| User cache `~/.cache` — 3-layer smart guard | ✅ | — |
-| Browser cache (Chrome / Chromium / Firefox / Edge / Brave / Opera) | ✅ | ✅ |
-| Thumbnail cache | ✅ | ✅ |
-| pip wheel cache | ✅ | — |
-| Temp files (>3 days, not in use) | ✅ | — |
-| Windows Temp & `%TEMP%` — lock-probe guard | — | ✅ |
-| Prefetch cache (unused >7 days) | — | ✅ |
-| Recycle Bin | — | ✅ |
-| Windows Update cache | — | ✅ |
-| Delivery Optimization cache | — | ✅ |
-| Thumbnail cache DB | — | ✅ |
-| DNS cache flush | — | ✅ |
-| Event logs (wevtutil) | — | ✅ |
-| Windows Error Reports & crash dumps | — | ✅ |
+#### Linux targets
 
-**Smart guard system (v2.2.4):**
-- **3-layer Linux cache guard** — name whitelist → socket/FIFO type detection → recent-activity check. Unknown wallpaper daemons, compositors, and IPC tools are automatically protected without needing a name update.
+| Target | Notes |
+|--------|-------|
+| Package manager cache (pacman / apt / dnf / zypper / xbps) | Keeps latest version(s) only |
+| Orphaned packages | pacman / xbps |
+| AUR build cache (yay / paru) | `~/.cache/yay` and `~/.cache/paru` |
+| Flatpak unused runtimes | Requires Flatpak ≥ 1.9.0 for dry-run |
+| Docker / Podman dangling images & stopped containers | Auto-detects podman or docker |
+| Snap old revisions | Disabled revisions only — current install kept |
+| systemd journal logs (> 7 days) | `journalctl --vacuum-time=7d` |
+| User cache `~/.cache` — 3-layer smart guard | See guard details below |
+| Browser cache — Chrome / Chromium / Firefox / Brave / Opera | All profiles (Default + Profile N) |
+| Thumbnail cache | `~/.cache/thumbnails` |
+| pip wheel cache | `~/.cache/pip` |
+| Temp files (> 3 days, not in use) | Skip symlinks, sockets, FIFOs |
+
+#### Windows targets
+
+| Target | Notes |
+|--------|-------|
+| Windows Temp & `%TEMP%` — lock-probe guard | Files older than 24 h, skips locked files |
+| Prefetch cache (> 7 days unused) | `.pf` files |
+| Recycle Bin | All items |
+| Windows Update cache | `SoftwareDistribution\Download` |
+| Delivery Optimization cache | P2P update cache |
+| Thumbnail cache DB | `thumbcache_*.db` — auto-rebuilds |
+| Font Cache | `FontCache*.dat` — service stopped before delete, restarted after |
+| GPU Shader Cache | DirectX / per-user shader cache — rebuilt on next launch |
+| WinSxS Cleanup | DISM `/StartComponentCleanup` — removes superseded components only, never touches live ones |
+| DNS cache flush | `ipconfig /flushdns` |
+| Event logs | `wevtutil cl` all channels |
+| Windows Error Reports & crash dumps | `%LOCALAPPDATA%\Microsoft\Windows\WER` |
+| Browser cache — Chrome / Edge / Brave / Firefox / Vivaldi / Cốc Cốc | All profiles (Default + Profile N) |
+
+**Smart guard system:**
+- **3-layer Linux cache guard** — name whitelist → socket/FIFO/device type detection → recent-activity check (< 30 s). Unknown wallpaper daemons, compositors, and IPC tools are automatically protected without needing a name update.
 - **Lock-probe Windows temp guard** — probes each file for an exclusive open before deleting. Locked files (held by a running process) are skipped silently instead of causing cascade errors.
+- **WinSxS safety** — estimate via `DISM /AnalyzeComponentStore`, cleanup via `DISM /StartComponentCleanup`. CyberClean never deletes WinSxS entries directly.
+- **Font Cache service guard** — stops `FontCache` service before delete, restarts after. Without this, files are locked and deletion fails silently.
 - **send2trash integration** — deleted files go to the system Trash instead of permanent deletion when available, making every clean session fully recoverable.
 
 ---
@@ -162,18 +174,18 @@ Performance optimization without crashing or freezing your system. Every feature
 |---------|:-----:|:-------:|
 | **Free RAM** — compact memory without evicting page cache | ✅ | ✅ |
 | **Memory Tune** — swappiness / dirty_ratio / vm params | ✅ | — |
-| **Memory Tune (Windows)** — SetProcessWorkingSetSizeEx trims idle process pages | — | ✅ |
+| **Memory Tune (Windows)** — `SetProcessWorkingSetSizeEx` trims idle process working sets | — | ✅ |
 | **Kill Bloat** — zombie + idle high-RAM processes (dynamic OOM threshold by RAM size) | ✅ | ✅ |
 | **Clear GPU / Shader Cache** — mesa, NVIDIA, Chrome, Edge + Flatpak / Snap paths | ✅ | ✅ |
 | **🎮 Game Mode** — 3-tier activity-aware CPU jail + performance governor | ✅ | ✅ |
 | **🌿 Eco Mode** — cgroups v2 on Linux · EcoQoS + memory priority on Windows 11 | ✅ | ✅ |
 | **⚡ Smart Boost** — auto-detects PC tier (High / Mid / Low) with GPU VRAM scoring | ✅ | ✅ |
 | **PSI Memory Monitor** — Linux kernel pressure stall info, auto kill-bloat on spike | ✅ | — |
-| **Timer Resolution** — 1ms scheduler tick (vs default 15.6ms) for smoother frames | — | ✅ |
-| **TCP Nagle Disable** — TcpAckFrequency + TCPNoDelay for lower online game latency | — | ✅ |
-| **Game Process Priority Boost** — foreground game gets ABOVE_NORMAL_PRIORITY_CLASS | — | ✅ |
+| **Timer Resolution 1ms** — scheduler tick 1 ms (vs default 15.6 ms) for smoother frames | — | ✅ |
+| **TCP Nagle Disable** — `TcpAckFrequency` + `TCPNoDelay` for lower online game latency | — | ✅ |
+| **Game Process Priority Boost** — foreground game gets `ABOVE_NORMAL_PRIORITY_CLASS` | — | ✅ |
 | **Windows Transparency Disable** — auto on low-end tier for extra perf headroom | — | ✅ |
-| **Feral GameMode integration** — defers CPU governor to `gamemoded` if present | ✅ | — |
+| **Feral GameMode integration** — defers CPU governor to `gamemoded` if running | ✅ | — |
 
 #### 🎮 Game Mode — 3-tier Activity-Aware CPU Jail
 
@@ -193,27 +205,64 @@ Classifies your machine using RAM, physical core count, **and GPU VRAM** (via Li
 
 | Tier | Criteria | Strategy |
 |------|----------|----------|
-| **HIGH** | >16 GB RAM + >6 cores, or >8 GB + VRAM ≥ 6 GB | Game Mode only |
-| **MID** | >8 GB RAM + >4 cores, or >4 GB + VRAM ≥ 6 GB | Game Mode + Eco Mode |
+| **HIGH** | > 16 GB RAM + > 6 cores, or > 8 GB + VRAM ≥ 6 GB | Game Mode only |
+| **MID** | > 8 GB RAM + > 4 cores, or > 4 GB + VRAM ≥ 6 GB | Game Mode + Eco Mode |
 | **LOW** | Everything else | Game Mode + Eco Mode + Free RAM + disable transparency |
 
 ---
 
-### 🔍 Security Scanner
+### 🔍 Security Scanner — Threat Scoring Engine
 
 Read-only deep scan — nothing is deleted automatically. You decide what to fix.
 
-- **Running processes** — detect crypto miners, reverse shells, processes spawned from `/tmp`
-- **Outbound network connections** — map established TCP connections to owning process, flag suspicious ports (4444, 1337, 31337 and common RAT ports), executables running from temp dirs
-- **SUID/SGID binaries** — flag unexpected setuid files outside the known-safe whitelist
+#### How it works — Threat Scoring Matrix
+
+Every process goes through 5 stages instead of being flagged on a single rule:
+
+1. **Evidence Gathering** — exe path, cmdline, CPU%, established TCP connections
+2. **Whitelist bypass** — Chromium gpu-process, AppImage mounts, PyInstaller bundles, Docker, user custom whitelist all get a free pass
+3. **Threat scoring** — additive multi-dimensional matrix (below)
+4. **Watchlist** — score 40–69 → saved to `watchlist.json`, re-checked every 5 minutes
+5. **Verdict** — < 40 ignore, 40–69 warn, ≥ 70 critical + offer kill
+
+| Score delta | Reason |
+|:-----------:|--------|
+| +60 | Known crypto miner process name |
+| +50 | Fake system process name (e.g. `svchost.exe` not in System32) |
+| +40 | Executable inside `/tmp`, `/dev/shm`, `%TEMP%` (not AppImage/PyInstaller) |
+| +40 | Cmdline pattern: reverse shell, `curl\|bash`, `base64 eval`, `LD_PRELOAD` |
+| +35 | Known C2 / miner / RAT port (4444, 1337, 31337, 3333, …) |
+| +30 | CPU > 80% sustained (miner behaviour) |
+| +20 | High ephemeral port > 49151 + not localhost |
+| +20 | Multiple outbound connections from same process (botnet behaviour) |
+| −15 | Python / Node / Java / Ruby runtime interpreter |
+| −20 | Executable in `/usr`, `/bin`, `/opt`, `Program Files` |
+| −30 | Windows: valid digital signature |
+| −40 | AppImage mount `/tmp/.mount_*` |
+| −40 | PyInstaller bundle `/tmp/_MEI*` |
+| −50 | Path matches `user_whitelist.json` |
+
+#### Persistent intelligence
+
+- **Watchlist** (`watchlist.json`) — processes scoring 40–69 are tracked with timestamp + score + reasons. Auto-escalates to critical if score rises on re-check.
+- **User whitelist** (`user_whitelist.json`) — click "Mark as safe" on a false positive. Grants −50 on all future scans. Teach the scanner about your environment.
+- **Hash cache** (`exe_hash_cache.json`) — SHA-256 of each binary after first scan. Re-scans only changed binaries on next run — ~3× faster. Also detects patched/replaced binaries between scans.
+
+#### What it scans
+
+- **Running processes** — crypto miners, reverse shells, processes spawned from `/tmp` / temp dirs
+- **Outbound network connections** — maps established TCP connections to owning process, flags suspicious ports
+- **SUID/SGID binaries** — flags unexpected setuid files outside the known-safe whitelist
 - **World-writable system files** — `/etc`, `/usr/local/bin`, `/usr/bin`
-- **Cron backdoors** — scan all cron directories + user crontab for shell injection patterns
+- **Cron backdoors** — all cron directories + user crontab for shell injection patterns
 - **Suspicious files** — `.sh/.py/.ps1/.bat/.vbs` in temp/user dirs with malicious patterns
 - **LD_PRELOAD hijacks** — `/etc/ld.so.preload` and `$LD_PRELOAD` env check
-- **SSH authorized_keys** — flag forced-command keys and unrecognised key formats
-- **Hosts file tampering** — detect redirects of trusted domains (Google, GitHub, PayPal...)
-- **Windows autoruns** — HKCU/HKLM Run keys with suspicious keywords (powershell -enc, mshta, wscript...)
+- **SSH authorized_keys** — flags forced-command keys and unrecognised key formats
+- **Hosts file tampering** — detects redirects of trusted domains (Google, GitHub, PayPal, …)
+- **Windows autoruns** — HKCU/HKLM Run keys with suspicious keywords (`powershell -enc`, `mshta`, `wscript`, …)
 - **One-click fix** — SUID strip, world-writable chmod, suspicious file removal, all via scoped helper
+
+> **Honest limits:** CyberClean cannot detect Ring-0 rootkits, UEFI implants, or kernel driver exploits — those operate below Python/psutil. What it does well: miners, scripts in `/tmp`, cron backdoors, hosts hijacks, processes running from temp dirs — the threats that are common and practical.
 
 ---
 
@@ -222,7 +271,7 @@ Read-only deep scan — nothing is deleted automatically. You decide what to fix
 Remove installed applications cleanly, no leftovers.
 
 - **Windows** — reads from Add/Remove Programs registry (no `wmic` dependency)
-- **Linux** — native package manager (pacman / apt / dnf) integration
+- **Linux** — native package manager integration (pacman / apt / dnf)
 - Displays installed size, version, and install date
 - Background uninstall with live progress log
 
@@ -271,8 +320,8 @@ All UI strings, tray messages, and update dialogs are fully translated.
 | OS | Distro / Version | Notes |
 |----|-----------------|-------|
 | **Linux** | Arch · Manjaro · EndeavourOS · Garuda · CachyOS | pacman + AUR |
-| **Linux** | Ubuntu · Debian · Pop!_OS · Mint · Kali | apt |
-| **Linux** | Fedora · CentOS · Rocky · AlmaLinux | dnf |
+| **Linux** | Ubuntu · Debian · Pop!_OS · Mint · Kali · Parrot | apt |
+| **Linux** | Fedora · CentOS · Rocky · AlmaLinux · Nobara | dnf |
 | **Linux** | openSUSE Leap / Tumbleweed | zypper |
 | **Linux** | Void Linux | xbps |
 | **Windows** | Windows 10 (1903+) | Full support |
@@ -294,27 +343,6 @@ All UI strings, tray messages, and update dialogs are fully translated.
 > ⚠️ **Taskbar pin note:** Right-clicking the running app and choosing "Pin to taskbar" pins the `.exe` directly — this bypasses the Auto-Admin task and UAC will reappear. Use the **Desktop or Start Menu shortcut** instead. This is a Windows limitation also seen in MSI Afterburner and Rufus.
 
 ---
-
-## 🆚 How CyberClean Compares
-
-| | CyberClean | BleachBit | CCleaner | Stacer | Process Lasso |
-|--|:-:|:-:|:-:|:-:|:-:|
-| **Disk cleaner** | ✅ | ✅ | ✅ | ✅ | ❌ |
-| **Security scanner** | ✅ | ❌ | ❌ | Partial | ❌ |
-| **Game Mode / CPU jail** | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **Eco Mode (cgroups v2 / EcoQoS)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Smart Boost (tier detection)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Timer resolution 1ms** | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **TCP Nagle disable (game latency)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **PSI memory pressure monitor** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Linux + Windows** | ✅ | ✅ | ❌ | Linux only | ❌ |
-| **Open source** | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **No telemetry** | ✅ | ✅ | ❌ | ✅ | — |
-| **In-app auto-update** | ✅ | ❌ | ✅ | ❌ | ✅ |
-| **11-language i18n** | ✅ | Partial | ✅ | Partial | ❌ |
-
----
-
 ## 🔧 Build from source
 
 **Requirements:** Python 3.10+ · PyQt6 · psutil · PyInstaller
@@ -343,10 +371,10 @@ CyberClean/
 ├── main.py                 # Main GUI (PyQt6) — QPainter-drawn icons, no SVG deps
 ├── version.py              # Single source of truth for version number
 ├── core/
-│   ├── base_cleaner.py     # Abstract cleaner interface
+│   ├── base_cleaner.py     # Abstract cleaner interface + shared helpers
 │   ├── linux_cleaner.py    # Linux clean targets — 3-layer smart guard
-│   ├── windows_cleaner.py  # Windows clean targets — lock-probe guard
-│   ├── scanner.py          # Security scanner + network process mapper
+│   ├── windows_cleaner.py  # Windows clean targets — lock-probe + WinSxS + Font Cache
+│   ├── scanner.py          # Security scanner — threat scoring engine + watchlist + hash cache
 │   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost / PSI monitor
 │   ├── analyzer.py         # Idle scheduler · Network connection view
 │   ├── uninstaller.py      # App uninstaller (registry / package manager)

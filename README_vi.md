@@ -10,7 +10,7 @@
 ```
 
 **Công cụ Dọn dẹp & Tối ưu Hiệu năng Hệ thống**
-**Windows · Linux · Đa nền tảng · v2.2.4**
+**Windows · Linux · Đa nền tảng · v2.2.9**
 
 <br/>
 
@@ -94,12 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Trình cài đặt
 
-**[⬇ Tải CyberClean Setup v2.2.4 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
-
-> UAC chỉ yêu cầu lần **đầu cài đặt** · Không có service chạy nền · Gỡ qua `Cài đặt → Ứng dụng → CyberClean`
-
-> 💡 **Mẹo:** Luôn mở CyberClean từ **shortcut Desktop hoặc Start Menu** để tránh UAC. Ghim app đang chạy vào Taskbar sẽ bỏ qua rule Auto-Admin và UAC sẽ xuất hiện lại ở lần mở tiếp theo — đây là giới hạn của Windows, cũng xảy ra với MSI Afterburner và Rufus.
-
+**[⬇ Tải CyberClean Setup v2.2.9 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 ---
 
 ## ✨ Tính năng
@@ -123,33 +118,47 @@ Theo dõi hệ thống trực tiếp, tự động làm mới mỗi 4 giây.
 
 Dọn dẹp đĩa an toàn, có thể hoàn tác với chế độ xem trước dry-run trước khi thực hiện bất kỳ thay đổi nào. Mỗi lần xóa đều được ghi log để hoàn tác thủ công. Mỗi mục tiêu được gắn nhãn **An toàn / Cẩn thận / Nguy hiểm**.
 
-| Mục tiêu | Linux | Windows |
-|----------|:-----:|:-------:|
-| Cache trình quản lý gói (pacman / apt / dnf / zypper) | ✅ | — |
-| Gói mồ côi | ✅ | — |
-| Cache build AUR (yay / paru) | ✅ | — |
-| Runtime Flatpak không dùng | ✅ | — |
-| Ảnh Docker / Podman rác | ✅ | — |
-| Log systemd journal (>7 ngày) | ✅ | — |
-| Cache người dùng `~/.cache` — bảo vệ 3 lớp | ✅ | — |
-| Cache trình duyệt (Chrome / Chromium / Firefox / Edge / Brave / Opera) | ✅ | ✅ |
-| Cache thumbnail | ✅ | ✅ |
-| Cache pip wheel | ✅ | — |
-| File tạm (>3 ngày, không đang dùng) | ✅ | — |
-| Windows Temp & `%TEMP%` — bảo vệ lock-probe | — | ✅ |
-| Cache Prefetch (không dùng >7 ngày) | — | ✅ |
-| Thùng rác | — | ✅ |
-| Cache Windows Update | — | ✅ |
-| Cache Delivery Optimization | — | ✅ |
-| Database cache thumbnail | — | ✅ |
-| Xóa DNS cache | — | ✅ |
-| Log sự kiện (wevtutil) | — | ✅ |
-| Báo cáo lỗi & crash dump Windows | — | ✅ |
+#### Mục tiêu Linux
 
-**Hệ thống bảo vệ thông minh (v2.2.4):**
-- **Bảo vệ cache Linux 3 lớp** — whitelist tên → phát hiện loại socket/FIFO → kiểm tra hoạt động gần đây. Các wallpaper daemon, compositor và công cụ IPC không rõ tên được tự động bảo vệ mà không cần cập nhật tên.
-- **Bảo vệ temp Windows lock-probe** — kiểm tra từng file bằng exclusive open trước khi xóa. File bị khóa (đang được tiến trình dùng) bị bỏ qua im lặng thay vì gây lỗi dây chuyền.
-- **Tích hợp send2trash** — file xóa đi vào Thùng rác hệ thống thay vì xóa vĩnh viễn khi có thể, mọi phiên dọn đều hoàn toàn có thể khôi phục.
+| Mục tiêu | Ghi chú |
+|----------|---------|
+| Cache trình quản lý gói (pacman / apt / dnf / zypper / xbps) | Chỉ giữ lại phiên bản mới nhất |
+| Gói mồ côi | pacman / xbps |
+| Cache build AUR (yay / paru) | `~/.cache/yay` và `~/.cache/paru` |
+| Runtime Flatpak không dùng | Yêu cầu Flatpak ≥ 1.9.0 cho dry-run |
+| Ảnh Docker / Podman rác & container đã dừng | Tự phát hiện podman hoặc docker |
+| Snap phiên bản cũ | Chỉ xóa bản bị vô hiệu hóa — giữ bản hiện tại |
+| Log systemd journal (> 7 ngày) | `journalctl --vacuum-time=7d` |
+| Cache người dùng `~/.cache` — bảo vệ 3 lớp | Xem chi tiết bên dưới |
+| Cache trình duyệt — Chrome / Chromium / Firefox / Brave / Opera | Tất cả profile (Default + Profile N) |
+| Cache thumbnail | `~/.cache/thumbnails` |
+| Cache pip wheel | `~/.cache/pip` |
+| File tạm (> 3 ngày, không đang dùng) | Bỏ qua symlink, socket, FIFO |
+
+#### Mục tiêu Windows
+
+| Mục tiêu | Ghi chú |
+|----------|---------|
+| Windows Temp & `%TEMP%` — bảo vệ lock-probe | File cũ hơn 24 giờ, bỏ qua file bị khóa |
+| Cache Prefetch (> 7 ngày không dùng) | File `.pf` |
+| Thùng rác | Tất cả mục |
+| Cache Windows Update | `SoftwareDistribution\Download` |
+| Cache Delivery Optimization | Cache update P2P |
+| Database cache thumbnail | `thumbcache_*.db` — tự rebuild |
+| Font Cache | `FontCache*.dat` — dừng service trước khi xóa, khởi động lại sau |
+| Cache GPU Shader | DirectX / shader cache theo user — rebuild lần chạy tiếp theo |
+| Dọn WinSxS | DISM `/StartComponentCleanup` — chỉ xóa component lỗi thời, không đụng component đang dùng |
+| Xóa DNS cache | `ipconfig /flushdns` |
+| Log sự kiện | `wevtutil cl` tất cả channel |
+| Báo cáo lỗi & crash dump Windows | `%LOCALAPPDATA%\Microsoft\Windows\WER` |
+| Cache trình duyệt — Chrome / Edge / Brave / Firefox / Vivaldi / Cốc Cốc | Tất cả profile (Default + Profile N) |
+
+**Hệ thống bảo vệ thông minh:**
+- **Bảo vệ cache Linux 3 lớp** — whitelist tên → phát hiện loại socket/FIFO/thiết bị → kiểm tra hoạt động gần đây (< 30 giây). Wallpaper daemon, compositor và công cụ IPC không rõ tên đều được bảo vệ tự động mà không cần cập nhật danh sách.
+- **Bảo vệ temp Windows lock-probe** — kiểm tra từng file bằng exclusive open trước khi xóa. File đang bị khóa bởi tiến trình khác sẽ bị bỏ qua im lặng.
+- **Bảo vệ WinSxS** — ước tính qua `DISM /AnalyzeComponentStore`, dọn qua `DISM /StartComponentCleanup`. CyberClean không bao giờ xóa trực tiếp vào WinSxS.
+- **Bảo vệ service Font Cache** — dừng service `FontCache` trước khi xóa, khởi động lại sau. Không có bước này file sẽ bị khóa và xóa thất bại im lặng.
+- **Tích hợp send2trash** — file xóa vào Thùng rác hệ thống thay vì xóa vĩnh viễn, mọi phiên dọn đều có thể khôi phục hoàn toàn.
 
 ---
 
@@ -161,7 +170,7 @@ Tối ưu hiệu năng không làm crash hay đơ máy. Mọi tính năng đều
 |-----------|:-----:|:-------:|
 | **Giải phóng RAM** — compact bộ nhớ không xóa page cache | ✅ | ✅ |
 | **Tinh chỉnh bộ nhớ** — swappiness / dirty_ratio / vm params | ✅ | — |
-| **Tinh chỉnh bộ nhớ (Windows)** — SetProcessWorkingSetSizeEx giải phóng trang RAM nhàn rỗi | — | ✅ |
+| **Tinh chỉnh bộ nhớ (Windows)** — `SetProcessWorkingSetSizeEx` giải phóng trang RAM nhàn rỗi | — | ✅ |
 | **Diệt Bloat** — tiến trình zombie + RAM cao nhàn rỗi (ngưỡng OOM động theo RAM) | ✅ | ✅ |
 | **Xóa Cache GPU / Shader** — mesa, NVIDIA, Chrome, Edge + Flatpak / Snap | ✅ | ✅ |
 | **🎮 Chế độ Game** — CPU jail 3 tầng theo hoạt động + governor hiệu năng | ✅ | ✅ |
@@ -169,8 +178,8 @@ Tối ưu hiệu năng không làm crash hay đơ máy. Mọi tính năng đều
 | **⚡ Smart Boost** — tự phát hiện tier máy (Cao / Trung / Thấp) có tính VRAM GPU | ✅ | ✅ |
 | **Monitor PSI Memory** — theo dõi áp lực RAM kernel Linux, tự diệt bloat khi tăng đột biến | ✅ | — |
 | **Timer Resolution 1ms** — tick scheduler 1ms (mặc định 15.6ms) cho frame mượt hơn | — | ✅ |
-| **Tắt TCP Nagle** — TcpAckFrequency + TCPNoDelay giảm độ trễ game online | — | ✅ |
-| **Boost ưu tiên tiến trình Game** — game foreground được ABOVE_NORMAL_PRIORITY_CLASS | — | ✅ |
+| **Tắt TCP Nagle** — `TcpAckFrequency` + `TCPNoDelay` giảm độ trễ game online | — | ✅ |
+| **Boost ưu tiên tiến trình Game** — game foreground được `ABOVE_NORMAL_PRIORITY_CLASS` | — | ✅ |
 | **Tắt hiệu ứng trong suốt Windows** — tự động trên máy low-end để tiết kiệm tài nguyên | — | ✅ |
 | **Tích hợp Feral GameMode** — nhường CPU governor cho `gamemoded` nếu đang chạy | ✅ | — |
 
@@ -192,27 +201,64 @@ Phân loại máy dựa trên RAM, số nhân vật lý **và VRAM GPU** (qua Li
 
 | Tier | Tiêu chí | Chiến lược |
 |------|----------|-----------|
-| **CAO** | >16 GB RAM + >6 nhân, hoặc >8 GB + VRAM ≥ 6 GB | Chỉ Game Mode |
-| **TRUNG** | >8 GB RAM + >4 nhân, hoặc >4 GB + VRAM ≥ 6 GB | Game Mode + Eco Mode |
+| **CAO** | > 16 GB RAM + > 6 nhân, hoặc > 8 GB + VRAM ≥ 6 GB | Chỉ Game Mode |
+| **TRUNG** | > 8 GB RAM + > 4 nhân, hoặc > 4 GB + VRAM ≥ 6 GB | Game Mode + Eco Mode |
 | **THẤP** | Còn lại | Game Mode + Eco Mode + Giải phóng RAM + Tắt transparency |
 
 ---
 
-### 🔍 Quét Bảo mật
+### 🔍 Quét Bảo mật — Threat Scoring Engine
 
 Quét chỉ đọc — không tự động xóa gì. Bạn quyết định sửa cái gì.
 
-- **Tiến trình đang chạy** — phát hiện crypto miner, reverse shell, tiến trình chạy từ `/tmp`
-- **Kết nối mạng ra ngoài** — map kết nối TCP đã thiết lập đến tiến trình chủ sở hữu, gắn cờ cổng đáng ngờ (4444, 1337, 31337 và cổng RAT phổ biến), file thực thi từ thư mục temp
+#### Cách hoạt động — Ma trận tính điểm mối đe dọa
+
+Mỗi tiến trình đi qua 5 bước thay vì bị gắn cờ ngay từ một quy tắc duy nhất:
+
+1. **Thu thập bằng chứng** — đường dẫn exe, cmdline, CPU%, kết nối TCP đã thiết lập
+2. **Bypass whitelist** — Chromium gpu-process, AppImage mount, PyInstaller bundle, Docker, whitelist user tùy chỉnh đều được miễn
+3. **Tính điểm mối đe dọa** — ma trận cộng/trừ đa chiều (bên dưới)
+4. **Watchlist** — điểm 40–69 → lưu vào `watchlist.json`, kiểm tra lại mỗi 5 phút
+5. **Phán quyết** — < 40 bỏ qua, 40–69 cảnh báo, ≥ 70 nguy hiểm + đề nghị kill
+
+| Điểm | Lý do |
+|:----:|-------|
+| +60 | Tên tiến trình crypto miner đã biết |
+| +50 | Tên tiến trình hệ thống giả mạo (VD: `svchost.exe` không ở System32) |
+| +40 | File thực thi trong `/tmp`, `/dev/shm`, `%TEMP%` (không phải AppImage/PyInstaller) |
+| +40 | Mẫu cmdline: reverse shell, `curl\|bash`, `base64 eval`, `LD_PRELOAD` |
+| +35 | Cổng C2 / miner / RAT đã biết (4444, 1337, 31337, 3333, …) |
+| +30 | CPU > 80% liên tục (hành vi miner) |
+| +20 | Cổng ephemeral cao > 49151 + không phải localhost |
+| +20 | Nhiều kết nối ra ngoài từ cùng 1 tiến trình (hành vi botnet) |
+| −15 | Python / Node / Java / Ruby runtime interpreter |
+| −20 | Exe trong `/usr`, `/bin`, `/opt`, `Program Files` |
+| −30 | Windows: chữ ký số hợp lệ |
+| −40 | AppImage mount `/tmp/.mount_*` |
+| −40 | PyInstaller bundle `/tmp/_MEI*` |
+| −50 | Đường dẫn khớp `user_whitelist.json` |
+
+#### Trí nhớ bền vững
+
+- **Watchlist** (`watchlist.json`) — tiến trình điểm 40–69 được theo dõi với timestamp + điểm + lý do. Tự leo cấp lên nguy hiểm nếu điểm tăng khi kiểm tra lại.
+- **Whitelist người dùng** (`user_whitelist.json`) — click "Mark as safe" trên false positive. Được −50 điểm trong tất cả lần quét tiếp theo. Dạy scanner hiểu môi trường cụ thể của bạn.
+- **Hash cache** (`exe_hash_cache.json`) — SHA-256 của mỗi binary sau lần quét đầu. Lần sau chỉ quét lại binary đã thay đổi — nhanh hơn ~3 lần. Phát hiện binary bị vá/thay thế giữa các lần quét.
+
+#### Những gì được quét
+
+- **Tiến trình đang chạy** — crypto miner, reverse shell, tiến trình chạy từ `/tmp` / thư mục temp
+- **Kết nối mạng ra ngoài** — map kết nối TCP đến tiến trình chủ sở hữu, gắn cờ cổng đáng ngờ
 - **File SUID/SGID** — gắn cờ file setuid nằm ngoài whitelist an toàn
 - **File hệ thống world-writable** — `/etc`, `/usr/local/bin`, `/usr/bin`
-- **Cửa hậu cron** — quét tất cả thư mục cron + crontab người dùng tìm mẫu shell injection
+- **Cửa hậu cron** — tất cả thư mục cron + crontab người dùng tìm mẫu shell injection
 - **File đáng ngờ** — `.sh/.py/.ps1/.bat/.vbs` trong thư mục temp/người dùng với mẫu độc hại
 - **LD_PRELOAD hijack** — kiểm tra `/etc/ld.so.preload` và biến môi trường `$LD_PRELOAD`
 - **SSH authorized_keys** — gắn cờ key forced-command và định dạng key không nhận ra
-- **Giả mạo file hosts** — phát hiện redirect các domain uy tín (Google, GitHub, PayPal...)
-- **Autorun Windows** — khóa registry HKCU/HKLM Run với từ khóa đáng ngờ (powershell -enc, mshta, wscript...)
+- **Giả mạo file hosts** — phát hiện redirect các domain uy tín (Google, GitHub, PayPal, …)
+- **Autorun Windows** — khóa registry HKCU/HKLM Run với từ khóa đáng ngờ (`powershell -enc`, `mshta`, `wscript`, …)
 - **Sửa một chạm** — strip SUID, chmod world-writable, xóa file đáng ngờ, tất cả qua helper có phạm vi
+
+> **Giới hạn thực tế:** CyberClean không thể phát hiện rootkit Ring-0, UEFI implant hay exploit kernel driver — những thứ này hoạt động bên dưới Python/psutil. Thứ CyberClean làm tốt: miner, script trong `/tmp`, cửa hậu cron, hijack hosts, tiến trình từ thư mục temp — những mối đe dọa phổ biến và thực tế nhất.
 
 ---
 
@@ -270,8 +316,8 @@ Tất cả chuỗi UI, thông báo tray và hộp thoại cập nhật đều đ
 | Hệ điều hành | Bản phân phối / Phiên bản | Ghi chú |
 |--------------|--------------------------|---------|
 | **Linux** | Arch · Manjaro · EndeavourOS · Garuda · CachyOS | pacman + AUR |
-| **Linux** | Ubuntu · Debian · Pop!_OS · Mint · Kali | apt |
-| **Linux** | Fedora · CentOS · Rocky · AlmaLinux | dnf |
+| **Linux** | Ubuntu · Debian · Pop!_OS · Mint · Kali · Parrot | apt |
+| **Linux** | Fedora · CentOS · Rocky · AlmaLinux · Nobara | dnf |
 | **Linux** | openSUSE Leap / Tumbleweed | zypper |
 | **Linux** | Void Linux | xbps |
 | **Windows** | Windows 10 (1903+) | Hỗ trợ đầy đủ |
@@ -291,26 +337,6 @@ Tất cả chuỗi UI, thông báo tray và hộp thoại cập nhật đều đ
 - **atexit + SIGTERM cleanup** — trạng thái cgroup và nice() được khôi phục ngay cả khi app crash giữa chừng
 
 > ⚠️ **Lưu ý ghim Taskbar:** Click chuột phải vào app đang chạy và chọn "Pin to taskbar" ghim trực tiếp file `.exe` — cách này bỏ qua task Auto-Admin và UAC sẽ xuất hiện lại. Dùng **shortcut Desktop hoặc Start Menu** thay vào đó. Đây là giới hạn của Windows, cũng xảy ra với MSI Afterburner và Rufus.
-
----
-
-## 🆚 So sánh CyberClean với đối thủ
-
-| | CyberClean | BleachBit | CCleaner | Stacer | Process Lasso |
-|--|:-:|:-:|:-:|:-:|:-:|
-| **Dọn dẹp đĩa** | ✅ | ✅ | ✅ | ✅ | ❌ |
-| **Quét bảo mật** | ✅ | ❌ | ❌ | Một phần | ❌ |
-| **Game Mode / CPU jail** | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **Eco Mode (cgroups v2 / EcoQoS)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Smart Boost (phát hiện tier)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Timer resolution 1ms** | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **Tắt TCP Nagle (độ trễ game)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Monitor PSI memory** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Linux + Windows** | ✅ | ✅ | ❌ | Chỉ Linux | ❌ |
-| **Mã nguồn mở** | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **Không telemetry** | ✅ | ✅ | ❌ | ✅ | — |
-| **Tự cập nhật trong app** | ✅ | ❌ | ✅ | ❌ | ✅ |
-| **i18n 11 ngôn ngữ** | ✅ | Một phần | ✅ | Một phần | ❌ |
 
 ---
 
@@ -342,10 +368,10 @@ CyberClean/
 ├── main.py                 # GUI chính (PyQt6) — icon QPainter-drawn, không cần SVG
 ├── version.py              # Nguồn sự thật duy nhất cho số phiên bản
 ├── core/
-│   ├── base_cleaner.py     # Interface cleaner trừu tượng
+│   ├── base_cleaner.py     # Interface cleaner trừu tượng + helper dùng chung
 │   ├── linux_cleaner.py    # Mục tiêu dọn Linux — bảo vệ 3 lớp thông minh
-│   ├── windows_cleaner.py  # Mục tiêu dọn Windows — bảo vệ lock-probe
-│   ├── scanner.py          # Quét bảo mật + mapper kết nối mạng
+│   ├── windows_cleaner.py  # Mục tiêu dọn Windows — lock-probe + WinSxS + Font Cache
+│   ├── scanner.py          # Quét bảo mật — threat scoring engine + watchlist + hash cache
 │   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost / PSI monitor
 │   ├── analyzer.py         # Lập lịch idle · Xem kết nối mạng
 │   ├── uninstaller.py      # Gỡ ứng dụng (registry / trình quản lý gói)
