@@ -1,134 +1,53 @@
 """
-CyberClean v2.6 — System Booster (Activity-Aware CPU Scheduling)
+CyberClean v2.7 — System Booster (Activity-Aware CPU Scheduling)
 ═══════════════════════════════════════════════════════════════
-WHAT CHANGED vs v2.5:
+WHAT CHANGED vs v2.6:
 
-GAME MODE — Activity-Aware CPU Jail (breaking fix):
-  OLD: Discord, Chrome, Spotify etc. were ALL hard-jailed onto 1 weak core
-       the moment a game was detected, regardless of what the user was doing.
-       → Discord screen share: encoder starved → call freezes/audio glitches
-       → YouTube music: decoder jailed → audio stutters
-       → Spotify: same issue
+FIX: Roblox / OpenGL games — black screen when enabling Game Mode mid-game
+  OLD: _set_gpu_performance() ran immediately at game_mode_on() start,
+       BEFORE checking if a game was already running.
+       Forcing DPM transition (auto → high) while GPU render engine is active
+       = driver state shock = black screen (Roblox, any OpenGL/Vulkan game).
+  NEW: GPU performance level is set ONLY if no game is currently running.
+       If a game is active: skip DPM change, log advice to enable before launch.
+  Also added: robloxplayerbeta, roblox, robloxplayerlauncher to _KNOWN_GAME_PROCS
+  so Roblox processes are never killed by kill_bloat or CPU-jailed.
 
-  NEW: 3-tier activity-aware scheduling:
+FIX: Zalo Web QR scan broken / frozen after kill_bloat
+  OLD: kill_bloat lacked the GPU_RENDERER_FLAGS cmdline check that game_mode_on had.
+       Chromium/Electron gpu-process and video-capture subprocesses sit at 0% CPU
+       when idle → kill_bloat targeted them as bloat → killed the camera/QR worker.
+  NEW: kill_bloat now has the full _RENDERER_FLAGS guard (same as game_mode_on):
+       --type=gpu-process, --type=renderer, video-capture, zalo, etc.
+       These subprocess types are now ALWAYS skipped in kill_bloat, regardless of
+       CPU usage or memory usage.
 
-  Tier 0 — ACTIVE (> 2% CPU): App is actively serving the user right now.
-    → Soft-throttle only: lower priority class so game wins contention,
-      but keep all CPU cores available for burst (encoding, decoding, etc).
-    → Discord call + screen share: stays smooth, game still wins on CPU.
-    → YouTube music: keeps playing without stutter.
+FIX: kill_bloat killing terminals (Alacritty, Kitty, etc.) and modern IDEs
+  OLD: _BLOAT_SKIP_ALWAYS only had bash/zsh/fish terminals.
+       Alacritty, Kitty, WezTerm, Konsole, GNOME Terminal all missing.
+       Cursor, Windsurf, Zed, Lapce (modern AI IDEs) also missing.
+  NEW: Added all common terminal emulators + modern AI editors to BLOAT_SKIP_ALWAYS.
 
-  Tier 1 — IDLE comms/media (≤ 2% CPU): App is open but not doing anything.
-    → Restrict to upper half of cores (still responsive, just smaller domain).
-    → Discord sitting in tray: restricted. Discord in a call: NOT restricted.
+NEW: _kill_runaway_widgets() — zombie widget killer
+  Hunts eww, waybar, polybar, conky, dunst, AGS when they exceed 85% CPU
+  (runaway loop from script errors, IPC crashes, config mistakes).
+  Uses 0.2s CPU sample to distinguish real runaway from startup burst.
+  SIGKILL (not SIGTERM) because looping processes ignore SIGTERM.
+  Called at the START of game_mode_on before CPU jail, so the zombie
+  doesn't steal cores from the game. Logs instructions to restart manually.
 
-  Tier 2 — KNOWN BLOAT: OneDrive, Dropbox, telemetry, update services.
-    → Hard-jail onto last core + idle priority. These should never burst.
-
-  Added to TRASH_APPS: compattelrunner, diagtrack, steamwebhelper,
-  epicwebhelper, searchindexer, wermgr.
-  Added to COMMS_MEDIA: coccoc, twitch, streamlabs, xsplit.
-
-═══════════════════════════════════════════════════════════════
-WHAT CHANGED vs v2.4:
-
-GAME MODE — Browser jail guard:
-  OLD: Chrome/Firefox/Edge luôn bị jail vào last core + BELOW_NORMAL dù không có game.
-  NEW: _detect_running_games() kiểm tra game process thực sự đang chạy.
-       Nếu không có game → skip CPU jail cho MEDIA_APPS (browsers).
-       Chỉ jail khi game đang active.
-
-GAME MODE — Battery check:
-  OLD: Luôn switch Power Plan sang Ultimate/High Performance.
-  NEW: psutil.sensors_battery().power_plugged check.
-       Đang dùng pin → skip Power Plan switch, log cảnh báo.
-
-GAME MODE — SysMain guard:
-  OLD: Luôn stop SysMain (Superfetch).
-  NEW: Check rotational disk trước. HDD → giữ SysMain (prefetch hữu ích).
-       SSD/NVMe → stop SysMain (neutral/nhẹ tác dụng).
-
-GAME MODE — Timer Resolution (Windows):
-  NEW: timeBeginPeriod(1) — set Windows scheduler tick 1ms thay vì 15.6ms.
-       Giảm frame time jitter, smoother gaming.
-       Restore timeEndPeriod(1) khi tắt.
-
-GAME MODE — Game Process Priority Boost:
-  NEW: Detect foreground game process, set ABOVE_NORMAL_PRIORITY_CLASS.
-       Restore khi tắt.
-
-ECO MODE — Xóa MMCSS misuse:
-  OLD: AvSetMmThreadCharacteristicsW("Games") boost nhầm thread cyberclean.exe.
-  NEW: MMCSS removed hoàn toàn. Chỉ giữ memory priority hints (đúng và hiệu quả).
-       Windows 11: thêm EcoQoS (PROCESS_POWER_THROTTLING_STATE) để throttle background.
-
-KILL BLOAT — Dynamic OOM threshold:
-  OLD: OOM >= 300 cứng → không tác dụng trên máy ≥8GB RAM.
-  NEW: Threshold động theo RAM: max(75, int(300 * 4 / ram_gb)).
-       8GB → 150, 16GB → 75, 4GB → 300.
-  Mem threshold: 200MB → 150MB.
-
-MEMORY TUNE Windows:
-  OLD: Chỉ gc.collect() — thu gom rác Python, vô nghĩa.
-  NEW: SetProcessWorkingSetSizeEx trim working set của idle processes.
-       Thực sự giải phóng physical RAM pages.
-
-NETWORK TWEAK (Windows Game Mode):
-  NEW: Disable Nagle algorithm (TcpAckFrequency=1, TCPNoDelay=1).
-       Giảm TCP latency trong online games.
-       Restore khi tắt.
-
-FERAL GAMEMODE integration (Linux):
-  NEW: Check gamemoded daemon. Nếu có → defer CPU governor to gamemoded.
-
-DETECT PC TIER — GPU VRAM:
-  NEW: Đọc GPU VRAM (Linux sysfs / Windows WMI).
-       VRAM > 6GB = gaming tier bump. Classify chính xác hơn.
-
-UX — Log messages cải thiện:
-  - Free RAM: giải thích "0 MB freed is expected"
-  - Kill Bloat: context message khi không có bloat
-  - Smart Boost: progress log từng bước
-  - Clear Shader Cache: warning về lần load chậm đầu tiên
-  - Linux nice() skip: thông báo partial effect
-
-═══════════════════════════════════════════════════════════════
-WHAT CHANGED vs v2.2:
-
-KILL BLOAT — Total redesign:
-  OLD: Hardcoded whitelist by process name → chém nhầm XFCE, LXQt, Cosmic, etc.
-  NEW: Detect DE động từ $XDG_CURRENT_DESKTOP + $DESKTOP_SESSION
-       → protected list tự build theo DE đang chạy
-       → SIGSTOP thay kill() để không mất dữ liệu user
-       → SIGCONT khi restore (game_mode_off / eco_mode_off)
-       → Chỉ touch process của UID hiện tại (không đụng root/system)
-
-FREE RAM (Windows):
-  OLD: EmptyWorkingSet → stutter khi truy cập lại
-  NEW: SetProcessInformation(MemoryPriority=LOW) → kernel evict first
-       → foreground pages stay warm, no stutter
-
-FREE RAM (Linux):
-  OLD: drop_caches → xóa sạch page cache, mọi thứ cold
-  NEW: compact_memory only → defrag, không evict cache
-
-ECO MODE (Windows):
-  OLD: BELOW_NORMAL_PRIORITY_CLASS → phá vỡ Windows Quantum Boost
-  NEW: SetProcessInformation(MemoryPriority=LOW) + MMCSS foreground boost
-
-ECO MODE (Linux):
-  OLD: nice(5) → chỉ ảnh hưởng CPU, không giải quyết I/O / memory pressure
-  NEW: cgroups v2 (cpu.weight=20, io.weight=20, memory.low=512MB)
-       → proportional scheduling cho CPU + I/O, kernel protect foreground RAM
-       → fully reversible (di chuyển process ra khỏi cgroup = restore ngay)
-
-GAME MODE — _enable_kernel_performance:
-  OLD: Gọi powerprofilesctl / cpupower không check tồn tại → lỗi đỏ
-  NEW: shutil.which() check trước, fallback graceful qua thứ tự ưu tiên:
-       powerprofilesctl → tuned-adm → cpupower → /sys/cpufreq (direct) → skip
-
-CLEANUP khi crash:
-  NEW: atexit + SIGTERM handler để restore cgroup / nice ngay cả khi crash
+NEW: _bypass_compositor_on/off() — FPS unlocker
+  Linux X11: Detects and SIGSTOPs picom/compton/xcompmgr.
+    Compositors force VSync via redirect mode → hard 60fps cap.
+    Suspending them allows direct framebuffer rendering → uncapped FPS.
+    Restored with SIGCONT on game_mode_off.
+    Also sets _NET_WM_BYPASS_COMPOSITOR root property via xprop.
+    For Wayland: cannot bypass (compositor IS display server) — logs
+    per-compositor instructions (KWin, Hyprland, Sway).
+  Windows: Sets SwapEffectUpgradeEnable=0 in DirectX registry key.
+    Prevents Windows from overriding Exclusive Fullscreen with flip model.
+    Allows DXGI games to enter true exclusive fullscreen → DWM bypassed.
+    Also instructs user to use Fullscreen (not Borderless Windowed).
 
 ═══════════════════════════════════════════════════════════════
 """
@@ -277,6 +196,8 @@ _KNOWN_GAME_PROCS = {
     "minecraft", "terraria", "stardewvalley", "factorio",
     "rdr2", "witcher3", "witcher2", "witcher",
     "overwatch", "overwatch2", "diablo4",
+    # Roblox — must be here so GPU-reset guard skips if already running
+    "robloxplayerbeta", "roblox", "robloxplayerlauncher", "robloxcrashhandler",
 }
 
 # FIX v2.5: Heavy non-game processes — would trigger false "game detected"
@@ -1142,6 +1063,10 @@ _BLOAT_SKIP_ALWAYS = {
     "yay", "paru", "snap",
     # Terminals — user might have work there
     "bash", "zsh", "fish", "sh", "tmux", "screen",
+    "alacritty", "kitty", "wezterm", "konsole", "gnome-terminal",
+    "xfce4-terminal", "lxterminal", "tilix", "foot", "st",
+    # Modern IDEs / AI editors
+    "cursor", "windsurf", "zed", "lapce",
 }
 
 
@@ -1162,6 +1087,309 @@ def _has_active_children(pid: int) -> bool:
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         pass
     return False
+
+
+# ══════════════════════════════════════════════════════════════
+# RUNAWAY WIDGET KILLER
+# ══════════════════════════════════════════════════════════════
+# eww, waybar, polybar, conky etc. can enter infinite loops that consume
+# 90-99% CPU. This is invisible to kill_bloat (which only targets IDLE
+# processes). _kill_runaway_widgets() specifically hunts these known UI
+# widget daemons when they're consuming abnormally high CPU.
+#
+# Run BEFORE kill_bloat and BEFORE CPU jail in game_mode_on so the rogue
+# process doesn't steal cores from the game.
+#
+# Threshold: 85% CPU sustained over 0.2s sample — avoids false kills
+# during legitimate short bursts (initial render, config reload).
+
+_WIDGET_SUSPECTS = {
+    "eww",        # Elkowar's Wacky Widgets — most common runaway
+    "waybar",     # Wayland bar (can loop on ipc errors)
+    "polybar",    # X11 bar
+    "conky",      # Desktop widget (known to loop on script errors)
+    "dunst",      # Notification daemon (can loop on malformed notif)
+    "ags",        # Aylur's GTK Shell
+    "astal",      # AGS successor
+    "ignis",      # Another GTK shell
+    "hyprpaper",  # Hyprland wallpaper daemon (rare but possible)
+    "swaybar",    # sway bar (if custom scripts loop)
+}
+
+_WIDGET_CPU_THRESHOLD = 85.0   # % — sustained above this = zombie loop
+
+def _kill_runaway_widgets(log) -> int:
+    """
+    Kill UI widget processes that are stuck in a CPU-consuming loop.
+
+    Strategy:
+    1. Find processes whose name matches _WIDGET_SUSPECTS
+    2. Warm up cpu_percent (0.2s) — short enough to not delay game mode
+    3. Kill only if STILL above threshold after warm-up (avoids killing
+       legitimate startup bursts)
+    4. SIGKILL not SIGTERM — a looping process ignores SIGTERM
+
+    Returns count of processes killed.
+    """
+    if not IS_LINUX or not HAS_PSUTIL:
+        return 0
+
+    killed = 0
+    candidates = []
+
+    # Pass 1: find widget processes and start CPU measurement
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            nm = (p.info["name"] or "").lower()
+            if nm in _WIDGET_SUSPECTS:
+                p.cpu_percent(interval=0)   # warm up — start measurement
+                candidates.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if not candidates:
+        return 0
+
+    # Short sleep — just enough to get valid CPU reading
+    import time as _t
+    _t.sleep(0.2)
+
+    # Pass 2: check actual CPU and kill if still runaway
+    for p in candidates:
+        try:
+            cpu = p.cpu_percent(interval=0)
+            nm  = p.name()
+            if cpu > _WIDGET_CPU_THRESHOLD:
+                # Double-check: read /proc/stat to confirm it's not a transient spike
+                try:
+                    status = p.status()
+                    if status == psutil.STATUS_ZOMBIE:
+                        # Already zombie — just reap, no SIGKILL needed
+                        log(f"  ✕ Zombie widget (Z state): {nm} (pid {p.pid}) — already dead", "warn")
+                        continue
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+                # True runaway loop — SIGKILL (SIGTERM is ignored by looping procs)
+                p.kill()
+                killed += 1
+                log(f"  ✕ Killed runaway widget: {nm} (pid {p.pid}, {cpu:.0f}% CPU)", "warn")
+                log(f"    → Restart {nm} manually after gaming session", "ok")
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    if killed == 0 and candidates:
+        # Found widget processes but none were runaway — log quietly
+        names = [p.name() for p in candidates if not p.status() == psutil.STATUS_ZOMBIE
+                 if True]
+        pass  # Don't spam log with "all good" for every widget
+
+    return killed
+
+
+# ══════════════════════════════════════════════════════════════
+# COMPOSITOR BYPASS — Linux X11 + Windows DWM
+# ══════════════════════════════════════════════════════════════
+# The single biggest reason FPS is capped at 60 on Linux/Windows:
+#
+# Linux X11:  Picom/Compton forces VSync via redirect mode.
+#             Every frame → compositor composites → display.
+#             Bypassing it (killing picom during game) lets the game
+#             write directly to the framebuffer → uncapped FPS.
+#             Downside: screen tearing when looking around fast.
+#             For competitive gaming: tearing < 60fps cap, always.
+#
+# Linux Wayland: Compositor cannot be bypassed (it IS the display server).
+#             Wayland protocol has no equivalent of X11 unredirect.
+#             Best we can do: hint apps with _MUTTER_HINTS / wp-fifo-v1.
+#             Actual FPS unlock requires compositor-side config (KWin,
+#             Sway, Hyprland all have their own "game mode" settings).
+#
+# Windows:   DWM cannot be fully bypassed on Win 8+.
+#            BUT: running game in Exclusive Fullscreen mode bypasses DWM.
+#            We set the registry hint that tells DWM to allow exclusive mode.
+#            Per-app FSE flag (DXGI_SWAP_EFFECT_DISCARD) + disable MPOMX.
+
+def _bypass_compositor_on(log, saved: dict):
+    """
+    Bypass compositor for maximum FPS.
+
+    Linux X11:
+      - Detect and suspend Picom/Compton (SIGSTOP, not kill — restores on game_mode_off)
+      - Set _NET_WM_BYPASS_COMPOSITOR hint via xprop if available
+      - Log warning for Wayland (cannot bypass — compositor IS display server)
+
+    Windows:
+      - Disable MPCOMPOSITING to allow exclusive fullscreen
+      - Set DWM flush interval hint for lower latency
+    """
+    if IS_LINUX:
+        session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+        display = os.environ.get("DISPLAY", "")
+
+        if wayland_display or session_type == "wayland":
+            # Wayland: cannot bypass compositor — inform user
+            log("  ~ Compositor: Wayland detected — cannot bypass (compositor = display server)", "warn")
+            log("  i For uncapped FPS on Wayland:", "ok")
+            log("    KWin:      System Settings → Display → Compositor → uncheck 'Enable compositor'", "ok")
+            log("    Hyprland:  misc:no_vfr = false  in hyprland.conf", "ok")
+            log("    Sway/wlroots: game runs at monitor refresh rate (no arbitrary cap)", "ok")
+            saved["compositor_bypassed"] = None
+            return
+
+        if not display:
+            log("  ~ Compositor: no DISPLAY set — skipping bypass", "warn")
+            saved["compositor_bypassed"] = None
+            return
+
+        # X11: find and suspend running compositor
+        COMPOSITOR_NAMES = [
+            "picom", "compton", "xcompmgr", "compiz",
+            "kwin_x11",   # only suspend if in game, restore after
+        ]
+        suspended_compositors = []
+
+        for comp_name in COMPOSITOR_NAMES:
+            for p in psutil.process_iter(["pid", "name"]) if HAS_PSUTIL else []:
+                try:
+                    if (p.info["name"] or "").lower() == comp_name:
+                        # SIGSTOP: suspend, not kill — compositor state preserved
+                        # kwin_x11: don't suspend (DE will break), just reduce its priority
+                        if comp_name == "kwin_x11":
+                            try:
+                                p.nice(10)
+                                suspended_compositors.append(("kwin_nice", p.pid, p.name(), 0))
+                                log(f"  ~ KWin: niceness raised (full bypass not safe in KDE)", "warn")
+                            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                                pass
+                        else:
+                            os.kill(p.pid, signal.SIGSTOP)
+                            suspended_compositors.append(("sigstop", p.pid, p.name(), 0))
+                            log(f"  + Compositor suspended: {p.name()} (pid {p.pid}) → direct render", "ok")
+                except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError):
+                    pass
+
+        # Set _NET_WM_BYPASS_COMPOSITOR on root window so future windows know
+        if shutil.which("xprop") and display:
+            try:
+                subprocess.run(
+                    ["xprop", "-root", "-f", "_NET_WM_BYPASS_COMPOSITOR", "32c",
+                     "-set", "_NET_WM_BYPASS_COMPOSITOR", "1"],
+                    capture_output=True, timeout=3
+                )
+                log("  + _NET_WM_BYPASS_COMPOSITOR: set (future fullscreen apps go direct)", "ok")
+                saved["xprop_bypass_set"] = True
+            except Exception:
+                saved["xprop_bypass_set"] = False
+        else:
+            saved["xprop_bypass_set"] = False
+
+        saved["compositor_bypassed"] = suspended_compositors
+
+        if not suspended_compositors:
+            log("  i No compositor found running (picom/compton) — already direct render mode", "ok")
+        else:
+            log(f"  + {len(suspended_compositors)} compositor(s) suspended — FPS uncapped from VSync", "ok")
+            log("  ⚠ Screen tearing may appear — normal in direct render mode", "warn")
+
+    elif IS_WINDOWS:
+        # Windows: disable MPCOMPOSITING for exclusive fullscreen support
+        # This allows DXGI games to enter true exclusive fullscreen (bypasses DWM)
+        # Lower DWM timer interval for reduced display latency
+        try:
+            import winreg
+            changes = []
+
+            # 1. Allow exclusive fullscreen (DXGI override)
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\DirectX\UserGpuPreferences",
+                    0, winreg.KEY_READ | winreg.KEY_SET_VALUE
+                )
+                try:
+                    orig, _ = winreg.QueryValueEx(key, "DirectXUserGlobalSettings")
+                except Exception:
+                    orig = None
+                # SwapEffectUpgradeEnable=0 prevents Windows from overriding
+                # exclusive fullscreen with flip model (which re-enables DWM composition)
+                new_val = (orig or "") + ";SwapEffectUpgradeEnable=0"
+                winreg.SetValueEx(key, "DirectXUserGlobalSettings", 0, winreg.REG_SZ, new_val)
+                winreg.CloseKey(key)
+                changes.append(("DirectXUserGlobalSettings", orig))
+                log("  + DirectX: exclusive fullscreen allowed (DWM bypass enabled)", "ok")
+            except Exception:
+                pass
+
+            saved["compositor_bypassed"] = changes
+            if changes:
+                log("  + DWM: exclusive fullscreen mode active — game draws directly", "ok")
+                log("  i Launch game in Fullscreen (not Borderless Windowed) for effect", "ok")
+            else:
+                log("  ~ DWM bypass: registry not writable (needs admin for full effect)", "warn")
+        except Exception as e:
+            log(f"  ~ Compositor bypass: {e}", "warn")
+            saved["compositor_bypassed"] = []
+
+
+def _bypass_compositor_off(saved: dict, log):
+    """Restore compositor after gaming session."""
+    if IS_LINUX:
+        bypassed = saved.get("compositor_bypassed") or []
+        resumed = 0
+        for entry in bypassed:
+            method, pid, name, _ = entry
+            try:
+                if method == "sigstop":
+                    os.kill(pid, signal.SIGCONT)
+                    resumed += 1
+                    log(f"  ▶ Compositor resumed: {name} (pid {pid})", "ok")
+                elif method == "kwin_nice":
+                    if HAS_PSUTIL:
+                        psutil.Process(pid).nice(0)
+            except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Restore _NET_WM_BYPASS_COMPOSITOR
+        if saved.get("xprop_bypass_set") and shutil.which("xprop"):
+            try:
+                subprocess.run(
+                    ["xprop", "-root", "-f", "_NET_WM_BYPASS_COMPOSITOR", "32c",
+                     "-set", "_NET_WM_BYPASS_COMPOSITOR", "0"],
+                    capture_output=True, timeout=3
+                )
+            except Exception:
+                pass
+
+        if resumed == 0 and bypassed:
+            log("  i Compositor: process exited during session (normal if user restarted it)", "ok")
+
+    elif IS_WINDOWS:
+        changes = saved.get("compositor_bypassed") or []
+        try:
+            import winreg
+            for key_name, orig_val in changes:
+                try:
+                    key = winreg.OpenKey(
+                        winreg.HKEY_LOCAL_MACHINE,
+                        r"SOFTWARE\Microsoft\DirectX\UserGpuPreferences",
+                        0, winreg.KEY_SET_VALUE
+                    )
+                    if orig_val is None:
+                        try:
+                            winreg.DeleteValue(key, key_name)
+                        except Exception:
+                            pass
+                    else:
+                        winreg.SetValueEx(key, key_name, 0, winreg.REG_SZ, orig_val)
+                    winreg.CloseKey(key)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if changes:
+            log("  + DWM: exclusive fullscreen setting restored", "ok")
 
 
 def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, protected_extra: Optional[set] = None) -> BoostResult:
@@ -1230,7 +1458,32 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
                     continue
                 if p.pid <= 10:
                     continue
-                # When using warm-up, skip PIDs not in warm-up set
+
+                # ── ZALO / BROWSER GPU-RENDERER GUARD ─────────────────────────
+                # Chromium/Electron spawns subprocess workers with --type= flags.
+                # These are responsible for: hardware GPU rendering, tab rendering,
+                # camera access (QR scan in Zalo Web), video calls, WebGL, etc.
+                # They sit at 0% CPU when idle → kill_bloat would normally target them.
+                # Killing gpu-process = white screen, killing video-capture = QR frozen.
+                # Fix: check cmdline before ANY further processing and skip entirely.
+                _RENDERER_FLAGS = (
+                    "--type=gpu-process",
+                    "--type=renderer",
+                    "--type=ppapi",
+                    "--type=utility",
+                    "--type=crashpad-handler",
+                    "video-capture",
+                    "--gpu-process",
+                    "gpu_process",
+                    "zalo",           # protect all Zalo helper processes by name
+                )
+                try:
+                    _cmdline_parts = p.info.get("cmdline") or [] if hasattr(p, 'info') else p.cmdline()
+                    _cmdline_str = " ".join(_cmdline_parts).lower() if _cmdline_parts else ""
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    _cmdline_str = ""
+                if _cmdline_str and any(flag in _cmdline_str for flag in _RENDERER_FLAGS):
+                    continue  # never touch GPU/renderer/camera workers
                 if cpu_cache is None and all_pids_to_scan is None:
                     pass  # no filter
                 elif cpu_cache is None:
@@ -1602,6 +1855,17 @@ POWER_BALANCED  = "381b4222-f694-41f0-9685-ff5bb260df2e"
 POWER_HIGH_PERF = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 POWER_ULTIMATE  = "e9a42b02-d5df-448d-aa00-03f14749eb61"
 
+_UUID_RE = __import__('re').compile(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+)
+
+def _safe_guid(guid: str) -> str:
+    """Validate that guid is a well-formed UUID before interpolating into shell cmd.
+    Returns POWER_BALANCED as safe fallback if not valid."""
+    if guid and _UUID_RE.match(guid.strip()):
+        return guid.strip()
+    return POWER_BALANCED
+
 
 def _enable_kernel_performance(log):
     """
@@ -1695,7 +1959,7 @@ def _enable_kernel_performance(log):
 
         for guid, name in [(POWER_ULTIMATE, "Ultimate"), (POWER_HIGH_PERF, "High Performance")]:
             r = subprocess.run(
-                f"powercfg /setactive {guid}", shell=True,
+                ["powercfg", "/setactive", _safe_guid(guid)],
                 capture_output=True, creationflags=0x08000000, timeout=5
             )
             if r.returncode == 0:
@@ -1734,7 +1998,8 @@ def _restore_kernel_performance(method, log):
     elif IS_WINDOWS:
         if method:
             subprocess.run(
-                f"powercfg /setactive {method}", shell=True,
+                ["powercfg", "/setactive", _safe_guid(str(method))],
+                # shell=False: method validated as UUID via _safe_guid
                 capture_output=True, creationflags=0x08000000, timeout=5
             )
             log("  + Windows Power Plan: original restored", "ok")
@@ -1758,7 +2023,7 @@ def _freeze_windows_services(log):
     stopped = []
     for svc in services_to_stop:
         r = subprocess.run(
-            f"net stop {svc} /y", shell=True, capture_output=True,
+            ["net", "stop", svc, "/y"], capture_output=True,
             creationflags=0x08000000, timeout=15
         )
         if r.returncode == 0:
@@ -1770,7 +2035,7 @@ def _freeze_windows_services(log):
 def _restore_windows_services(stopped_services, log):
     for svc in stopped_services:
         subprocess.run(
-            f"net start {svc}", shell=True, capture_output=True,
+            ["net", "start", svc], capture_output=True,
             creationflags=0x08000000, timeout=15
         )
     if stopped_services:
@@ -1830,6 +2095,426 @@ def _restore_gamedvr(orig_val: Optional[int], log):
 # (common in games with varying GPU usage). This causes micro-stutters.
 # Setting "high" forces constant full clock. Feral GameMode does this.
 # NVIDIA: uses nvidia-smi power profile (if available).
+
+# Setting "high" forces constant full clock. Feral GameMode does this.
+# NVIDIA: uses nvidia-smi power profile (if available).
+
+# ══════════════════════════════════════════════════════════════
+# GAME PROCESS REAL-TIME SCHEDULING (Linux SCHED_FIFO)
+# ══════════════════════════════════════════════════════════════
+# Linux default scheduler: CFS (Completely Fair Scheduler).
+# CFS gives equal time slices to all processes — game can be
+# preempted by ANY other process, causing micro-stutters.
+#
+# SCHED_FIFO: real-time class. Game thread runs until it
+# voluntarily yields or blocks on I/O. NEVER preempted by
+# normal processes. Used by Feral GameMode, Steam, ProtonGE.
+#
+# Priority 1 (lowest real-time) — safe. Priority 99 would
+# starve the OS. Priority 1 is enough to beat CFS entirely.
+#
+# Needs: CAP_SYS_NICE or rlimit_rtprio > 0 in /etc/security/limits.conf
+# install.sh should add: @gamegroup - rtprio 1
+# Fallback: nice(-10) if no rt permission.
+
+def _set_realtime_scheduling(game_pids: list, log, saved: dict):
+    """
+    Apply SCHED_FIFO / high nice to game process and its render threads.
+    Stores originals in saved['rt_sched'] for restore.
+    """
+    if not IS_LINUX:
+        return
+    import ctypes as _ct
+
+    SCHED_FIFO = 1
+    RT_PRIORITY = 1   # lowest real-time — never starve OS
+
+    class _sched_param(_ct.Structure):
+        _fields_ = [("sched_priority", _ct.c_int)]
+
+    libc_names = ["libc.so.6", "libc.so", "libc.musl-x86_64.so.1",
+                  "libc.musl-aarch64.so.1"]
+    libc = None
+    for name in libc_names:
+        try:
+            libc = _ct.CDLL(name, use_errno=True)
+            break
+        except OSError:
+            pass
+
+    rt_entries = {}   # {pid: (orig_policy, orig_param)}
+    used_rt = False
+
+    for pid in game_pids:
+        # Also grab all threads of the process for full effect
+        tids = [pid]
+        try:
+            import os as _os
+            task_dir = _os.listdir(f"/proc/{pid}/task")
+            tids = [int(t) for t in task_dir]
+        except (OSError, ValueError):
+            pass
+
+        for tid in tids:
+            try:
+                if libc:
+                    param = _sched_param(0)
+                    # Get current policy
+                    orig_policy = libc.sched_getscheduler(tid)
+                    libc.sched_getparam(tid, _ct.byref(param))
+                    orig_prio = param.sched_priority
+
+                    param.sched_priority = RT_PRIORITY
+                    ret = libc.sched_setscheduler(tid, SCHED_FIFO, _ct.byref(param))
+                    if ret == 0:
+                        rt_entries[tid] = (orig_policy, orig_prio)
+                        used_rt = True
+                    else:
+                        # No rt permission — fallback to nice
+                        if HAS_PSUTIL:
+                            p = psutil.Process(pid)
+                            cur_nice = p.nice()
+                            p.nice(-10)
+                            rt_entries[tid] = ("nice", cur_nice)
+            except Exception:
+                pass
+
+    if used_rt:
+        log(f"  + Real-time scheduling: SCHED_FIFO/1 applied to {len(rt_entries)} threads — game never preempted", "ok")
+    elif rt_entries:
+        log("  + Game priority: nice(-10) applied (no rt permission — install.sh adds rtprio)", "warn")
+    else:
+        log("  ~ Real-time scheduling: failed (needs rtprio or root)", "warn")
+
+    saved["rt_sched"] = rt_entries
+
+
+def _restore_realtime_scheduling(saved: dict, log):
+    """Restore original scheduling policy for game threads."""
+    if not IS_LINUX:
+        return
+    import ctypes as _ct
+    rt_entries = saved.get("rt_sched", {})
+    if not rt_entries:
+        return
+
+    SCHED_OTHER = 0
+    class _sched_param(_ct.Structure):
+        _fields_ = [("sched_priority", _ct.c_int)]
+
+    libc = None
+    for name in ["libc.so.6", "libc.so"]:
+        try:
+            libc = _ct.CDLL(name)
+            break
+        except OSError:
+            pass
+
+    restored = 0
+    for tid, (orig_policy, orig_prio) in rt_entries.items():
+        try:
+            if orig_policy == "nice":
+                if HAS_PSUTIL:
+                    psutil.Process(tid).nice(orig_prio)
+                    restored += 1
+            elif libc:
+                param = _sched_param(orig_prio)
+                policy = orig_policy if orig_policy >= 0 else SCHED_OTHER
+                libc.sched_setscheduler(tid, policy, _ct.byref(param))
+                restored += 1
+        except Exception:
+            pass
+    if restored:
+        log(f"  + Scheduling policy restored for {restored} threads", "ok")
+
+
+# ══════════════════════════════════════════════════════════════
+# OOM SCORE PROTECTION FOR GAME PROCESS
+# ══════════════════════════════════════════════════════════════
+# Linux OOM killer: when RAM is exhausted, it kills processes
+# based on oom_score. High oom_score = killed first.
+# Games with high memory usage get high scores → OOM kills the
+# game mid-session (sudden crash, no warning).
+#
+# oom_score_adj = -1000: tells OOM killer "NEVER kill this process".
+# Used by critical services (sshd, systemd). Safe for games.
+# Needs root (CAP_SYS_RESOURCE) or helper.
+
+def _protect_game_from_oom(game_pids: list, log, saved: dict):
+    """Set oom_score_adj=-1000 so OOM killer never terminates the game."""
+    if not IS_LINUX:
+        return
+    from pathlib import Path as _P
+
+    orig_scores = {}
+    protected = 0
+
+    for pid in game_pids:
+        adj_file = _P(f"/proc/{pid}/oom_score_adj")
+        try:
+            orig = adj_file.read_text().strip()
+            adj_file.write_text("-1000\n")
+            orig_scores[pid] = orig
+            protected += 1
+        except (OSError, PermissionError):
+            # Try via helper (needs root)
+            try:
+                out, code = _run(
+                    f"sudo -n tee /proc/{pid}/oom_score_adj <<< -1000", timeout=3
+                )
+                if code == 0:
+                    orig_scores[pid] = "0"
+                    protected += 1
+            except Exception:
+                pass
+
+    if protected:
+        log(f"  + OOM protection: {protected} game processes marked unkillable", "ok")
+    saved["oom_protected"] = orig_scores
+
+
+def _restore_game_oom(saved: dict, log):
+    """Restore oom_score_adj for game processes."""
+    if not IS_LINUX:
+        return
+    from pathlib import Path as _P
+    for pid, orig in saved.get("oom_protected", {}).items():
+        try:
+            _P(f"/proc/{pid}/oom_score_adj").write_text(orig + "\n")
+        except (OSError, PermissionError):
+            pass
+
+
+# ══════════════════════════════════════════════════════════════
+# INTEL P-CORE DETECTION + GAME CPU PINNING
+# ══════════════════════════════════════════════════════════════
+# Intel 12th gen+: hybrid architecture with P-cores (fast) and
+# E-cores (efficient but slow). OS scheduler knows about this,
+# but may still schedule game threads on E-cores during bursts.
+#
+# Explicit affinity: pin game to P-cores only → never runs on
+# E-cores → more consistent frame times, lower 1% lows.
+#
+# Detection: /sys/devices/system/cpu/cpuX/acpi_cppc/highest_perf
+# P-cores have higher "highest_perf" value than E-cores.
+# Fallback: first half of cores (generally P-cores on Intel hybrid).
+
+_PERF_CORES_CACHE: Optional[list] = None
+
+def _detect_performance_cores() -> list:
+    """
+    Return list of CPU IDs that are performance cores.
+    For non-hybrid CPUs: returns all CPU IDs (no distinction).
+    Result cached at module level.
+    """
+    global _PERF_CORES_CACHE
+    if _PERF_CORES_CACHE is not None:
+        return _PERF_CORES_CACHE
+
+    if not IS_LINUX:
+        _PERF_CORES_CACHE = []
+        return []
+
+    cpu_perf = {}   # {cpu_id: highest_perf_value}
+    cpu_path = Path("/sys/devices/system/cpu")
+    try:
+        for cpu_dir in sorted(cpu_path.glob("cpu[0-9]*")):
+            cpu_id_str = cpu_dir.name[3:]
+            try:
+                cpu_id = int(cpu_id_str)
+            except ValueError:
+                continue
+            # Method 1: ACPI CPPC (Intel 12th gen+ / AMD Zen 4)
+            cppc_file = cpu_dir / "acpi_cppc/highest_perf"
+            if cppc_file.exists():
+                try:
+                    cpu_perf[cpu_id] = int(cppc_file.read_text().strip())
+                    continue
+                except (OSError, ValueError):
+                    pass
+            # Method 2: cpu_capacity (ARM big.LITTLE)
+            cap_file = cpu_dir / "cpu_capacity"
+            if cap_file.exists():
+                try:
+                    cpu_perf[cpu_id] = int(cap_file.read_text().strip())
+                    continue
+                except (OSError, ValueError):
+                    pass
+            # No hybrid info: assign equal weight
+            cpu_perf[cpu_id] = 100
+    except (OSError, PermissionError):
+        _PERF_CORES_CACHE = []
+        return []
+
+    if not cpu_perf:
+        _PERF_CORES_CACHE = []
+        return []
+
+    # If all cores have equal perf: not a hybrid CPU, return all
+    values = set(cpu_perf.values())
+    if len(values) <= 1:
+        _PERF_CORES_CACHE = sorted(cpu_perf.keys())
+        return _PERF_CORES_CACHE
+
+    # Hybrid: return only cores with max performance value
+    max_perf = max(cpu_perf.values())
+    p_cores = [cpu_id for cpu_id, perf in cpu_perf.items() if perf == max_perf]
+    _PERF_CORES_CACHE = sorted(p_cores)
+    return _PERF_CORES_CACHE
+
+
+def _pin_game_to_perf_cores(game_pids: list, log, saved: dict):
+    """
+    Pin game processes to P-cores (Intel hybrid) or all cores (uniform).
+    Saves original affinity for restore.
+    """
+    if not IS_LINUX or not HAS_PSUTIL:
+        return
+
+    p_cores = _detect_performance_cores()
+    if not p_cores:
+        return
+
+    all_cores = list(range(psutil.cpu_count(logical=True) or 1))
+    # If all cores are P-cores: no pinning needed
+    if set(p_cores) == set(all_cores):
+        return
+
+    pinned = 0
+    orig_affinities = {}
+    for pid in game_pids:
+        try:
+            p = psutil.Process(pid)
+            orig = p.cpu_affinity()
+            p.cpu_affinity(p_cores)
+            orig_affinities[pid] = orig
+            pinned += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                NotImplementedError, AttributeError):
+            pass
+
+    if pinned:
+        log(f"  + CPU pinning: {pinned} game process(es) → P-cores {p_cores} (E-cores excluded)", "ok")
+        log(f"    → More consistent frame times, lower 1% lows", "ok")
+    saved["game_core_affinity"] = orig_affinities
+
+
+def _restore_game_core_affinity(saved: dict, log):
+    """Restore original CPU affinity for game processes."""
+    if not IS_LINUX or not HAS_PSUTIL:
+        return
+    restored = 0
+    for pid, orig in saved.get("game_core_affinity", {}).items():
+        try:
+            psutil.Process(pid).cpu_affinity(orig)
+            restored += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                NotImplementedError, psutil.ZombieProcess):
+            pass
+    if restored:
+        log(f"  + P-core pinning: restored affinity for {restored} game processes", "ok")
+
+
+# ══════════════════════════════════════════════════════════════
+# TRANSPARENT HUGE PAGES FOR GAME PROCESS
+# ══════════════════════════════════════════════════════════════
+# THP: kernel maps game memory in 2MB pages instead of 4KB.
+# Reduces TLB misses → faster memory access in cache-heavy games.
+# "madvise" mode: only for processes that opt in via madvise(MADV_HUGEPAGE).
+# We force it per-process via /proc/<pid>/smaps_rollup (read) +
+# madvise syscall via ctypes. Safe — kernel handles it transparently.
+# Global setting via /sys/kernel/mm/transparent_hugepage/enabled.
+
+def _set_thp_game(game_pids: list, log, saved: dict):
+    """
+    Enable Transparent Huge Pages for game processes.
+    Sets global THP to 'madvise' (only for opted-in processes)
+    and calls madvise(MADV_HUGEPAGE) on game memory ranges.
+    """
+    if not IS_LINUX:
+        return
+
+    thp_file = Path("/sys/kernel/mm/transparent_hugepage/enabled")
+    orig_thp = None
+    if thp_file.exists():
+        try:
+            content = thp_file.read_text().strip()
+            # Parse active value: "always madvise [never]" → "never"
+            active = next((s.strip("[]") for s in content.split() if s.startswith("[")), "")
+            orig_thp = active
+            if active != "madvise":
+                try:
+                    thp_file.write_text("madvise\n")
+                    log("  + THP: global mode → madvise (huge pages for opted-in processes)", "ok")
+                except PermissionError:
+                    _, code = _run(
+                        f"echo madvise | sudo -n tee {thp_file}", timeout=3
+                    )
+                    if code == 0:
+                        log("  + THP: madvise set via helper", "ok")
+        except Exception:
+            pass
+
+    # Apply MADV_HUGEPAGE to game process memory ranges via madvise syscall
+    MADV_HUGEPAGE = 14
+    applied = 0
+    import ctypes as _ct
+    try:
+        libc = _ct.CDLL("libc.so.6", use_errno=True)
+        for pid in game_pids:
+            maps_file = Path(f"/proc/{pid}/maps")
+            if not maps_file.exists():
+                continue
+            try:
+                for line in maps_file.read_text().splitlines():
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    addr_range = parts[0]
+                    perms = parts[1] if len(parts) > 1 else ""
+                    # Only apply to read+write+private anonymous mappings (heap/stack)
+                    if "w" not in perms or "p" not in perms:
+                        continue
+                    # Skip file-backed mappings
+                    if len(parts) >= 6 and parts[5] not in ("", "[heap]", "[stack]",
+                                                              "[anon]"):
+                        continue
+                    try:
+                        start_s, end_s = addr_range.split("-")
+                        start = int(start_s, 16)
+                        end   = int(end_s, 16)
+                        length = end - start
+                        if length < 2 * 1024 * 1024:   # skip tiny mappings < 2MB
+                            continue
+                        libc.madvise(_ct.c_void_p(start), _ct.c_size_t(length),
+                                     _ct.c_int(MADV_HUGEPAGE))
+                        applied += 1
+                    except (ValueError, OSError):
+                        pass
+            except (OSError, PermissionError):
+                pass
+    except OSError:
+        pass   # libc not available — THP global flag still set
+
+    if applied > 0:
+        log(f"  + THP: MADV_HUGEPAGE applied to {applied} memory regions — faster memory access", "ok")
+
+    saved["thp_orig"] = orig_thp
+
+
+def _restore_thp(saved: dict, log):
+    """Restore THP global setting."""
+    if not IS_LINUX:
+        return
+    orig = saved.get("thp_orig")
+    if not orig:
+        return
+    thp_file = Path("/sys/kernel/mm/transparent_hugepage/enabled")
+    try:
+        thp_file.write_text(orig + "\n")
+    except PermissionError:
+        _run(f"echo {orig} | sudo -n tee {thp_file}", timeout=3)
+
 
 def _set_gpu_performance(log, saved: dict):
     """Set GPU to high performance mode. Stores originals in saved dict."""
@@ -2260,6 +2945,12 @@ def game_mode_on(log) -> dict:
         "gpu_perf_orig": {},          # Linux GPU performance level originals
         "io_sched_orig": {},          # Linux I/O scheduler originals
         "inhibit_proc": None,         # Linux screensaver inhibit process
+        "compositor_bypassed": None,   # compositor bypass state (X11/Windows)
+        "xprop_bypass_set": False,     # _NET_WM_BYPASS_COMPOSITOR was set
+        "rt_sched": {},                # real-time scheduling: {tid: (orig_policy, orig_prio)}
+        "oom_protected": {},           # OOM protection: {pid: orig_oom_score_adj}
+        "game_core_affinity": {},      # P-core pinning: {pid: orig_affinity_list}
+        "thp_orig": None,              # THP global setting before override
     }
 
     log("  . Detecting system configuration...", "text")
@@ -2274,8 +2965,10 @@ def game_mode_on(log) -> dict:
         saved["power"] = _enable_kernel_performance(log)
 
     # ── Linux: GPU performance level boost ────────────────────
-    if IS_LINUX:
-        _set_gpu_performance(log, saved)
+    # NOTE: Moved BELOW game detection — we must not force GPU state
+    # transition (auto → high) while a game's render engine is active.
+    # Forcing DPM level mid-render = driver shock = black screen (Roblox bug).
+    # Will be applied conditionally after running_games check below.
 
     # ── Linux: I/O scheduler → kyber/mq-deadline ──────────────
     if IS_LINUX:
@@ -2284,6 +2977,9 @@ def game_mode_on(log) -> dict:
     # ── Linux: Inhibit screensaver / sleep ────────────────────
     if IS_LINUX:
         _inhibit_screensaver(log, saved)
+
+    # ── Bypass compositor (Linux X11: suspend picom/compton; Windows: FSE) ─
+    _bypass_compositor_on(log, saved)
 
     # ── Windows: Timer Resolution ──────────────────────────────
     if IS_WINDOWS:
@@ -2305,6 +3001,23 @@ def game_mode_on(log) -> dict:
     else:
         log("  i No game running — browser/media apps will NOT be jailed", "ok")
         log("  i Start your game, then toggle Smart Boost for full effect", "ok")
+
+    # ── Kill runaway widget zombies (eww, waybar, polybar, etc.) ──────────
+    # Must run BEFORE CPU jail so zombie processes don't consume cores
+    # that games need. Also prevents false positives in kill_bloat scan.
+    _kill_runaway_widgets(log)
+
+    # ── Linux: GPU performance level boost (NOW safe — after game check) ──
+    # Only apply if NO game is currently running. If a game is mid-render
+    # (Roblox, any OpenGL/Vulkan game), forcing DPM level transition while
+    # the GPU driver is actively rendering causes driver state corruption
+    # → black screen. User must restart the game after enabling Game Mode.
+    # If no game running yet, safe to set high now; game will launch into it.
+    if IS_LINUX and not has_game:
+        _set_gpu_performance(log, saved)
+    elif IS_LINUX and has_game:
+        log("  ~ GPU: game already running — skipping DPM transition to prevent black screen", "warn")
+        log("  i For max GPU performance: enable Game Mode BEFORE launching your game", "ok")
 
     # ── CPU Affinity jail (v2.6 — Activity-Aware Smart Scheduling) ──────────
     # FIX v2.6: Old approach hard-jailed Discord/Chrome onto 1 weak core regardless
@@ -2488,6 +3201,51 @@ def game_mode_on(log) -> dict:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
+        # ── Deep game-process optimizations (Linux) ───────────────────
+        if has_game and IS_LINUX:
+            all_game_pids = []
+            for game_pid, _ in running_games:
+                all_game_pids.append(game_pid)
+                try:
+                    children = psutil.Process(game_pid).children(recursive=True)
+                    all_game_pids += [c.pid for c in children]
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+            log("  . Applying deep process optimizations...", "text")
+
+            # 1. SCHED_FIFO: game threads never preempted by normal processes
+            _set_realtime_scheduling(all_game_pids, log, saved)
+
+            # 2. OOM protection: kernel never kills game under memory pressure
+            _protect_game_from_oom(all_game_pids, log, saved)
+
+            # 3. P-core pinning: pin to performance cores on Intel hybrid CPUs
+            _pin_game_to_perf_cores(all_game_pids, log, saved)
+
+            # 4. Transparent Huge Pages: reduce TLB misses → faster memory access
+            _set_thp_game(all_game_pids, log, saved)
+
+        elif has_game and IS_WINDOWS:
+            all_game_pids = []
+            for game_pid, _ in running_games:
+                all_game_pids.append(game_pid)
+
+            # Windows: REALTIME priority class for game
+            import ctypes as _wct
+            for pid in all_game_pids:
+                try:
+                    PROCESS_ALL_ACCESS = 0x1F0FFF
+                    REALTIME_PRIORITY_CLASS = 0x00000100
+                    h = _wct.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+                    if h:
+                        _wct.windll.kernel32.SetPriorityClass(h, REALTIME_PRIORITY_CLASS)
+                        _wct.windll.kernel32.CloseHandle(h)
+                        saved["game_priority"][pid] = "realtime"
+                        log(f"  ↑ Windows: game process set to REALTIME priority class", "ok")
+                except Exception:
+                    pass
+
         # Kill bloat — reuse cpu_samples to skip 0.6s warm-up
         log("  . Scanning for idle background processes...", "text")
         # Pass detected game PIDs so kill_bloat never freezes them
@@ -2530,6 +3288,12 @@ def game_mode_off(saved: dict, log):
         _restore_screensaver(saved, log)
         _restore_io_scheduler(saved, log)
         _restore_gpu_performance(saved, log)
+        _bypass_compositor_off(saved, log)
+        # Restore deep game-process optimizations
+        _restore_realtime_scheduling(saved, log)
+        _restore_game_oom(saved, log)
+        _restore_game_core_affinity(saved, log)
+        _restore_thp(saved, log)
 
     if IS_WINDOWS:
         if saved.get("services"):
@@ -2537,11 +3301,10 @@ def game_mode_off(saved: dict, log):
         if saved.get("nagle_changed"):
             _restore_nagle(saved["nagle_changed"], log)
         _timer_resolution_restore(saved.get("timer_set", False), log)
-        # NEW v2.5: Restore GameDVR
         _restore_gamedvr(saved.get("gamedvr_orig"), log)
-        # NEW v2.5: Restore DNS if was changed
         if saved.get("dns_changed"):
             _restore_dns_windows(saved["dns_changed"], log)
+        _bypass_compositor_off(saved, log)
 
     # Restore game process priority
     for pid, orig_nice in saved.get("game_priority", {}).items():

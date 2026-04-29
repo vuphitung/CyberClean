@@ -24,6 +24,11 @@ except ImportError:
 from pathlib import Path
 from datetime import datetime
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland*=false"
+# HiDPI: Qt6 handles DPI scaling natively. PassThrough = let Qt scale correctly
+# on all platforms (Windows 4K, mixed-DPI setups, Wayland HiDPI).
+# Must be set before QApplication is created.
+os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 # GIO: skip GVFS remote volume monitors — avoids noisy DBus errors when related
 # user systemd units are masked (common on minimal/Zen setups). Local disks still work.
 os.environ.setdefault("GIO_USE_VFS", "local")
@@ -36,9 +41,9 @@ os.environ.setdefault("PYTHONFAULTHANDLER", "1")
 # ── Dependency check ──────────────────────────────────────────
 _missing = []
 try:    import psutil
-except: _missing.append('psutil')
+except ImportError: _missing.append('psutil')
 try:    from PyQt6.QtWidgets import QApplication
-except: _missing.append('PyQt6')
+except ImportError: _missing.append('PyQt6')
 
 if _missing:
     print(f"[CyberClean] Missing: {', '.join(_missing)}")
@@ -50,7 +55,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFrame, QStackedWidget, QScrollArea,
     QTableWidget, QTableWidgetItem, QCheckBox, QProgressBar,
     QTextEdit, QHeaderView, QMessageBox, QSystemTrayIcon, QMenu,
-    QSizePolicy, QLineEdit, QComboBox, QFileDialog
+    QSizePolicy, QLineEdit, QComboBox, QFileDialog, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPointF, QRectF, QSize, QSettings, QUrl
 from PyQt6.QtGui import (
@@ -140,7 +145,8 @@ from ui_widgets import (
     _icon_dashboard, _icon_clean, _icon_scanner,
     _icon_uninstall, _icon_history, _icon_rollback, _icon_booster,
     # Widgets
-    SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton,
+    SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton, CyberTerminal,
+    DiskDeltaWidget,
     # UI helpers
     _btn, _lbl_section, _lbl_val, _card, _divider,
     # Workers
@@ -189,6 +195,7 @@ class CyberCleanApp(QMainWindow):
         self._settings = QSettings()
         self._pending_update_ver = ""
         self._pending_update_body = ""
+        self._startup_snapshot_logged = False   # log disk snapshot once per day
 
         self._init_palette()
         self._build_ui()
@@ -488,7 +495,7 @@ class CyberCleanApp(QMainWindow):
 
         self.disk_detail_lbl = QLabel('— / —')
         self.disk_detail_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
         )
         self.disk_detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dp_lay.addWidget(self.disk_detail_lbl)
@@ -562,6 +569,7 @@ class CyberCleanApp(QMainWindow):
         self.stack.addWidget(self._build_log())
         self.stack.addWidget(self._build_rollback())
         self.stack.addWidget(self._build_browser_turbo())
+        self.stack.addWidget(self._build_startup())
         return self.stack
 
     # ── Page header helper ───────────────────────────────────
@@ -605,6 +613,11 @@ class CyberCleanApp(QMainWindow):
         if pid == 'log':       self._load_log()
         if pid == 'rollback':  self._load_rollback()
         if pid == 'uninstall': self._load_uninstall()
+        if pid == 'startup':   self._load_startup_items()
+        if pid == 'clean' and hasattr(self, '_disk_delta') \
+                and self._snap and self._snap.disks:
+            _d = self._snap.disks[0]
+            self._disk_delta.set_before(_d.free, _d.total, _d.percent)
         if pid == 'clean' and IS_LINUX and not HAS_POLKIT_AGENT:
             self._show_polkit_warning()
 
@@ -699,7 +712,7 @@ class CyberCleanApp(QMainWindow):
         # Uptime label (small, sits under stat cards)
         self._lbl_uptime = QLabel('')
         self._lbl_uptime.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
             f'letter-spacing:1px;padding-top:2px;'
         )
         uptime_row = QVBoxLayout()
@@ -812,7 +825,9 @@ class CyberCleanApp(QMainWindow):
         self._clean_btn.clicked.connect(self._confirm_clean)
         self._all_btn.clicked.connect(self._sel_all)
         self._none_btn.clicked.connect(self._sel_none)
-        for b in [self._dry_btn, self._clean_btn, self._all_btn, self._none_btn]:
+        self._preview_btn = _btn(f"⊡  {_t('btn_preview','PREVIEW FILES')}", 'yellow', small=True)
+        self._preview_btn.clicked.connect(self._show_preview_files)
+        for b in [self._dry_btn, self._clean_btn, self._preview_btn, self._all_btn, self._none_btn]:
             ar.addWidget(b)
         ar.addStretch()
         lay.addLayout(ar)
@@ -874,7 +889,7 @@ class CyberCleanApp(QMainWindow):
             )
             dc = QLabel(_t(f'tgt_{t.id}_desc', t.desc))
             dc.setStyleSheet(
-                f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+                f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
             )
             nc.addWidget(nm); nc.addWidget(dc)
 
@@ -898,16 +913,179 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(scroll)
         lay.addSpacing(12)
 
-        # Output
-        self._lbl_clean_output_sec = _lbl_section(_t('lbl_output', 'OUTPUT LOG'))
-        lay.addWidget(self._lbl_clean_output_sec)
-        self.clean_terminal = QTextEdit()
-        self.clean_terminal.setReadOnly(True)
-        self.clean_terminal.setPlaceholderText(
-            _t('placeholder_clean', '  → Select targets and click DRY-RUN to preview...')
+        # ── Disk Delta Widget (Before → Freed → After) ───────────────────
+        self._disk_delta = DiskDeltaWidget()
+        lay.addWidget(self._disk_delta)
+
+        # ── Cyber Terminal log ────────────────────────────────────────────
+        self.clean_terminal = CyberTerminal()
+        self.clean_terminal.set_placeholder(
+            _t('placeholder_clean', '  →  Select targets and click DRY-RUN to preview...')
         )
         lay.addWidget(self.clean_terminal, 1)
         return w
+
+    # ─────────────────────────────────────────────────────────
+    # STARTUP ITEMS MANAGER
+    # ─────────────────────────────────────────────────────────
+    def _build_startup(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(26, 22, 26, 22); lay.setSpacing(0)
+        lay.addWidget(self._page_header(
+            _t('nav_startup', 'STARTUP ITEMS'),
+            _t('startup_sub', 'Enable or disable programs that run at login'),
+            store_key='startup'
+        ))
+        tb = QHBoxLayout(); tb.setSpacing(8)
+        self._startup_refresh_btn = _btn(
+            f"↻  {_t('btn_refresh','REFRESH')}", 'cyan', small=True
+        )
+        self._startup_refresh_btn.clicked.connect(self._load_startup_items)
+        self._startup_count_lbl = QLabel('')
+        self._startup_count_lbl.setStyleSheet(
+            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
+        )
+        tb.addWidget(self._startup_refresh_btn)
+        tb.addWidget(self._startup_count_lbl)
+        tb.addStretch()
+        lay.addLayout(tb)
+        lay.addSpacing(10)
+
+        self._startup_table = QTableWidget(0, 4)
+        self._startup_table.setHorizontalHeaderLabels([
+            _t('col_name','NAME'), _t('col_type','TYPE'),
+            _t('col_status','STATUS'), _t('col_toggle','TOGGLE'),
+        ])
+        hdr2 = self._startup_table.horizontalHeader()
+        hdr2.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr2.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr2.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr2.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._startup_table.verticalHeader().setVisible(False)
+        self._startup_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._startup_table.setAlternatingRowColors(True)
+        lay.addWidget(self._startup_table, 1)
+
+        info = QLabel(_t('startup_info',
+            'Changes take effect at next login. '
+            'Only disable items you recognise.'))
+        info.setStyleSheet(
+            f'color:{C["text3"]};font-size:10px;font-family:{MONO};padding-top:6px;'
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        return w
+
+    def _load_startup_items(self):
+        if not hasattr(self, '_startup_table'): return
+        import threading as _thr
+        if hasattr(self, '_startup_count_lbl'):
+            self._startup_count_lbl.setText(_t('lbl_loading', 'Loading…'))
+        def _fetch():
+            try:
+                items = get_startup_items()
+            except Exception:
+                items = []
+            QTimer.singleShot(0, lambda its=items: self._populate_startup_table(its))
+        _thr.Thread(target=_fetch, daemon=True).start()
+
+    def _populate_startup_table(self, items):
+        if not hasattr(self, '_startup_table'): return
+        t = self._startup_table
+        t.setRowCount(0)
+        for item in items:
+            row = t.rowCount(); t.insertRow(row)
+            name_i = QTableWidgetItem(item.get('name', ''))
+            name_i.setForeground(QColor(C['text']))
+            t.setItem(row, 0, name_i)
+            type_i = QTableWidgetItem(item.get('type', ''))
+            type_i.setForeground(QColor(C['text3']))
+            t.setItem(row, 1, type_i)
+            enabled  = item.get('enabled', True)
+            scol     = C['green'] if enabled else C['red']
+            stxt     = (_t('status_enabled','ENABLED') if enabled
+                        else _t('status_disabled','DISABLED'))
+            st_i = QTableWidgetItem(stxt)
+            st_i.setForeground(QColor(scol))
+            t.setItem(row, 2, st_i)
+            tog_lbl  = (f"⊘  {_t('btn_disable','DISABLE')}" if enabled
+                        else f"⊙  {_t('btn_enable','ENABLE')}")
+            tog_btn  = _btn(tog_lbl, 'red' if enabled else 'cyan', small=True)
+            _snap    = dict(item)
+            tog_btn.clicked.connect(
+                lambda _, it=_snap: self._toggle_startup_item(it)
+            )
+            t.setCellWidget(row, 3, tog_btn)
+            t.setRowHeight(row, 36)
+        if hasattr(self, '_startup_count_lbl'):
+            self._startup_count_lbl.setText(
+                f"{len(items)} {_t('startup_items_count','items')}"
+            )
+
+    def _toggle_startup_item(self, item):
+        name      = item.get('name', '')
+        itype     = item.get('type', '')
+        enabled   = item.get('enabled', True)
+        new_state = not enabled
+        try:
+            if IS_LINUX:
+                toggle_startup_linux(
+                    name=name, item_type=itype,
+                    enable=new_state, path=item.get('path', '')
+                )
+            elif IS_WINDOWS:
+                import winreg as _wr
+                key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
+                try:
+                    key = _wr.OpenKey(
+                        _wr.HKEY_CURRENT_USER, key_path, 0,
+                        _wr.KEY_SET_VALUE | _wr.KEY_READ
+                    )
+                    if new_state and item.get('path'):
+                        _wr.SetValueEx(key, name, 0, _wr.REG_SZ, item['path'])
+                    elif not new_state:
+                        try:
+                            _wr.DeleteValue(key, name)
+                        except FileNotFoundError:
+                            pass
+                    _wr.CloseKey(key)
+                except PermissionError:
+                    # HKLM requires admin — just skip silently
+                    pass
+        except Exception as e:
+            if hasattr(self, '_startup_count_lbl'):
+                self._startup_count_lbl.setText(f"  ✗  {e}")
+            return
+        QTimer.singleShot(400, self._load_startup_items)
+
+    def _log_startup_disk_snapshot(self, disk_pct: float):
+        """Log one disk-usage data point per day so the 30-day trend always has data."""
+        today = datetime.now().date().isoformat()
+        try:
+            # Skip if we already logged a snapshot today
+            if LOG_FILE.exists():
+                lines = LOG_FILE.read_text().strip().splitlines()
+                for line in reversed(lines[-20:]):
+                    try:
+                        e = json.loads(line)
+                        if (e.get('summary') == 'auto_snapshot' and
+                                e.get('time', '')[:10] == today):
+                            return   # already logged today
+                    except Exception:
+                        pass
+            entry = {
+                'time':        datetime.now().isoformat(),
+                'disk_before': round(disk_pct, 1),
+                'disk_after':  round(disk_pct, 1),
+                'freed_bytes': 0,
+                'summary':     'auto_snapshot',
+            }
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(LOG_FILE, 'a') as f:
+                f.write(json.dumps(entry) + '\n')
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────
     # REDESIGNED SCANNER
@@ -1013,7 +1191,7 @@ class CyberCleanApp(QMainWindow):
         # Network summary status bar (NEW — uses get_network_summary from analyzer v2.3)
         self._net_summary_lbl = QLabel('')
         self._net_summary_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
             f'padding:4px 0 0 0;letter-spacing:1px;'
         )
         lay.addWidget(self._net_summary_lbl)
@@ -1316,6 +1494,7 @@ class CyberCleanApp(QMainWindow):
         self._browser_log.setMaximumHeight(210)
         self._browser_log.setPlaceholderText(_t('lbl_output', 'OUTPUT'))
         outer.addWidget(self._browser_log)
+
         return w
 
     # ═══════════════════════════════════════════════════════════
@@ -1344,7 +1523,7 @@ class CyberCleanApp(QMainWindow):
         try:
             s = get_snapshot(interval=0.1)
             self._on_snapshot(s)
-        except:
+        except Exception:
             pass
         finally:
             # Mở khóa lại sau 2s (khớp với cooldown)
@@ -1416,6 +1595,10 @@ class CyberCleanApp(QMainWindow):
             d = s.disks[0]
             self.disk_ring.set_percent(d.percent)
             self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
+            # Log daily disk snapshot for the 30-day trend (first snapshot each day)
+            if not self._startup_snapshot_logged:
+                self._startup_snapshot_logged = True
+                QTimer.singleShot(500, lambda pct=d.percent: self._log_startup_disk_snapshot(pct))
 
         self.proc_table.setRowCount(0)
         for proc in s.top_cpu_procs[:6]:
@@ -1550,11 +1733,123 @@ class CyberCleanApp(QMainWindow):
         if msg.exec() == QMessageBox.StandardButton.Yes:
             self._run_clean(dry=False)
 
+    def _show_preview_files(self):
+        """Open a dialog listing files that would be deleted for selected targets."""
+        if not CLEANER or not self.selected:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(_t('preview_title', 'Preview — Files to be Deleted'))
+        dlg.resize(700, 480)
+        dlg.setStyleSheet(
+            f'background:{C["bg"]};color:{C["text"]};font-family:{MONO};'
+        )
+        vl = QVBoxLayout(dlg)
+        vl.setContentsMargins(16, 16, 16, 16); vl.setSpacing(8)
+        hdr = QLabel(f"  {_t('preview_desc', 'Files that would be deleted (up to 200 per target):')}")
+        hdr.setStyleSheet(f'color:{C["text3"]};font-size:11px;')
+        vl.addWidget(hdr)
+        te = QTextEdit(); te.setReadOnly(True)
+        te.setStyleSheet(
+            f'background:#020810;color:{C["text2"]};border:1px solid {C["border2"]};'
+            f'font-size:11px;padding:8px;'
+        )
+        vl.addWidget(te, 1)
+        total_lbl = QLabel('  Scanning…')
+        total_lbl.setStyleSheet(f'color:{C["green"]};font-size:11px;font-family:{MONO};')
+        vl.addWidget(total_lbl)
+        btn_row = QHBoxLayout(); btn_row.addStretch()
+        cb = _btn(_t('btn_close', 'CLOSE'), 'cyan', small=True)
+        cb.clicked.connect(dlg.accept)
+        btn_row.addWidget(cb)
+        vl.addLayout(btn_row)
+
+        # ── QThread + pyqtSignal — safe cross-thread UI update ──────────
+        class _PrevWorker(QThread):
+            result_ready = pyqtSignal(str, str)   # html, summary
+
+            def __init__(self, selected, cleaner):
+                super().__init__()
+                self._sel = selected
+                self._cl  = cleaner
+
+            def run(self):
+                total_b = 0; total_f = 0
+                parts   = []
+                for tid in sorted(self._sel):
+                    try:
+                        res   = self._cl.clean(tid, dry=True)
+                        label = tid.replace('_', ' ').upper()
+                        files = [(rb.get('path',''), rb.get('size',0))
+                                 for rb in res.rollback]
+                        if not files:
+                            parts.append(
+                                f'<span style="color:{C["text3"]}"><br>&nbsp;&nbsp;'
+                                f'▸ {label}: ~{fmt_size(res.freed_bytes)} '
+                                f'(file list unavailable)</span>'
+                            )
+                        else:
+                            parts.append(
+                                f'<span style="color:{C["cyan"]}"><br>&nbsp;&nbsp;'
+                                f'▸ {label}&nbsp;&nbsp;({len(files)} files, '
+                                f'{fmt_size(res.freed_bytes)})</span>'
+                            )
+                            for fpath, sz in files[:200]:
+                                safe = fpath.replace('<','&lt;').replace('>','&gt;')
+                                parts.append(
+                                    f'<span style="color:{C["text3"]}">&nbsp;&nbsp;&nbsp;&nbsp;'
+                                    f'{safe}&nbsp;'
+                                    f'<span style="color:{C["text3"]}60">({fmt_size(sz)})</span>'
+                                    f'</span><br>'
+                                )
+                            if len(files) > 200:
+                                parts.append(
+                                    f'<span style="color:{C["text3"]}">&nbsp;&nbsp;&nbsp;&nbsp;'
+                                    f'… and {len(files)-200} more</span><br>'
+                                )
+                            total_b += res.freed_bytes
+                            total_f += len(files)
+                    except Exception as ex:
+                        parts.append(
+                            f'<span style="color:{C["red"]}"><br>&nbsp;&nbsp;'
+                            f'✗ {tid}: {ex}</span>'
+                        )
+                html    = ''.join(parts) or f'<span style="color:{C["text3"]}">No files to preview.</span>'
+                summary = f"  {total_f} files  ·  ~{fmt_size(total_b)}"
+                self.result_ready.emit(html, summary)
+
+        self._prev_worker = _PrevWorker(list(self.selected), CLEANER)
+
+        def _apply(html, summary):
+            te.setHtml(html)
+            total_lbl.setText(summary)
+            total_lbl.setStyleSheet(
+                f'color:{C["green"]};font-size:11px;font-family:{MONO};'
+            )
+
+        self._prev_worker.result_ready.connect(_apply)
+        self._prev_worker.start()
+        dlg.exec()
+        # Clean up worker after dialog closes
+        if self._prev_worker.isRunning():
+            self._prev_worker.quit()
+            self._prev_worker.wait(2000)
+
     def _run_clean(self, dry=True):
         if not CLEANER or not self.selected: return
         if self.worker and self.worker.isRunning(): return
+        # Snapshot disk BEFORE for visualization
         self._disk_pct_before = self._snap.disks[0].percent if self._snap and self._snap.disks else 0
+        _disk_free_before     = self._snap.disks[0].free   if self._snap and self._snap.disks else 0
+        # Reset viz panel
+        if hasattr(self, '_disk_delta') and self._snap and self._snap.disks:
+            d = self._snap.disks[0]
+            self._disk_delta.set_before(d.free, d.total, d.percent)
+        elif hasattr(self, '_disk_delta'):
+            self._disk_delta.reset()
         self.clean_terminal.clear()
+        self.clean_terminal.set_header(
+            _t('btn_dryrun','DRY-RUN') if dry else _t('btn_clean_now','CLEAN NOW')
+        )
         self.clean_prog.setVisible(True)
         self.clean_prog_lbl.setVisible(True)
         self.worker = CleanWorker(list(self.selected), dry=dry, cleaner=CLEANER)
@@ -1566,22 +1861,32 @@ class CyberCleanApp(QMainWindow):
         self.worker.start()
 
     def _on_clean_log(self, msg, level):
-        cols = {
-            'ok': C['green'], 'dry': C['yellow'], 'err': C['red'],
-            'head': C['cyan'], 'info': C['dim'], 'warn': C['yellow']
-        }
-        col = cols.get(level, C['text'])
-        self.clean_terminal.append(f'<span style="color:{col};font-family:monospace;">{msg}</span>')
-        self.clean_terminal.moveCursor(QTextCursor.MoveOperation.End)
+        self.clean_terminal.append_log(msg, level)
 
     def _on_clean_done(self, result):
         self.clean_prog.setVisible(False)
         self.clean_prog_lbl.setVisible(False)
+        disk_after = self._disk_pct_before
+        free_after = 0
         if not result['dry']:
             try:
-                snap_after = get_snapshot(interval=0.1)
+                # Wait 1s for kernel to flush disk stats before sampling
+                import time as _time; _time.sleep(1.0)
+                snap_after = get_snapshot(interval=0.2)
                 disk_after = snap_after.disks[0].percent if snap_after.disks else self._disk_pct_before
-            except:
+                free_after = snap_after.disks[0].free   if snap_after.disks else 0
+                # Immediately update sidebar disk ring + self._snap
+                self._snap = snap_after
+                if snap_after.disks:
+                    d = snap_after.disks[0]
+                    self.disk_ring.set_percent(d.percent)
+                    self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
+                # Sync the full dashboard (disk table, health score, etc.)
+                try:
+                    self._on_snapshot(snap_after)
+                except Exception:
+                    pass
+            except Exception:
                 disk_after = self._disk_pct_before
             session = {
                 'time': datetime.now().isoformat(),
@@ -1596,6 +1901,27 @@ class CyberCleanApp(QMainWindow):
                 with open(ROLLBACK_FILE, 'a') as f:
                     for e in result['rollback']:
                         f.write(json.dumps(e) + '\n')
+
+        # ── Update AFTER viz panel ───────────────────────────────────────
+        if hasattr(self, '_disk_delta') and result['freed'] > 0:
+            if result['dry']:
+                try:
+                    disk = self._snap.disks[0] if self._snap and self._snap.disks else None
+                    if disk and disk.total > 0:
+                        est_free = disk.free + result['freed']
+                        est_pct  = max(0.0, min(100.0,
+                            (disk.total - est_free) / disk.total * 100))
+                        self._disk_delta.set_before(disk.free, disk.total, disk.percent)
+                        self._disk_delta.set_after(
+                            est_free, est_pct, result['freed'], dry=True)
+                except Exception:
+                    pass
+            elif free_after > 0:
+                disk = self._snap.disks[0] if self._snap and self._snap.disks else None
+                if disk:
+                    self._disk_delta.set_after(
+                        free_after, disk_after, result['freed'], dry=False)
+
 
     def _run_scanner(self):
         if hasattr(self, '_scan_running') and self._scan_running:
@@ -1921,7 +2247,7 @@ class CyberCleanApp(QMainWindow):
                     item = QTableWidgetItem(val)
                     if i == 3: item.setForeground(QColor(C['green']))
                     self.log_table.setItem(row, i, item)
-            except:
+            except Exception:
                 pass
 
     def _clear_log(self):
@@ -1948,7 +2274,7 @@ class CyberCleanApp(QMainWindow):
                     if i == 1: item.setForeground(QColor(C['cyan']))
                     if i == 2: item.setForeground(QColor(C['yellow']))
                     self.rollback_table.setItem(row, i, item)
-            except:
+            except Exception:
                 pass
 
     def _clear_rollback(self):
@@ -1990,9 +2316,11 @@ class CyberCleanApp(QMainWindow):
     class BoosterWorker(QThread):
         log_signal  = pyqtSignal(str, str)
         done_signal = pyqtSignal(object)
+
         def __init__(self, action_func):
             super().__init__()
             self.action_func = action_func
+
         def run(self):
             result = self.action_func(lambda msg, level='text': self.log_signal.emit(msg, level))
             self.done_signal.emit(result)
@@ -2410,7 +2738,23 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_lbl_clean_output_sec'):
             self._lbl_clean_output_sec.setText(_t('lbl_output', 'OUTPUT LOG'))
         if hasattr(self, 'clean_terminal'):
-            self.clean_terminal.setPlaceholderText(_t('placeholder_clean', '  → Select targets and click DRY-RUN to preview...'))
+            self.clean_terminal.set_placeholder(_t('placeholder_clean', '  →  Select targets and click DRY-RUN to preview...'))
+
+        # ── Clean tab — new widgets ───────────────────────────
+        if hasattr(self, '_preview_btn'):
+            self._preview_btn.setText(f"⊡  {_t('btn_preview','PREVIEW FILES')}")
+        if hasattr(self, '_disk_delta') and self._snap and self._snap.disks:
+            _d = self._snap.disks[0]
+            self._disk_delta.set_before(_d.free, _d.total, _d.percent)
+
+        # ── Startup tab ───────────────────────────────────────
+        if hasattr(self, '_startup_refresh_btn'):
+            self._startup_refresh_btn.setText(f"↻  {_t('btn_refresh','REFRESH')}")
+        if hasattr(self, '_startup_table'):
+            self._startup_table.setHorizontalHeaderLabels([
+                _t('col_name','NAME'), _t('col_type','TYPE'),
+                _t('col_status','STATUS'), _t('col_toggle','TOGGLE'),
+            ])
 
         # ── Scanner tab ───────────────────────────────────────
         if hasattr(self, '_scan_readonly_lbl'):
@@ -2599,19 +2943,19 @@ class CyberCleanApp(QMainWindow):
                 saved = getattr(self, '_game_frozen_pids', {})
                 game_mode_off(saved, lambda m, l='text': None)
                 self._game_active = False
-            except: pass
+            except Exception: pass
 
         if getattr(self, '_eco_active', False):
             try:
                 saved = getattr(self, '_eco_saved', {})
                 eco_mode_off(saved, lambda m, l='text': None)
                 self._eco_active = False
-            except: pass
+            except Exception: pass
 
         if hasattr(self, '_mem_tune_originals') and self._mem_tune_originals:
             try:
                 memory_tune_restore(self._mem_tune_originals, lambda m, l='text': None)
-            except: pass
+            except Exception: pass
 
         if hasattr(self, '_si_worker'):
             self._si_worker.stop()
@@ -2621,14 +2965,57 @@ class CyberCleanApp(QMainWindow):
             self._clock_timer.stop()
         if hasattr(self, '_auto_clean_timer'):
             self._auto_clean_timer.stop()
+        # ── Stop all running workers gracefully ─────────────────────────────
+        # CleanWorker — most critical: may be deleting files mid-operation
+        if getattr(self, 'worker', None) and self.worker.isRunning():
+            self.worker.stop()       # request graceful stop
+            self.worker.quit()       # interrupt event loop
+            if not self.worker.wait(4000):   # wait up to 4s for current target
+                self.worker.terminate()      # force kill only if stuck
+                self.worker.wait(1000)
+
+        # Scan worker
+        if getattr(self, '_scan_worker', None) and self._scan_worker.isRunning():
+            self._scan_worker.stop()
+            self._scan_worker.quit()
+            self._scan_worker.wait(2000)
+
+        # Smart boost workers
+        if getattr(self, '_smart_worker', None) and self._smart_worker.isRunning():
+            self._smart_worker.stop()
+            self._smart_worker.quit()
+            self._smart_worker.wait(2000)
+        if getattr(self, '_smart_off_worker', None) and self._smart_off_worker.isRunning():
+            self._smart_off_worker.stop()
+            self._smart_off_worker.quit()
+            self._smart_off_worker.wait(2000)
+
+        # Booster / one-click workers
+        if getattr(self, '_booster_worker', None) and self._booster_worker.isRunning():
+            self._booster_worker.quit()
+            self._booster_worker.wait(1000)
+        if getattr(self, '_oneclick_worker', None) and self._oneclick_worker.isRunning():
+            self._oneclick_worker.stop()
+            self._oneclick_worker.quit()
+            self._oneclick_worker.wait(1000)
+
+        # Uninstall worker
+        if getattr(self, '_uninstall_worker', None) and self._uninstall_worker.isRunning():
+            self._uninstall_worker.stop()
+            self._uninstall_worker.quit()
+            self._uninstall_worker.wait(1000)
+
+        # Update check thread
         if getattr(self, '_upd_check_thread', None) and self._upd_check_thread.isRunning():
             self._upd_check_thread.wait(3000)
+
+        # Auto-clean worker
         if getattr(self, '_auto_worker', None) and self._auto_worker.isRunning():
+            self._auto_worker.stop()
             self._auto_worker.quit()
             self._auto_worker.wait(1000)
 
     def _start_auto_clean(self):
-        # Bộ lập lịch thông minh: chỉ chạy khi máy RẢNH
         self._scheduler = IdleScheduler(
             min_interval_hours=6,
             cpu_threshold=20.0,
@@ -2769,6 +3156,14 @@ class CyberCleanApp(QMainWindow):
 
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
+    # HiDPI rounding policy — set before QApplication for crisp rendering on 4K
+    from PyQt6.QtCore import Qt as _Qt
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     # Set QSettings identity early so the single-instance conflict branch can
     # detect "update in progress" and avoid the kill prompt.
@@ -2814,32 +3209,31 @@ if __name__ == '__main__':
         except Exception:
             pass
 
-    # Single instance lock (Anti-Zombie)
-    if IS_LINUX:
-        import fcntl
-        _linux_lock_file = open("/tmp/cyberclean.lock", "w")
+    # ── Single-instance lock (QLockFile — cross-platform, stale-lock safe) ──
+    from PyQt6.QtCore import QLockFile
+    import tempfile as _tmp2
+    _lock_path = str(Path(_tmp2.gettempdir()) / 'CyberClean.lock')
+    _lock_file  = QLockFile(_lock_path)
+    _lock_file.setStaleLockTime(5000)   # 5s — treats stale locks as dead
+    if not _lock_file.tryLock(200):     # wait 200ms in case of brief race
+        err = QMessageBox()
+        err.setWindowTitle('CyberClean')
+        err.setIcon(QMessageBox.Icon.Warning)
+        owner_pid, owner_host, owner_app = 0, '', ''
         try:
-            fcntl.flock(_linux_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            print("CyberClean is already running.")
-            sys.exit(0)
-    else:
-        from PyQt6.QtCore import QSharedMemory
-        import sys
-        from PyQt6.QtWidgets import QMessageBox
-        _lock = QSharedMemory("CyberClean_Single_Instance_Lock")
-        if not _lock.create(1):
-            try: 
-                _lock.attach()
-                _lock.detach()
-            except: 
-                pass
-            if not _lock.create(1):
-                err = QMessageBox()
-                err.setWindowTitle('CyberClean')
-                err.setText('CyberClean is already running. Please restart your computer if stuck.')
-                err.exec()
-                sys.exit(1)
+            owner_pid, owner_host, owner_app = _lock_file.getLockInfo()
+        except Exception:
+            pass
+        msg = 'CyberClean is already running.'
+        if owner_pid:
+            msg += f'\n(PID {owner_pid} on {owner_host})'
+        msg += '\n\nIf this is wrong, delete:\n' + _lock_path
+        err.setText(msg)
+        err.setStandardButtons(QMessageBox.StandardButton.Ok)
+        err.exec()
+        sys.exit(1)
+    # Keep _lock_file alive for the process lifetime
+    app._cc_lock = _lock_file
 
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')

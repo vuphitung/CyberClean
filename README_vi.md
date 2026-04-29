@@ -10,7 +10,7 @@
 ```
 
 **Công cụ Dọn dẹp & Tối ưu Hiệu năng Hệ thống**
-**Windows · Linux · Đa nền tảng · v2.2.9**
+**Windows · Linux · Đa nền tảng · v3.0.0**
 
 <br/>
 
@@ -94,7 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Trình cài đặt
 
-**[⬇ Tải CyberClean Setup v2.2.9 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Tải CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 ---
 
 ## ✨ Tính năng

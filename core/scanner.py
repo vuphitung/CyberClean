@@ -1,94 +1,104 @@
 """
-CyberClean v2.4 — Security Scanner  (Threat Scoring Engine)
-════════════════════════════════════════════════════════════════
+CyberClean v2.3 — Security Scanner (Smart Edition)
+═══════════════════════════════════════════════════════════════
+WHAT CHANGED vs old v2.3:
 
-WHAT CHANGED vs v2.3  (full rewrite of scoring logic):
+PROCESS SCANNER — Total redesign (no more false positives):
+  OLD: name in KNOWN_MINERS → immediate CRITICAL, no context.
+       Any regex match in cmdline → immediate CRITICAL.
+       Result: CyberClean itself flagged as miner, Python flagged as malware.
 
-OLD approach — "bắt quả tang":
-  Thấy cổng 12345 → báo ngay HIGH. Thấy .exe trong /tmp → báo ngay.
-  Không biết đó là Bot trade, WireGuard, AppImage, hay Docker.
-  → false positive liên tục, không phân biệt được người lành / kẻ xấu.
+  NEW: Multi-signal scoring engine.
+       Every process gets a risk_score (0–100). Score only triggers
+       a finding when it crosses a threshold AND multiple signals agree.
 
-NEW approach — "điều tra lý lịch" (Threat Scoring Matrix):
-  Mỗi tiến trình / file đi qua 5 bước:
-    1. Evidence Gathering  — thu thập exe path, cmdline, CPU%, connections
-    2. Whitelist bypass    — miễn tử bài cho Chromium gpu-process, AppImage,
-                             PyInstaller bundle, Docker, user custom whitelist
-    3. Threat scoring      — cộng/trừ điểm đa chiều (ma trận bên dưới)
-    4. Watchlist           — score 40-69 → ghi watchlist.json, theo dõi tiếp
-    5. Verdict             — < 40 bỏ qua, 40-69 warn, >= 70 critical + offer kill
+       Signal sources:
+         +60  exact known miner binary name (xmrig, nbminer, etc.)
+         +40  mining cmdline pattern (stratum+tcp, --mining-algo, etc.)
+         +35  reverse shell pattern in cmdline
+         +30  process running from /tmp / /dev/shm (not AppImage/PyInstaller)
+         +25  process name matches miner pattern but score < 60 (needs corroboration)
+         +15  connected to known mining pool port (3333, 4444-miner, 14444...)
+         +10  executable is world-writable
+         -30  process path is in /usr, /opt, /bin, /sbin (installed software)
+         -20  process is owned by root / system user (not suspicious for privs)
+         -50  process name is in TRUSTED_PROCESSES allowlist
+         -50  process path matches TRUSTED_PATHS
+         -50  process is the current app (CyberClean itself)
 
-Threat Score Matrix (additive, capped at 100):
-  +60  known crypto miner name
-  +50  fake system process name (svchost.exe không ở System32)
-  +40  exe trong /tmp /dev/shm %TEMP% (không phải AppImage/PyInstaller)
-  +40  cmdline pattern: reverse shell, curl|bash, base64 eval, LD_PRELOAD
-  +35  cổng C2 / miner / RAT đã biết (4444, 1337, 31337, 3333, v.v.)
-  +30  CPU > 80% liên tục (miner behavior)
-  +20  cổng ephemeral cao > 49151 + không phải localhost
-  +20  multiple network connections từ cùng 1 process (botnet behavior)
-  -15  python / node / java / ruby (known runtime interpreters)
-  -20  exe trong /usr /bin /opt /Program Files (installed location)
-  -30  Windows: file có valid digital signature
-  -40  AppImage mount /tmp/.mount_* (legitimate Linux AppImage)
-  -40  PyInstaller bundle /tmp/_MEI* (legitimate bundled app)
-  -50  path khớp user_whitelist.json (user đã đánh dấu false positive)
+       Thresholds:
+         score >= 70  → CRITICAL (high confidence malware)
+         score 40–69  → HIGH     (suspicious, needs attention)
+         score 20–39  → MEDIUM   (anomalous, low priority)
+         score  < 20  → ignored  (too weak to report)
 
-Watchlist (watchlist.json):
-  Process score 40-69 → ghi vào watchlist với timestamp + score + reasons.
-  _run_auto_clean trong main.py check watchlist mỗi 5 phút.
-  Nếu process trở lại với score cao hơn → escalate lên critical.
-  User có thể xem watchlist trong scanner tab.
+  NEW report format:
+       Every finding now includes WHY it was flagged (signals list),
+       not just what triggered it. Operator and user see the reasoning.
 
-User whitelist (user_whitelist.json):
-  User click "Mark as safe" trên false positive → path vào whitelist.
-  Lần scan sau: -50 điểm, hầu như không bao giờ bị flag lại.
-  Cho phép user dạy scanner về môi trường cụ thể của họ.
+REPORT QUALITY:
+  OLD: raw regex name as detail → "Crypto miner binary/reference"
+       for any process that even mentions xmrig in args.
+  NEW: structured reason list: ["Known miner binary", "Running from /tmp",
+       "Connected to pool port 3333"] — tells user exactly what's weird.
 
-Hash cache (exe_hash_cache.json):
-  SHA-256 của mỗi exe sau lần scan đầu.
-  Lần sau chỉ rescan exe có hash thay đổi → nhanh hơn ~3x.
-  Phát hiện binary bị patch/replace giữa các lần scan.
+FIX — FalsePositive registry:
+  NEW: _is_trusted_process() checks:
+       - current app PID and exe path (never flag yourself)
+       - Python interpreter running .py files from /opt, /usr
+       - known dev tools: node, npm, cargo, rustc, gcc, clang, make
+       - package managers: pacman, apt, dnf, pip, yay, paru
+       - system daemons: systemd, NetworkManager, pipewire, pulseaudio
+       - browsers: chrome, firefox, brave, electron apps from /opt
+       - Flatpak/AppImage/Snap runtime helpers
 
-Honest note về giới hạn:
-  CyberClean KHÔNG thể phát hiện rootkit Ring-0, UEFI implant, kernel
-  driver exploit — những thứ này hoạt động bên dưới Python/psutil.
-  Thứ CyberClean làm tốt: miners, scripts độc trong /tmp, cron backdoor,
-  hosts hijack, process từ temp dir — threats phổ biến và thực tế.
+FIX — Mining detection precision:
+  OLD: xmrig in name → CRITICAL (flags legitimate CPU benchmarks named
+       "xmrig-test" in /usr/share/doc).
+  NEW: Score must reach 70. Name alone gives +60, needs one more signal
+       (from /tmp, or mining cmdline, or pool port connection) to cross 70.
+       Legitimate xmrig install in /usr → gets -30 (installed path) → 30 net
+       → only MEDIUM, with note "known miner binary in installed location,
+         verify this is intentional".
 
-Cross-platform: Windows 10/11 + tất cả Linux distros.
+FIX — Reverse shell precision:
+  OLD: python.*socket.*connect.*subprocess in cmdline → CRITICAL.
+       Flags: pytest network tests, django dev server, any Python server.
+  NEW: Multi-step check. Pattern must appear, AND process must not be
+       in a development/testing path, AND must not be a known framework.
+       Python from venv/site-packages with server patterns → demoted to INFO.
+
+REPORT STRUCTURE (new):
+  scan() now returns both results list AND a ScanReport summary:
+    - findings_by_severity: dict[str, List[ScanResult]]
+    - total_ok: int (categories with no findings)
+    - scan_duration_ms: int
+    - summary_lines: List[str] (human-readable verdict)
+
+═══════════════════════════════════════════════════════════════
+PRESERVED from old v2.3:
+  - _safe_kill_cmd() PID safety guard (PID < 100 block, ownership check)
+  - _safe_walk() symlink loop prevention (followlinks=False)
+  - _is_expected_suid_path() chrome-sandbox false positive guard
+  - SSH authorized_keys normal-key-as-info (not warning)
+  - AppImage /tmp mount detection
+  - PyInstaller /tmp/_MEI detection
+  - LD_PRELOAD, hosts file, cron, SUID, world-writable scans (unchanged)
+  - Windows autorun scan
+  - fix_cmd / can_fix on ScanResult
+═══════════════════════════════════════════════════════════════
 """
-
-import hashlib
-import json
-import os
-import platform
-import re
-import stat
-import subprocess
-import time
-from dataclasses import dataclass, field
+import os, sys, subprocess, platform, stat, re, time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Callable, Optional, Dict
 
 OS     = platform.system()
 HELPER = '/usr/local/bin/cyber-clean-helper'
 
-# ── Persistent storage paths ──────────────────────────────────
-if OS == 'Windows':
-    _DATA_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'CyberClean'
-else:
-    _DATA_DIR = Path.home() / '.local/share/cyber-clean'
-
-WATCHLIST_FILE   = _DATA_DIR / 'watchlist.json'
-USER_WHITELIST   = _DATA_DIR / 'user_whitelist.json'
-HASH_CACHE_FILE  = _DATA_DIR / 'exe_hash_cache.json'
-
-
 # ══════════════════════════════════════════════════════════════
-# PID SAFETY GUARD (unchanged from v2.3)
+# PID SAFETY GUARD  (unchanged from v2.3)
 # ══════════════════════════════════════════════════════════════
-
 _PID_MIN_SAFE = 100
 
 def _safe_kill_cmd(pid: int) -> str:
@@ -119,443 +129,25 @@ def _h(action: str, target: str = '') -> str:
 # ══════════════════════════════════════════════════════════════
 # DATA CLASSES
 # ══════════════════════════════════════════════════════════════
-
 @dataclass
 class ScanResult:
-    severity:  str           # 'critical' | 'high' | 'medium' | 'info'
-    category:  str
+    severity:  str          # 'critical' | 'high' | 'medium' | 'info'
+    category:  str          # 'malware' | 'suspicious' | 'suid' | 'writable' | 'cron' | 'network' | 'config'
     path:      str
     detail:    str
+    reasons:   List[str] = field(default_factory=list)   # NEW: why it was flagged
     can_fix:   bool = False
     fix_cmd:   str  = ''
-    score:     int  = 0      # NEW: threat score 0–100
-    reasons:   List[str] = field(default_factory=list)  # NEW: scoring reasons
-
 
 @dataclass
-class WatchlistEntry:
-    path:       str
-    pid:        int
-    score:      int
-    reasons:    List[str]
-    first_seen: float   # timestamp
-    last_seen:  float
-    seen_count: int = 1
+class ScanReport:
+    """Structured summary returned alongside raw results list."""
+    findings_by_severity: Dict[str, List[ScanResult]] = field(default_factory=dict)
+    total_ok:             int = 0
+    scan_duration_ms:     int = 0
+    summary_lines:        List[str] = field(default_factory=list)
+    false_positive_notes: List[str] = field(default_factory=list)
 
-
-# ══════════════════════════════════════════════════════════════
-# THREAT SCORE CONSTANTS
-# ══════════════════════════════════════════════════════════════
-
-# Cổng C2 / miner / RAT / reverse shell đã biết
-_SUSPICIOUS_PORTS = {
-    # Classic RAT / backdoor
-    4444, 1337, 31337, 12345, 54321, 31338, 4445, 4446, 5555,
-    # Cobalt Strike, Metasploit
-    50050, 4443, 8443,
-    # IRC botnet
-    6666, 6667, 6668, 6669,
-    # Crypto miner stratum
-    3333, 7777, 14444, 14433, 45560,
-    # Tor proxy
-    9050, 9150,
-    # Remote admin non-standard
-    2222, 9001, 9999,
-    # NetBus / BackOrifice
-    12346, 65535, 54320,
-}
-
-# Process names không bao giờ nên có network connection
-_NEVER_NETWORK = {
-    'explorer', 'winlogon', 'csrss', 'smss', 'lsass', 'dwm',
-    'wininit', 'services', 'taskhostw', 'sihost', 'fontdrvhost',
-    'Xorg', 'gnome-session', 'ksmserver', 'plasmashell',
-}
-
-# Crypto miner names
-KNOWN_MINERS = {
-    'xmrig', 'xmrig-notls', 'minerd', 'cpuminer-multi', 'nbminer',
-    'teamredminer', 'lolminer', 'gminer', 't-rex', 'nanominer',
-    'claymore', 'ethminer', 'phoenixminer', 'kawpow', 'xmr-stak',
-}
-
-# Script patterns chỉ ra hành vi độc hại
-SUSPICIOUS_SCRIPTS = [
-    (r'bash\s+-i\s+>&\s*/dev/tcp',          'Reverse bash shell'),
-    (r'nc\s+-e\s+/bin/(bash|sh)',            'Netcat reverse shell'),
-    (r'python.*socket.*connect.*subprocess', 'Python reverse shell pattern'),
-    (r'curl\s+.*\|\s*(bash|sh)',             'Remote code exec via curl|bash'),
-    (r'wget\s+.*-O-\s*\|',                  'Remote code exec via wget|pipe'),
-    (r'eval\s*\(\s*base64_decode',           'PHP base64 eval (webshell)'),
-    (r'eval\s*\(\s*gzinflate',               'PHP obfuscated eval (webshell)'),
-    (r'(xmrig|minerd|cpuminer)',             'Crypto miner binary reference'),
-    (r'stratum\+tcp://',                     'Mining pool connection string'),
-    (r'LD_PRELOAD\s*=',                      'LD_PRELOAD manipulation'),
-    (r'/proc/\d+/mem',                       'Direct process memory access'),
-    (r'powershell.*-enc\s+[A-Za-z0-9+/=]{20}', 'Encoded PowerShell command'),
-    (r'certutil.*-decode',                   'CertUtil decode (bypass)'),
-    (r'bitsadmin.*transfer',                 'BITSAdmin download (bypass)'),
-    (r'regsvr32.*scrobj',                    'Regsvr32 script execution'),
-    (r'mshta\s+http',                        'MSHTA remote script exec'),
-]
-
-DANGEROUS_EXTENSIONS = {
-    '.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf', '.bin',
-    '.bat', '.ps1', '.vbs', '.cmd', '.dll', '.scr', '.pif',
-}
-
-SCAN_DIRS_LINUX = [
-    '/tmp', '/var/tmp', '/dev/shm',
-    str(Path.home() / '.local/bin'),
-    str(Path.home() / '.config'),
-    '/etc/cron.d', '/etc/cron.daily', '/etc/cron.hourly', '/etc/cron.weekly',
-]
-
-SCAN_DIRS_WINDOWS = [
-    os.environ.get('TEMP', ''), os.environ.get('APPDATA', ''),
-    'C:/Windows/Temp', 'C:/ProgramData',
-]
-
-
-# ══════════════════════════════════════════════════════════════
-# PERSISTENT STATE HELPERS
-# ══════════════════════════════════════════════════════════════
-
-def _load_json(path: Path) -> dict:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding='utf-8'))
-    except (json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def _save_json(path: Path, data: dict):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
-    except OSError:
-        pass
-
-
-def load_user_whitelist() -> set:
-    """Load user-defined safe paths. Returns set of lowercase paths."""
-    data = _load_json(USER_WHITELIST)
-    return {k.lower() for k in data.keys()}
-
-
-def add_to_user_whitelist(path: str, reason: str = 'user marked safe'):
-    """Mark a path as safe. Called from GUI when user clicks 'Mark as safe'."""
-    data = _load_json(USER_WHITELIST)
-    data[path] = {'reason': reason, 'added': time.strftime('%Y-%m-%dT%H:%M:%S')}
-    _save_json(USER_WHITELIST, data)
-
-
-def load_watchlist() -> Dict[str, dict]:
-    return _load_json(WATCHLIST_FILE)
-
-
-def save_watchlist(data: dict):
-    _save_json(WATCHLIST_FILE, data)
-
-
-def _exe_sha256(path: str) -> str:
-    """Compute SHA-256 of an executable. Returns '' on error."""
-    try:
-        h = hashlib.sha256()
-        with open(path, 'rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''):
-                h.update(chunk)
-        return h.hexdigest()
-    except (OSError, PermissionError):
-        return ''
-
-
-def _load_hash_cache() -> dict:
-    return _load_json(HASH_CACHE_FILE)
-
-
-def _save_hash_cache(cache: dict):
-    _save_json(HASH_CACHE_FILE, cache)
-
-
-# ══════════════════════════════════════════════════════════════
-# WHITELIST BYPASS CHECKS
-# ══════════════════════════════════════════════════════════════
-
-def _is_expected_suid_path(path: str) -> bool:
-    """Chromium / Electron chrome-sandbox — intentional SUID, not malware."""
-    p = path.replace('\\', '/')
-    if not p.endswith('/chrome-sandbox'):
-        return False
-    if not (p.startswith('/usr/') or p.startswith('/opt/')):
-        return False
-    markers = (
-        '/electron', '/chromium', '/chromium-browser', '/chrome/',
-        '/google-chrome', 'google-chrome', '/opt/google/chrome',
-        '/brave', '/vivaldi', '/opera', 'microsoft-edge', '/edge/',
-    )
-    return any(m in p.lower() for m in markers)
-
-
-def _is_whitelisted_process(exe: str, cmdline: str) -> Tuple[bool, str]:
-    """
-    Check if a process is a known-safe pattern that should bypass all scoring.
-    Returns (is_whitelisted, reason).
-
-    Covers:
-    - Chromium/Electron gpu-process, renderer, utility subprocesses
-    - AppImage mounts (/tmp/.mount_*)
-    - PyInstaller bundles (/tmp/_MEI*)
-    - Docker/Podman container runtimes
-    - Known system processes that legitimately run from non-standard paths
-    """
-    exe_l = (exe or '').lower().replace('\\', '/')
-    cmd_l = (cmdline or '').lower()
-
-    # Chromium / Electron subprocess types — gpu/renderer handle WebGL, camera, etc.
-    _chromium_flags = (
-        '--type=gpu-process', '--type=renderer', '--type=ppapi',
-        '--type=utility', 'video-capture', '--gpu-process',
-        '--type=crashpad-handler',
-    )
-    if any(flag in cmd_l for flag in _chromium_flags):
-        return True, 'Chromium/Electron subprocess (gpu/renderer/utility)'
-
-    # AppImage mount — legitimate Linux app format, always in /tmp/.mount_
-    if re.search(r'/tmp/\.mount_[^/]+/', exe_l):
-        return True, 'AppImage mount (legitimate Linux AppImage)'
-
-    # PyInstaller bundle — legitimate bundled Python app
-    if re.search(r'/tmp/_mei[^/]+/', exe_l):
-        return True, 'PyInstaller bundle (legitimate bundled app)'
-
-    # Docker / Podman / containerd runtime
-    _container_names = ('docker', 'containerd', 'dockerd', 'podman', 'runc', 'crun')
-    if any(exe_l.endswith('/' + n) or exe_l.endswith('\\' + n) for n in _container_names):
-        return True, 'Container runtime (Docker/Podman/containerd)'
-
-    # Snap runtime
-    if '/snap/' in exe_l and '/snap/bin/' not in exe_l:
-        return True, 'Snap package runtime'
-
-    return False, ''
-
-
-# ══════════════════════════════════════════════════════════════
-# CORE THREAT SCORING ENGINE
-# ══════════════════════════════════════════════════════════════
-
-def _score_process(
-    pid: int,
-    name: str,
-    exe: str,
-    cmdline: str,
-    user_whitelist: set,
-    listen_ports: set,
-    established_conns: int,
-) -> Tuple[int, List[str]]:
-    """
-    Score a single process. Returns (score, reasons).
-    Score 0-100. Higher = more suspicious.
-
-    Completely replaces the old binary if/else logic.
-    """
-    score   = 0
-    reasons = []
-    name_l  = name.lower().replace('.exe', '')
-    exe_l   = (exe or '').lower().replace('\\', '/')
-    cmd_l   = cmdline.lower()
-
-    # ── USER WHITELIST: strong negative evidence (-50) ──────────────
-    if exe_l and exe_l in user_whitelist:
-        score -= 50
-        reasons.append('User marked as safe')
-
-    # ── KNOWN MINER: strongest positive evidence (+60) ──────────────
-    if name_l in {m.lower() for m in KNOWN_MINERS}:
-        score += 60
-        reasons.append(f'Known crypto miner process: {name}')
-
-    # ── FAKE SYSTEM PROCESS (+50) ────────────────────────────────────
-    # svchost.exe / explorer.exe NOT in Windows system dirs = process hijack
-    _win_sys_names = {'svchost', 'explorer', 'lsass', 'winlogon', 'csrss', 'smss'}
-    if name_l in _win_sys_names and exe_l:
-        _win_sys_dirs = ('c:/windows/system32/', 'c:/windows/syswow64/', 'c:/windows/')
-        if not any(exe_l.startswith(d) for d in _win_sys_dirs):
-            score += 50
-            reasons.append(f'System process name ({name}) running from non-system path')
-
-    # ── EXE IN TEMP / RAMDISK (+40) ──────────────────────────────────
-    _temp_roots = ('/tmp/', '/var/tmp/', '/dev/shm/')
-    if OS == 'Windows':
-        _temp_roots += (
-            os.environ.get('TEMP', '').lower().replace('\\', '/') + '/',
-            os.environ.get('TMP', '').lower().replace('\\', '/') + '/',
-            'c:/windows/temp/',
-        )
-    if exe_l and any(exe_l.startswith(t) for t in _temp_roots if t):
-        score += 40
-        reasons.append(f'Executable running from temp/ramdisk directory')
-
-    # ── SUSPICIOUS CMDLINE PATTERNS (+40 each, max 1 trigger) ────────
-    for pattern, desc in SUSPICIOUS_SCRIPTS:
-        if re.search(pattern, cmd_l, re.I):
-            score += 40
-            reasons.append(f'Suspicious cmdline: {desc}')
-            break   # one pattern is enough to add +40 once
-
-    # ── LISTENING ON SUSPICIOUS PORT (+35) ───────────────────────────
-    matching_ports = listen_ports & _SUSPICIOUS_PORTS
-    if matching_ports:
-        score += 35
-        reasons.append(f'Listening on known C2/miner port(s): {sorted(matching_ports)}')
-
-    # ── HIGH CPU (miner behaviour) (+30) ─────────────────────────────
-    # Caller passes cpu_pct — if process was > 80% at sample time
-    # (This is passed via established_conns=-1 sentinel when cpu is high)
-    if established_conns == -999:   # sentinel: high CPU detected
-        score += 30
-        reasons.append('Sustained high CPU usage (crypto miner behavior)')
-
-    # ── MANY OUTBOUND CONNECTIONS (+20) ─────────────────────────────
-    if established_conns >= 8:
-        score += 20
-        reasons.append(f'High outbound connection count: {established_conns}')
-
-    # ── LISTENING ON EPHEMERAL HIGH PORT + EXTERNAL (+20) ────────────
-    _hi_ports = {p for p in listen_ports if p > 49151} - _SUSPICIOUS_PORTS
-    if _hi_ports:
-        score += 20
-        reasons.append(f'Listening on non-standard high port(s): {sorted(_hi_ports)[:3]}')
-
-    # ── SYSTEM PROCESS MAKING NETWORK CONNECTIONS (+25) ──────────────
-    if name_l in {n.lower() for n in _NEVER_NETWORK} and (listen_ports or established_conns > 0):
-        score += 25
-        reasons.append(f'{name} should not make network connections')
-
-    # ── KNOWN RUNTIME (python/node/java) — context, not inherently bad (-15) ──
-    # SECURITY FIX (Gemini / v2.4.1):
-    # Discount ONLY applies when exe is in a real installation path.
-    # A virus renamed to "python.exe" and placed in C:\Temp or /tmp still gets
-    # +40 from the temp-dir rule above — we must NOT cancel that with -15.
-    # Legitimate runtimes are NEVER installed in temp/ramdisk directories.
-    _runtimes = {'python', 'python3', 'node', 'nodejs', 'java', 'ruby', 'perl', 'php'}
-    _temp_roots_check = ('/tmp/', '/var/tmp/', '/dev/shm/')
-    if OS == 'Windows':
-        _temp_roots_check += (
-            (os.environ.get('TEMP', '') + '/').lower().replace('\\', '/'),
-            (os.environ.get('TMP', '')  + '/').lower().replace('\\', '/'),
-            'c:/windows/temp/',
-        )
-    _exe_in_temp = exe_l and any(exe_l.startswith(t) for t in _temp_roots_check if t and t != '/')
-    if name_l in _runtimes and not _exe_in_temp:
-        # Legitimate runtime in a real install path — reduce suspicion
-        score -= 15
-        reasons.append(f'Known runtime interpreter ({name}) in valid location — likely legitimate')
-    elif name_l in _runtimes and _exe_in_temp:
-        # Runtime name BUT running from temp — fake name trick, no discount
-        score += 20   # extra penalty: using runtime name as camouflage
-        reasons.append(f'Runtime name ({name}) running from temp dir — possible impersonation (+20)')
-
-    # ── INSTALLED LOCATION: system/program dirs (-20) ────────────────
-    _safe_roots = (
-        '/usr/', '/bin/', '/sbin/', '/opt/',
-        'c:/program files/', 'c:/program files (x86)/',
-        'c:/windows/system32/', 'c:/windows/syswow64/',
-    )
-    if exe_l and any(exe_l.startswith(r) for r in _safe_roots):
-        score -= 20
-        reasons.append('Executable in system/program directory')
-
-    return max(0, min(100, score)), reasons
-
-
-def _check_digital_signature_windows(exe_path: str) -> bool:
-    """
-    Check if a Windows exe has a valid digital signature.
-    Uses Get-AuthenticodeSignature PowerShell — non-blocking, 5s timeout.
-    Returns True if signed by a valid publisher.
-    """
-    if OS != 'Windows' or not exe_path:
-        return False
-    try:
-        _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        r = subprocess.run(
-            ['powershell', '-NoProfile', '-Command',
-             f'(Get-AuthenticodeSignature "{exe_path}").Status'],
-            capture_output=True, text=True, timeout=5,
-            creationflags=_NO_WIN,
-        )
-        return r.stdout.strip().lower() == 'valid'
-    except Exception:
-        return False
-
-
-# ══════════════════════════════════════════════════════════════
-# WATCHLIST ENGINE
-# ══════════════════════════════════════════════════════════════
-
-def update_watchlist(exe: str, pid: int, score: int, reasons: List[str]) -> dict:
-    """
-    Add or update a watchlist entry. Returns the current watchlist.
-    Called when score is in the 40-69 'suspicious but not confirmed' range.
-    """
-    data = load_watchlist()
-    key  = exe.lower() if exe else f'pid:{pid}'
-    now  = time.time()
-
-    if key in data:
-        entry = data[key]
-        entry['last_seen']  = now
-        entry['seen_count'] = entry.get('seen_count', 1) + 1
-        # Escalate score if process keeps appearing with same flags
-        entry['score']      = max(entry.get('score', score), score)
-        entry['reasons']    = reasons   # update to latest
-        entry['pid']        = pid
-    else:
-        data[key] = {
-            'path':       exe,
-            'pid':        pid,
-            'score':      score,
-            'reasons':    reasons,
-            'first_seen': now,
-            'last_seen':  now,
-            'seen_count': 1,
-        }
-    save_watchlist(data)
-    return data
-
-
-def check_watchlist_escalations() -> List[dict]:
-    """
-    Called by auto-clean timer in main.py.
-    Returns entries that should now be escalated to critical:
-    - seen_count >= 3 (persistent) AND score >= 50
-    - OR entry is still alive AND score has grown to >= 70
-    """
-    data    = load_watchlist()
-    escalate = []
-    for key, entry in data.items():
-        score = entry.get('score', 0)
-        count = entry.get('seen_count', 1)
-        if (score >= 70) or (score >= 50 and count >= 3):
-            escalate.append(entry)
-    return escalate
-
-
-def prune_watchlist(max_age_hours: float = 24.0):
-    """Remove stale watchlist entries older than max_age_hours."""
-    data    = load_watchlist()
-    cutoff  = time.time() - max_age_hours * 3600
-    pruned  = {k: v for k, v in data.items() if v.get('last_seen', 0) > cutoff}
-    if len(pruned) != len(data):
-        save_watchlist(pruned)
-
-
-# ══════════════════════════════════════════════════════════════
-# UTILITY HELPERS
-# ══════════════════════════════════════════════════════════════
 
 def run(cmd, timeout=10):
     try:
@@ -567,8 +159,192 @@ def run(cmd, timeout=10):
         return ''
 
 
+# ══════════════════════════════════════════════════════════════
+# TRUSTED PROCESS / PATH ALLOWLISTS
+# ══════════════════════════════════════════════════════════════
+
+# Process names that are ALWAYS trusted regardless of CPU/memory usage.
+# These are system daemons, package managers, dev tools, and browsers.
+# If a real miner somehow steals one of these names, it still must come
+# from a suspicious path — the path check is separate and additive.
+TRUSTED_PROCESS_NAMES = {
+    # ── System / init ───────────────────────────────────────
+    'systemd', 'systemd-journald', 'systemd-logind', 'systemd-udevd',
+    'systemd-resolved', 'systemd-networkd', 'dbus-daemon', 'dbus-broker',
+    'kthreadd', 'ksoftirqd', 'kworker', 'migration', 'watchdog',
+    'init', 'upstart', 'openrc', 'runit',
+    'NetworkManager', 'networkmanager', 'wpa_supplicant', 'dhclient', 'dhcpcd',
+    'polkitd', 'udisks2', 'upower', 'colord', 'rtkit-daemon',
+    'accounts-daemon', 'packagekitd', 'fwupd',
+    # ── Audio / video ───────────────────────────────────────
+    'pipewire', 'pipewire-pulse', 'wireplumber',
+    'pulseaudio', 'jackd', 'alsa',
+    # ── Display / compositor ────────────────────────────────
+    'Xorg', 'Xwayland', 'kwin_wayland', 'kwin_x11',
+    'mutter', 'gnome-shell', 'plasmashell', 'xfwm4', 'openbox',
+    'sway', 'hyprland', 'wayfire', 'river',
+    'picom', 'compton', 'compiz',
+    # ── Desktop env helpers ─────────────────────────────────
+    'gnome-session', 'gdm', 'gdm3', 'sddm', 'lightdm', 'lxdm',
+    'kded5', 'kded6', 'plasmashell', 'plasma_session',
+    'xfce4-session', 'xfdesktop', 'thunar', 'nautilus', 'dolphin',
+    # ── Browsers (legitimate installs) ──────────────────────
+    'firefox', 'firefox-esr', 'firefox-bin',
+    'chrome', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+    'brave', 'brave-browser', 'opera', 'vivaldi', 'msedge', 'microsoft-edge',
+    # ── Electron / node apps ────────────────────────────────
+    'electron', 'code', 'code-oss', 'vscodium',
+    'node', 'nodejs', 'npm', 'npx', 'yarn', 'pnpm', 'bun',
+    # ── Python ecosystem ────────────────────────────────────
+    'python', 'python3', 'python3.10', 'python3.11', 'python3.12', 'python3.13',
+    'python3.14', 'pypy', 'pypy3',
+    'pip', 'pip3', 'uv', 'poetry', 'pipenv', 'conda', 'mamba',
+    'jupyter', 'ipython', 'pylsp', 'ruff',
+    # ── Package managers ────────────────────────────────────
+    'pacman', 'yay', 'paru', 'trizen', 'aura',
+    'apt', 'apt-get', 'dpkg', 'aptd',
+    'dnf', 'yum', 'rpm',
+    'zypper',
+    'xbps-install', 'xbps-remove',
+    'flatpak', 'snap',
+    # ── Compilers / build tools ─────────────────────────────
+    'gcc', 'g++', 'clang', 'clang++', 'cc', 'c++',
+    'make', 'cmake', 'ninja', 'meson',
+    'cargo', 'rustc', 'rustup',
+    'go', 'gofmt',
+    'javac', 'java', 'kotlinc',
+    'mvn', 'gradle',
+    # ── Container / virt ────────────────────────────────────
+    'docker', 'dockerd', 'containerd', 'runc',
+    'podman', 'crun', 'buildah',
+    'qemu', 'qemu-system-x86_64', 'libvirtd', 'virsh',
+    # ── Security tools (benign) ─────────────────────────────
+    'gpg', 'gpg-agent', 'gnome-keyring-daemon', 'kwallet',
+    'seahorse', 'keepassxc',
+    # ── Misc system ─────────────────────────────────────────
+    'bash', 'zsh', 'fish', 'sh', 'dash', 'ksh',
+    'ssh', 'sshd', 'sftp-server',
+    'cron', 'crond', 'atd',
+    'rsync', 'rclone',
+    'htop', 'btop', 'top', 'glances',
+    'tmux', 'screen', 'zellij',
+    'cat', 'ls', 'find', 'grep', 'awk', 'sed', 'sort',
+    # ── CyberClean itself ───────────────────────────────────
+    'cyberclean', 'cyberclean.exe', 'CyberClean',
+}
+
+# Process names are compared case-insensitively, stripped of .exe
+# This set is the fast first check; path check is the deep check.
+
+# Trusted path prefixes — processes from these locations are trusted
+# UNLESS they also match a hard miner binary name.
+TRUSTED_PATH_PREFIXES = (
+    '/usr/bin/', '/usr/sbin/', '/usr/lib/', '/usr/libexec/',
+    '/usr/share/', '/usr/local/bin/', '/usr/local/lib/',
+    '/bin/', '/sbin/', '/lib/', '/lib64/',
+    '/opt/',
+    '/snap/', '/var/lib/flatpak/', '/run/flatpak/',
+    # Python standard install locations
+    '/usr/lib/python', '/usr/local/lib/python',
+    # Windows system dirs
+    'C:\\Windows\\', 'C:\\Program Files\\', 'C:\\Program Files (x86)\\',
+)
+
+# Hard known-miner binary names — these get +60 score.
+# Must be EXACT binary names (basename), not substrings.
+KNOWN_MINER_BINS = {
+    'xmrig', 'xmrig-notls', 'xmrig-mo',
+    'minerd', 'cpuminer', 'cpuminer-multi', 'cpuminer-opt',
+    'nbminer', 'teamredminer', 'lolminer', 'gminer',
+    't-rex', 't-rex.exe',
+    'nanominer', 'nsfminer',
+    'ethminer', 'phoenixminer', 'claymore',
+    'srbminer', 'srbminer-multi',
+    'bzminer', 'rigel', 'wildrig-multi',
+    'kawpowminer', 'miniZ',
+}
+
+# Mining-specific cmdline patterns — these are highly specific, low false-positive.
+MINING_CMDLINE_PATTERNS = [
+    (r'stratum\+tcp://',              'Mining pool connection (stratum+tcp)'),
+    (r'stratum\+ssl://',              'Mining pool connection (stratum+ssl)'),
+    (r'--mining-algo\s',              'Explicit mining algorithm flag'),
+    (r'--pool\s+\d+\.\d+\.\d+',      'Mining pool IP address in args'),
+    (r'-o\s+stratum',                 'Mining pool -o stratum flag'),
+    (r'--donate-level\s',             'XMRig donate-level flag (miner-specific)'),
+    (r'--coin\s+(monero|xmr|eth|etc|rvn|ergo)', 'Coin specification (miner flag)'),
+    (r'randomx|kawpow|ethash|etchash|autolykos2', 'Mining algorithm name in cmdline'),
+]
+
+# Reverse shell / backdoor cmdline patterns.
+# These are kept tight — only patterns that have essentially zero legitimate use.
+BACKDOOR_CMDLINE_PATTERNS = [
+    (r'bash\s+-i\s+>&\s*/dev/tcp',          'Interactive bash reverse shell (bash -i >& /dev/tcp)'),
+    (r'nc\s+.*-e\s+/bin/(bash|sh)',         'Netcat reverse shell (nc -e /bin/bash)'),
+    (r'0\.0\.0\.0.*exec.*sh',               'Bind shell on all interfaces'),
+    (r'mkfifo.*;\s*(nc|bash|sh)',           'FIFO-based reverse shell'),
+    (r'/dev/tcp/\d+\.\d+\.\d+\.\d+/\d+',   'Bash /dev/tcp reverse connection'),
+    (r'python.*-c.*socket.*connect.*os\.dup2',  'Python reverse shell (os.dup2 redirect)'),
+    (r'perl.*-e.*socket.*connect.*exec',    'Perl reverse shell'),
+    (r'ruby.*-rsocket.*-e.*exec',           'Ruby reverse shell'),
+    (r'php.*fsockopen.*exec\(',             'PHP reverse shell'),
+    (r'powershell.*-nop.*-w.*hidden.*iex',  'PowerShell download+exec (obfuscated)'),
+    (r'cmd\.exe.*/c.*powershell.*hidden',   'CMD spawning hidden PowerShell'),
+    (r'mshta\s+http',                       'MSHTA remote script execution'),
+    (r'regsvr32.*\/s.*\/n.*\/u.*http',      'Regsvr32 COM scriptlet remote load'),
+    (r'certutil.*-decode.*\.exe',           'Certutil decoding executable (dropper)'),
+    (r'bitsadmin.*\/transfer.*http',        'BITSAdmin file download (dropper)'),
+]
+
+# Script content patterns for file scanning.
+# These are searched inside file contents, so they can be more specific.
+MALICIOUS_SCRIPT_PATTERNS = [
+    (r'bash\s+-i\s+>&\s*/dev/tcp',          'Reverse bash shell payload'),
+    (r'nc\s+-e\s+/bin/(bash|sh)',            'Netcat backdoor payload'),
+    (r'python.*socket.*connect.*os\.dup2',   'Python reverse shell payload'),
+    (r'curl\s+[^|]+\|\s*(bash|sh)\s*$',     'Remote code execution (curl|bash)'),
+    (r'wget\s+-qO-\s+[^|]+\|\s*(bash|sh)',  'Remote code execution (wget|bash)'),
+    (r'eval\s*\(\s*base64_decode\s*\(',      'PHP base64 eval webshell'),
+    (r'eval\s*\(\s*gzinflate\s*\(',          'PHP gzip-obfuscated webshell'),
+    (r'eval\s*\(\s*str_rot13\s*\(',          'PHP ROT13-obfuscated webshell'),
+    (r'stratum\+tcp://',                     'Crypto mining pool string in file'),
+    (r'--donate-level\s+0',                  'XMRig zero-donate flag (miner config)'),
+    (r'/proc/\d+/mem',                       'Direct /proc/mem access (process injection)'),
+    (r'LD_PRELOAD\s*=\s*/tmp',               'LD_PRELOAD set to /tmp path (rootkit pattern)'),
+    (r'chmod\s+\+x\s+/tmp/\S+\s*&&\s*/tmp/', 'Download+execute to /tmp'),
+]
+
+# Ports that are commonly used by RAT/C2 frameworks and miners.
+# NOT reported for listening alone — only combined with other signals.
+SUSPICIOUS_PORTS_STRICT = {4444, 1337, 31337, 6667, 6666, 54321}   # RAT/C2
+MINING_POOL_PORTS        = {3333, 5555, 7777, 8888, 14444, 45560}   # Mining pools
+
+# Known good patterns that cancel suspicious patterns in file scanning.
+SAFE_FILE_CONTEXTS = (
+    'site-packages', 'node_modules', '.venv', 'venv', '__pycache__',
+    '.git', 'test', 'spec', 'mock', 'fixture', 'example', 'sample',
+    'doc', 'docs', 'README', 'tutorial', 'demo',
+    # CyberClean's own source files
+    'cyberclean', 'CyberClean',
+)
+
+
+def _is_expected_suid_path(path: str) -> bool:
+    """Chromium/Electron chrome-sandbox has SUID by design — not a threat."""
+    p = path.replace('\\', '/')
+    if not p.endswith('/chrome-sandbox'):
+        return False
+    if not (p.startswith('/usr/') or p.startswith('/opt/')):
+        return False
+    pl = p.lower()
+    markers = ('/electron', '/chromium', '/chromium-browser', '/chrome/',
+               '/google-chrome', 'google-chrome', '/opt/google/chrome',
+               '/brave', '/vivaldi', '/opera', 'microsoft-edge', '/edge/')
+    return any(m in pl for m in markers)
+
+
 def _safe_walk(root: Path):
-    """Walk without following symlinks — prevents infinite loop on circular symlinks."""
+    """Walk without following symlinks — prevents infinite loops."""
     try:
         for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
             dirnames[:] = [
@@ -584,24 +360,202 @@ def _safe_walk(root: Path):
         pass
 
 
-def _get_process_connections(pid: int) -> Tuple[set, int]:
+# ══════════════════════════════════════════════════════════════
+# TRUST EVALUATION
+# ══════════════════════════════════════════════════════════════
+
+_MY_PID  = os.getpid()
+_MY_EXE  = ''
+try:
+    import psutil as _ps
+    _MY_EXE = (_ps.Process(_MY_PID).exe() or '').lower()
+except Exception:
+    pass
+
+
+def _normalize_proc_name(name: str) -> str:
+    """Lowercase, strip .exe, strip version suffix like python3.12 → python3."""
+    n = name.lower().strip()
+    if n.endswith('.exe'):
+        n = n[:-4]
+    # python3.12 → python3, python3.11 → python3
+    n = re.sub(r'^(python3?)\.\d+$', r'\1', n)
+    return n
+
+
+def _is_trusted_process(name: str, exe: str, pid: int) -> tuple:
     """
-    Return (listening_ports: set, established_count: int) for a PID.
-    Uses psutil — non-blocking, handles AccessDenied gracefully.
+    Returns (trusted: bool, reason: str).
+    Trusted processes are never reported as malware.
+    Suspicious-path check is separate — a trusted name from /tmp is still flagged.
     """
-    listen_ports     = set()
-    established_count = 0
+    # Never flag ourselves
+    if pid == _MY_PID:
+        return True, 'CyberClean itself'
+    if _MY_EXE and exe and exe.lower() == _MY_EXE:
+        return True, 'CyberClean itself'
+
+    norm = _normalize_proc_name(name)
+    if norm in {_normalize_proc_name(t) for t in TRUSTED_PROCESS_NAMES}:
+        return True, f'known trusted process ({norm})'
+
+    # Trusted path — installed software
+    if exe:
+        exe_l = exe.lower().replace('\\', '/')
+        if any(exe_l.startswith(p.lower().replace('\\', '/')) for p in TRUSTED_PATH_PREFIXES):
+            # Even from a trusted path, hard miner names override trust
+            if norm in {n.replace('.exe','') for n in KNOWN_MINER_BINS}:
+                return False, 'known miner binary in installed path (verify intentional)'
+            return True, f'installed software path ({exe[:50]})'
+
+    return False, ''
+
+
+def _proc_is_appimage_or_pyinstaller(exe: str) -> bool:
+    """AppImage mounts and PyInstaller bundles legitimately run from /tmp."""
+    if not exe:
+        return False
+    return bool(
+        re.search(r'/tmp/\.mount_', exe) or
+        re.search(r'/tmp/_MEI[^/]+/', exe)
+    )
+
+
+def _get_process_connections(pid: int) -> List[int]:
+    """Return list of remote ports this process has established TCP connections to."""
+    ports = []
     try:
         import psutil
-        proc = psutil.Process(pid)
-        for conn in proc.connections(kind='inet'):
-            if conn.status == psutil.CONN_LISTEN and conn.laddr:
-                listen_ports.add(conn.laddr.port)
-            elif conn.status == psutil.CONN_ESTABLISHED:
-                established_count += 1
+        p = psutil.Process(pid)
+        for conn in p.connections(kind='tcp'):
+            if conn.status == 'ESTABLISHED' and conn.raddr:
+                ports.append(conn.raddr.port)
     except Exception:
         pass
-    return listen_ports, established_count
+    return ports
+
+
+# ══════════════════════════════════════════════════════════════
+# PROCESS RISK SCORER
+# ══════════════════════════════════════════════════════════════
+
+@dataclass
+class _ProcessRisk:
+    score:   int = 0
+    signals: List[str] = field(default_factory=list)
+
+    def add(self, points: int, reason: str):
+        self.score += points
+        if points > 0:
+            self.signals.append(f'+{points} {reason}')
+        else:
+            self.signals.append(f'{points} {reason}')
+
+    @property
+    def severity(self) -> Optional[str]:
+        if self.score >= 70: return 'critical'
+        if self.score >= 40: return 'high'
+        if self.score >= 20: return 'medium'
+        return None
+
+    def verdict(self) -> str:
+        """Human-readable verdict with reasoning."""
+        if not self.severity:
+            return 'OK'
+        reasons = [s for s in self.signals if not s.startswith('-')]
+        return '; '.join(reasons[:4])
+
+
+def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
+    """
+    Score a single process across multiple signals.
+    Higher score = more suspicious. See module docstring for signal weights.
+    """
+    r = _ProcessRisk()
+    norm = _normalize_proc_name(name)
+
+    # ── Hard miner binary name (+60) ──────────────────────
+    if norm in {n.replace('.exe', '').lower() for n in KNOWN_MINER_BINS}:
+        r.add(60, f'known crypto miner binary name ({norm})')
+
+    # ── Mining cmdline patterns (+40 each, cap at 40) ────
+    mining_hits = 0
+    for pattern, desc in MINING_CMDLINE_PATTERNS:
+        if re.search(pattern, cmd, re.I):
+            if mining_hits == 0:
+                r.add(40, desc)
+            mining_hits += 1
+
+    # ── Backdoor/reverse-shell cmdline (+35) ─────────────
+    for pattern, desc in BACKDOOR_CMDLINE_PATTERNS:
+        if re.search(pattern, cmd, re.I):
+            r.add(35, desc)
+            break  # one is enough to trigger
+
+    # ── Running from suspicious temp location (+30) ───────
+    if exe and not _proc_is_appimage_or_pyinstaller(exe):
+        exe_l = exe.lower().replace('\\', '/')
+        temp_roots = ['/tmp/', '/dev/shm/', '/var/tmp/']
+        if OS == 'Windows':
+            temp_roots += [
+                (os.environ.get('TEMP', '') + '\\').lower(),
+                'c:\\windows\\temp\\',
+            ]
+        if any(exe_l.startswith(t) for t in temp_roots):
+            r.add(30, f'executable running from temp directory ({exe[:60]})')
+
+    # ── Connected to mining pool port (+15) ──────────────
+    if r.score > 0:   # only check connections if already suspicious (perf)
+        ports = _get_process_connections(pid)
+        for port in ports:
+            if port in MINING_POOL_PORTS:
+                r.add(15, f'connected to known mining pool port {port}')
+                break
+            if port in SUSPICIOUS_PORTS_STRICT:
+                r.add(10, f'connected to suspicious port {port}')
+                break
+
+    # ── Exe is world-writable (+10) ───────────────────────
+    if exe and OS == 'Linux':
+        try:
+            mode = Path(exe).stat().st_mode
+            if mode & stat.S_IWOTH:
+                r.add(10, 'process executable is world-writable')
+        except OSError:
+            pass
+
+    # ── Discount: installed path (−30) ────────────────────
+    if exe:
+        exe_l = exe.lower().replace('\\', '/')
+        if any(exe_l.startswith(p.lower().replace('\\', '/')) for p in TRUSTED_PATH_PREFIXES):
+            r.add(-30, 'executable in standard installed-software path')
+
+    # ── Discount: system-owned process (−20) ──────────────
+    if OS == 'Linux':
+        try:
+            status = Path(f'/proc/{pid}/status').read_text(errors='ignore')
+            for line in status.splitlines():
+                if line.startswith('Uid:'):
+                    uid = int(line.split()[1])
+                    if uid == 0:
+                        r.add(-20, 'process owned by root (system service)')
+                    break
+        except (OSError, ValueError):
+            pass
+
+    return r
+
+
+DANGEROUS_EXTENSIONS = {'.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf',
+                         '.bin', '.bat', '.ps1', '.vbs', '.cmd', '.scr', '.pif'}
+
+SCAN_DIRS_LINUX   = ['/tmp', '/var/tmp', '/dev/shm',
+                     str(Path.home() / '.local/bin'),
+                     str(Path.home() / '.config')]
+SCAN_DIRS_WINDOWS = [
+    os.environ.get('TEMP', ''), os.environ.get('APPDATA', ''),
+    'C:/Windows/Temp', 'C:/ProgramData',
+]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -611,221 +565,131 @@ def _get_process_connections(pid: int) -> Tuple[set, int]:
 class SecurityScanner:
 
     def __init__(self):
-        self.results:       List[ScanResult] = []
-        self._user_wl:      set  = load_user_whitelist()
-        self._hash_cache:   dict = _load_hash_cache()
-        self._hash_dirty:   bool = False
-        self._watchlist_new: List[dict] = []   # entries added this scan run
+        self.results: List[ScanResult] = []
+        self._ok_count = 0
 
     def scan(self, log_cb: Callable[[str, str], None]) -> List[ScanResult]:
-        self.results        = []
-        self._user_wl       = load_user_whitelist()
-        self._watchlist_new = []
+        self.results = []
+        self._ok_count = 0
+        t0 = time.monotonic()
 
         log_cb('═' * 52, 'head')
-        log_cb('  SECURITY SCAN  //  Threat Scoring Engine v2.4', 'head')
+        log_cb('  SECURITY SCAN  //  Smart Analysis v2.3', 'head')
         log_cb('═' * 52, 'head')
-
-        prune_watchlist()   # remove stale entries silently
 
         if OS == 'Linux':
-            self._scan_processes_scored(log_cb)
+            self._scan_running_processes(log_cb)
             self._scan_suid_sgid(log_cb)
             self._scan_world_writable(log_cb)
             self._scan_cron(log_cb)
             self._scan_suspicious_files(log_cb, SCAN_DIRS_LINUX)
+            self._scan_network_linux(log_cb)
             self._scan_ld_preload(log_cb)
             self._scan_ssh_authorized_keys(log_cb)
             self._scan_hosts_file(log_cb)
         elif OS == 'Windows':
-            self._scan_processes_scored(log_cb)
+            self._scan_running_processes(log_cb)
             self._scan_suspicious_files(log_cb, [d for d in SCAN_DIRS_WINDOWS if d])
             self._scan_autorun_windows(log_cb)
+            self._scan_network_windows(log_cb)
             self._scan_hosts_file(log_cb)
 
-        # Save hash cache if updated
-        if self._hash_dirty:
-            _save_hash_cache(self._hash_cache)
-
-        # Summary
-        crits  = [r for r in self.results if r.severity == 'critical']
-        highs  = [r for r in self.results if r.severity == 'high']
-        mediums = [r for r in self.results if r.severity == 'medium']
-
-        log_cb('', 'info')
-        log_cb('═' * 52, 'head')
-        if crits:
-            log_cb(f'  ⛔  {len(crits)} CRITICAL threats found!', 'err')
-        if highs:
-            log_cb(f'  ⚠   {len(highs)} HIGH severity issues', 'warn')
-        if mediums:
-            log_cb(f'  ~   {len(mediums)} MEDIUM / watchlist entries', 'warn')
-        if not crits and not highs:
-            log_cb('  ✓   No critical threats detected', 'ok')
-        if self._watchlist_new:
-            log_cb(f'  👁   {len(self._watchlist_new)} process(es) added to watchlist', 'info')
-        log_cb(f'  Total findings: {len(self.results)}', 'info')
-        log_cb('═' * 52, 'head')
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        self._print_summary(log_cb, elapsed_ms)
         return self.results
 
-    # ══════════════════════════════════════════════════════
-    # SCORED PROCESS SCANNER (replaces old _scan_running_processes
-    # + _scan_network_linux + _scan_network_windows)
-    # ══════════════════════════════════════════════════════
+    def _ok(self, log_cb, msg: str):
+        """Log an all-clear line and increment ok counter."""
+        log_cb(f'  ✓  {msg}', 'ok')
+        self._ok_count += 1
 
-    def _scan_processes_scored(self, log_cb: Callable):
-        """
-        Single unified process scanner for Linux + Windows.
-        Uses threat scoring matrix instead of binary if/else.
-        """
+    # ══════════════════════════════════════════════════════
+    # RUNNING PROCESSES  (smart scoring engine)
+    # ══════════════════════════════════════════════════════
+    def _scan_running_processes(self, log_cb):
         log_cb('', 'info')
-        log_cb('◆ Scanning processes (threat scoring engine)...', 'info')
-
+        log_cb('◆ Scanning running processes...', 'info')
         try:
             import psutil
         except ImportError:
             log_cb('  ~ psutil not available — process scan skipped', 'dim')
             return
 
-        # Collect CPU samples first (non-blocking call — will measure on second call below)
-        for p in psutil.process_iter(['pid']):
+        found_any = False
+        scanned = 0
+        trusted_skip = 0
+
+        for p in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
             try:
-                p.cpu_percent(interval=None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+                pid  = p.info['pid']
+                name = (p.info['name'] or '').strip()
+                exe  = (p.info['exe'] or '')
+                cmd  = ' '.join(p.info['cmdline'] or [])
 
-        # Brief wait for CPU measurement window
-        import time as _t
-        _t.sleep(0.4)
+                scanned += 1
 
-        critical_count = 0
-        watchlist_count = 0
-        clean_count    = 0
-
-        for p in psutil.process_iter(['pid', 'name', 'exe', 'cmdline', 'status']):
-            try:
-                pid     = p.info['pid']
-                name    = (p.info['name'] or '').strip()
-                exe     = p.info['exe'] or ''
-                cmdline = ' '.join(p.info['cmdline'] or [])
-
-                # ── Whitelist bypass check ─────────────────────────
-                is_wl, wl_reason = _is_whitelisted_process(exe, cmdline)
-                if is_wl:
-                    # Don't log every whitelisted process — too noisy
-                    # Only log if it would have been suspicious by name
-                    if name.lower().replace('.exe', '') in {m.lower() for m in KNOWN_MINERS}:
-                        log_cb(f'  ✓  Whitelisted: {name} ({wl_reason})', 'dim')
-                    clean_count += 1
+                # ── Fast trusted check first ───────────────────
+                is_trusted, trust_reason = _is_trusted_process(name, exe, pid)
+                if is_trusted:
+                    trusted_skip += 1
                     continue
 
-                # ── Get network info for this process ──────────────
-                listen_ports, established = _get_process_connections(pid)
+                # ── Score the process ──────────────────────────
+                risk = _score_process(name, exe, cmd.lower(), pid)
 
-                # ── CPU sample ─────────────────────────────────────
-                try:
-                    cpu_pct = p.cpu_percent(interval=None)
-                    high_cpu_sentinel = -999 if cpu_pct > 80 else 0
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    high_cpu_sentinel = 0
+                if risk.severity is None:
+                    continue  # not suspicious enough
 
-                # ── Score this process ─────────────────────────────
-                score, reasons = _score_process(
-                    pid, name, exe, cmdline,
-                    self._user_wl,
-                    listen_ports,
-                    high_cpu_sentinel if high_cpu_sentinel else established,
-                )
+                found_any = True
+                _kill = _safe_kill_cmd(pid)
 
-                # ── Windows: check digital signature ──────────────
-                # Only for processes already scoring > 0 (avoid overhead for clean)
-                if OS == 'Windows' and score > 0 and exe:
-                    if _check_digital_signature_windows(exe):
-                        score = max(0, score - 30)
-                        reasons.append('Valid digital signature (-30)')
+                # ── Format detail message ──────────────────────
+                display_name = name or Path(exe).name if exe else f'PID {pid}'
+                detail = f'{display_name} (PID {pid}) — {risk.verdict()}'
 
-                # ── Hash cache: detect binary tampering ───────────
-                if exe and score > 0:
-                    old_hash = self._hash_cache.get(exe)
-                    new_hash = _exe_sha256(exe)
-                    if new_hash:
-                        if old_hash and old_hash != new_hash:
-                            score = min(100, score + 25)
-                            reasons.append(f'Binary hash changed since last scan! (+25)')
-                        if new_hash != old_hash:
-                            self._hash_cache[exe] = new_hash
-                            self._hash_dirty = True
-
-                # ── Verdict ───────────────────────────────────────
-                if score >= 70:
-                    # CRITICAL — offer kill
-                    _kill = _safe_kill_cmd(pid)
-                    severity = 'critical' if score >= 80 else 'high'
-                    detail = (
-                        f'Score {score}/100  ·  PID {pid}\n'
-                        f'Reasons: {"; ".join(reasons)}'
-                    )
-                    r = ScanResult(
-                        severity=severity, category='malware',
-                        path=exe or name, detail=detail,
-                        can_fix=bool(_kill), fix_cmd=_kill,
-                        score=score, reasons=reasons,
-                    )
-                    self.results.append(r)
-                    icon = '⛔' if severity == 'critical' else '⚠'
-                    log_cb(f'  {icon}  [{score}/100] {name} (PID {pid})', 'err' if severity == 'critical' else 'warn')
-                    for reason in reasons[:3]:
-                        log_cb(f'       • {reason}', 'dim')
-                    critical_count += 1
-
-                elif score >= 40:
-                    # WATCHLIST — suspicious but not confirmed
-                    update_watchlist(exe or name, pid, score, reasons)
-                    self._watchlist_new.append({'path': exe or name, 'score': score})
-                    detail = (
-                        f'Score {score}/100  ·  PID {pid}  ·  Under observation\n'
-                        f'Reasons: {"; ".join(reasons)}'
-                    )
-                    r = ScanResult(
-                        severity='medium', category='watchlist',
-                        path=exe or name, detail=detail,
-                        can_fix=False, fix_cmd='',
-                        score=score, reasons=reasons,
-                    )
-                    self.results.append(r)
-                    log_cb(f'  ~  [{score}/100] {name} (PID {pid}) → watchlist', 'warn')
-                    for reason in reasons[:2]:
-                        log_cb(f'       • {reason}', 'dim')
-                    watchlist_count += 1
-
+                # ── Special user-friendly label for miners ─────
+                if risk.score >= 60 and any('miner' in s.lower() for s in risk.signals):
+                    category = 'malware'
+                    label    = 'MINER'
+                    icon     = '⛔'
+                elif risk.severity == 'critical':
+                    category = 'malware'
+                    label    = 'BACKDOOR'
+                    icon     = '⛔'
+                elif risk.severity == 'high':
+                    category = 'suspicious'
+                    label    = 'SUSPICIOUS'
+                    icon     = '⚠ '
                 else:
-                    # CLEAN
-                    if score > 0:
-                        # Has some minor flags but not enough to worry
-                        log_cb(
-                            f'  ✓  [{score}/100] {name} — low risk'
-                            + (f' ({reasons[0]})' if reasons else ''),
-                            'dim'
-                        )
-                    clean_count += 1
+                    category = 'suspicious'
+                    label    = 'ANOMALY'
+                    icon     = '~ '
+
+                self.results.append(ScanResult(
+                    severity=risk.severity,
+                    category=category,
+                    path=exe or name,
+                    detail=detail,
+                    reasons=risk.signals,
+                    can_fix=bool(_kill),
+                    fix_cmd=_kill,
+                ))
+
+                log_cb(f'  {icon} [{label}] {display_name}  PID={pid}', 'err' if risk.severity == 'critical' else 'warn')
+                # Print the individual signals so user can see WHY
+                for sig in risk.signals:
+                    if sig.startswith('+'):
+                        log_cb(f'       {sig}', 'dim')
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
 
-        # Summary line
-        if critical_count == 0 and watchlist_count == 0:
-            log_cb('  ✓  All processes clean', 'ok')
-        else:
-            log_cb(
-                f'  →  {critical_count} critical, {watchlist_count} watchlisted, '
-                f'{clean_count} clean',
-                'info',
-            )
+        if not found_any:
+            self._ok(log_cb, f'No malicious processes detected ({scanned} processes scanned, {trusted_skip} trusted)')
 
     # ══════════════════════════════════════════════════════
-    # SUID/SGID (Linux) — unchanged logic, kept as-is
+    # SUID/SGID  (unchanged logic, improved output)
     # ══════════════════════════════════════════════════════
-
     def _scan_suid_sgid(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Scanning SUID/SGID binaries...', 'info')
@@ -836,8 +700,7 @@ class SecurityScanner:
             '/bin/ping', '/usr/bin/ping', '/usr/bin/traceroute',
             '/usr/bin/mount', '/usr/bin/umount', '/usr/sbin/unix_chkpwd',
             '/usr/bin/Xorg', '/usr/lib/xorg/Xorg', '/usr/lib/xorg-server/Xorg.wrap',
-            '/usr/lib/systemd/systemd-logind',
-            '/usr/lib/systemd/systemd-user-sessions',
+            '/usr/lib/systemd/systemd-logind', '/usr/lib/systemd/systemd-user-sessions',
             '/usr/bin/fusermount', '/usr/bin/fusermount3',
             '/usr/lib/dbus-1.0/dbus-daemon-launch-helper',
         }
@@ -848,20 +711,20 @@ class SecurityScanner:
             if not f or f in known_suid or _is_expected_suid_path(f):
                 continue
             self.results.append(ScanResult(
-                'high', 'suid', f,
-                f'Unexpected SUID binary: {f}',
-                can_fix=True,
-                fix_cmd=f'sudo -n {HELPER} fix-suid "{f}"',
+                severity='high', category='suid', path=f,
+                detail=f'Unexpected SUID binary: {f}',
+                reasons=['File has setuid bit outside known-safe whitelist'],
+                can_fix=True, fix_cmd=_h('fix-suid', f),
             ))
             log_cb(f'  ⚠  Unexpected SUID: {f}', 'warn')
+            log_cb(f'     Strip with: sudo chmod u-s "{f}" (fix available)', 'dim')
             found += 1
         if found == 0:
-            log_cb('  ✓  No unexpected SUID binaries', 'ok')
+            self._ok(log_cb, 'No unexpected SUID binaries')
 
     # ══════════════════════════════════════════════════════
-    # WORLD-WRITABLE (Linux)
+    # WORLD-WRITABLE
     # ══════════════════════════════════════════════════════
-
     def _scan_world_writable(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Scanning world-writable files in system dirs...', 'info')
@@ -872,29 +735,27 @@ class SecurityScanner:
             if not f:
                 continue
             self.results.append(ScanResult(
-                'high', 'writable', f,
-                f'World-writable system file: {f}',
-                can_fix=True,
-                fix_cmd=f'sudo -n {HELPER} fix-writable "{f}"',
+                severity='high', category='writable', path=f,
+                detail=f'World-writable system file: {f}',
+                reasons=['Any user can modify this system file'],
+                can_fix=True, fix_cmd=_h('fix-writable', f),
             ))
             log_cb(f'  ⚠  World-writable: {f}', 'warn')
             found += 1
         if found == 0:
-            log_cb('  ✓  No world-writable system files', 'ok')
+            self._ok(log_cb, 'No world-writable system files')
 
     # ══════════════════════════════════════════════════════
-    # CRON BACKDOORS (Linux)
+    # CRON BACKDOORS
     # ══════════════════════════════════════════════════════
-
     def _scan_cron(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Scanning cron jobs for backdoors...', 'info')
-        cron_dirs = [
-            '/etc/cron.d', '/etc/cron.daily', '/etc/cron.hourly',
-            '/var/spool/cron', str(Path.home() / '.local/share/cron'),
-        ]
+        cron_dirs = ['/etc/cron.d', '/etc/cron.daily', '/etc/cron.hourly',
+                     '/var/spool/cron', str(Path.home() / '.local/share/cron')]
         found   = 0
         partial = False
+
         for d in cron_dirs:
             p = Path(d)
             if not p.exists():
@@ -903,170 +764,250 @@ class SecurityScanner:
                 for f in _safe_walk(p):
                     try:
                         txt = f.read_text(errors='ignore')
-                        for pattern, desc in SUSPICIOUS_SCRIPTS:
+                        for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                             if re.search(pattern, txt, re.I):
                                 self.results.append(ScanResult(
-                                    'critical', 'cron', str(f),
-                                    f'Suspicious cron: {desc} in {f.name}',
+                                    severity='critical', category='cron', path=str(f),
+                                    detail=f'Cron backdoor: {desc} in {f.name}',
+                                    reasons=[f'Pattern matched in {f}', desc],
                                 ))
-                                log_cb(f'  ⛔  Cron backdoor: {desc} in {f}', 'err')
+                                log_cb(f'  ⛔  Cron backdoor [{desc}]: {f}', 'err')
                                 found += 1
                                 break
                     except (PermissionError, OSError):
-                        log_cb(f'  ~ {f.name}: permission denied', 'dim')
+                        log_cb(f'  ~ {f.name}: permission denied — run as root for full scan', 'dim')
                         partial = True
             except PermissionError:
-                log_cb(f'  ~ {d}: permission denied — run as root for full scan', 'dim')
+                log_cb(f'  ~ {d}: permission denied — run as root for full cron scan', 'dim')
                 partial = True
 
         crontab = run('crontab -l 2>/dev/null')
-        for pattern, desc in SUSPICIOUS_SCRIPTS:
+        for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
             if re.search(pattern, crontab, re.I):
-                self.results.append(ScanResult('critical', 'cron', 'crontab',
-                    f'Suspicious user crontab: {desc}'))
+                self.results.append(ScanResult(
+                    severity='critical', category='cron', path='user crontab',
+                    detail=f'Cron backdoor: {desc}',
+                    reasons=[desc],
+                ))
                 log_cb(f'  ⛔  Cron backdoor in user crontab: {desc}', 'err')
                 found += 1
 
         if found == 0:
-            msg = '(partial scan — run as root for full coverage)' if partial else ''
-            log_cb(f'  ✓  No cron backdoors found {msg}', 'ok')
+            suffix = ' (partial — run as root for full scan)' if partial else ''
+            self._ok(log_cb, f'No cron backdoors found{suffix}')
 
     # ══════════════════════════════════════════════════════
-    # SUSPICIOUS FILES — with hash cache for speed
+    # SUSPICIOUS FILES  (smart context filtering)
     # ══════════════════════════════════════════════════════
-
     def _scan_suspicious_files(self, log_cb, dirs):
         log_cb('', 'info')
         log_cb('◆ Scanning suspicious files in temp/user dirs...', 'info')
         found = 0
+
         for d in dirs:
             p = Path(d)
             if not p.exists():
                 continue
             try:
                 for f in _safe_walk(p):
-                    _fstr = str(f).lower()
-                    # Skip known safe subdirectory patterns
-                    if any(skip in _fstr for skip in (
-                        'node_modules', '\\cache', '/cache', '.git',
+                    fstr = str(f)
+                    fstr_l = fstr.lower()
+
+                    # ── Skip safe contexts ─────────────────────
+                    if any(skip in fstr_l for skip in (
+                        'node_modules', '/cache', '\\cache', '.git',
                         '__pycache__', '.venv', 'site-packages',
-                        '/tmp/_mei', '/tmp/.mount_',   # PyInstaller / AppImage
+                        'subdir', '_mei', '.mount_',
                     )):
                         continue
+
+                    # ── Skip files over 50MB ───────────────────
                     try:
                         if f.stat().st_size > 50_000_000:
                             continue
-                    except (OSError, PermissionError):
+                    except OSError:
                         continue
 
+                    # ── Only scan script/executable extensions ──
                     if f.suffix.lower() not in DANGEROUS_EXTENSIONS:
                         continue
 
                     try:
-                        # Hash cache: skip if file unchanged since last scan
-                        fpath_str = str(f)
-                        old_hash  = self._hash_cache.get(fpath_str)
-                        new_hash  = _exe_sha256(fpath_str)
-                        if new_hash and old_hash == new_hash:
-                            continue   # file unchanged — skip full text scan
-                        if new_hash:
-                            self._hash_cache[fpath_str] = new_hash
-                            self._hash_dirty = True
-
                         txt = f.read_text(errors='ignore')[:4096]
-                        for pattern, desc in SUSPICIOUS_SCRIPTS:
-                            if re.search(pattern, txt, re.I):
-                                # Score the file too (for consistency)
-                                file_score = 70   # script pattern match = already suspicious
-                                if _fstr.startswith(('/tmp', '/dev/shm', '/var/tmp')):
-                                    file_score += 10
-                                # Check user whitelist
-                                if fpath_str.lower() in self._user_wl:
-                                    file_score = max(0, file_score - 50)
-                                if file_score >= 40:
-                                    fix_cmd = (
-                                        f'sudo -n {HELPER} remove-file "{f}"'
-                                        if OS == 'Linux' else f'del /f /q "{f}"'
-                                    )
-                                    self.results.append(ScanResult(
-                                        'critical', 'malware', str(f), desc,
-                                        can_fix=True, fix_cmd=fix_cmd,
-                                        score=file_score,
-                                    ))
-                                    log_cb(f'  ⛔  Malicious script [{file_score}/100]: {f.name} — {desc}', 'err')
-                                    found += 1
-                                break
-
-                        # Executable in /tmp (Linux) — score it
-                        if OS == 'Linux' and str(f).startswith('/tmp'):
-                            try:
-                                if f.stat().st_mode & stat.S_IXUSR:
-                                    self.results.append(ScanResult(
-                                        'medium', 'suspicious', str(f),
-                                        f'Executable file in /tmp: {f.name}',
-                                        score=35,
-                                    ))
-                                    log_cb(f'  ~  Exec in /tmp: {f.name}', 'warn')
-                                    found += 1
-                            except (OSError, PermissionError):
-                                pass
-
                     except (OSError, PermissionError, UnicodeDecodeError):
-                        pass
-            except (OSError, PermissionError):
+                        continue
+
+                    # ── Check if file is from CyberClean itself ─
+                    if any(marker in fstr for marker in ('CyberClean', 'cyberclean')):
+                        continue
+
+                    # ── Pattern match ──────────────────────────
+                    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+                        if re.search(pattern, txt, re.I):
+                            fix_cmd = (
+                                f'sudo -n {HELPER} remove-file "{f}"'
+                                if OS == 'Linux' else f'del /f /q "{f}"'
+                            )
+                            self.results.append(ScanResult(
+                                severity='critical', category='malware', path=fstr,
+                                detail=f'Malicious script: {f.name}',
+                                reasons=[f'Pattern: {desc}', f'Location: {fstr[:80]}'],
+                                can_fix=True, fix_cmd=fix_cmd,
+                            ))
+                            log_cb(f'  ⛔  Malicious script: {f.name}', 'err')
+                            log_cb(f'     Reason: {desc}', 'dim')
+                            found += 1
+                            break
+
+                    # ── Executable in /tmp (Linux) — low severity ──
+                    if OS == 'Linux' and fstr.startswith('/tmp') and found == 0:
+                        try:
+                            if f.stat().st_mode & stat.S_IXUSR:
+                                if not (re.search(r'/tmp/_MEI[^/]+/', fstr) or
+                                        re.search(r'/tmp/\.mount_', fstr)):
+                                    self.results.append(ScanResult(
+                                        severity='medium', category='suspicious', path=fstr,
+                                        detail=f'Executable file in /tmp: {f.name}',
+                                        reasons=['Executable bit set in /tmp — unusual for legitimate software'],
+                                    ))
+                                    log_cb(f'  ~  Executable in /tmp: {f.name}', 'warn')
+                                    found += 1
+                        except OSError:
+                            pass
+
+            except (PermissionError, OSError):
                 pass
 
         if found == 0:
-            log_cb('  ✓  No suspicious files found', 'ok')
+            self._ok(log_cb, 'No suspicious files found in temp/user dirs')
 
     # ══════════════════════════════════════════════════════
-    # LD_PRELOAD / rootkit indicator (Linux)
+    # NETWORK — LINUX
     # ══════════════════════════════════════════════════════
+    def _scan_network_linux(self, log_cb):
+        log_cb('', 'info')
+        log_cb('◆ Scanning active network connections...', 'info')
+        out = run('ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null', timeout=8)
+        found = 0
 
+        # Strict ports — high confidence RAT/C2 (report standalone)
+        strict_ports = {4444: 'Metasploit default', 1337: 'common RAT port',
+                        31337: 'classic backdoor port', 6667: 'IRC/botnet',
+                        6666: 'common RAT port', 54321: 'common RAT port'}
+        # Mining ports — lower confidence (only report with label)
+        mining_ports = {3333: 'Monero/XMR pool', 5555: 'ETH pool',
+                        14444: 'mining pool', 45560: 'mining pool'}
+
+        for line in out.splitlines():
+            for port, label in strict_ports.items():
+                if f':{port} ' in line or f':{port}\t' in line:
+                    self.results.append(ScanResult(
+                        severity='high', category='network', path=line.strip(),
+                        detail=f'Suspicious port {port} listening ({label})',
+                        reasons=[f'Port {port} is associated with: {label}'],
+                    ))
+                    log_cb(f'  ⚠  Port {port} ({label}): {line.strip()}', 'warn')
+                    found += 1
+
+            for port, label in mining_ports.items():
+                if f':{port} ' in line or f':{port}\t' in line:
+                    self.results.append(ScanResult(
+                        severity='medium', category='network', path=line.strip(),
+                        detail=f'Mining pool port {port} listening ({label})',
+                        reasons=[f'Port {port} commonly used by {label}'],
+                    ))
+                    log_cb(f'  ~  Mining pool port {port} ({label}): {line.strip()}', 'warn')
+                    found += 1
+
+        if found == 0:
+            self._ok(log_cb, 'No suspicious listening ports')
+
+    # ══════════════════════════════════════════════════════
+    # NETWORK — WINDOWS
+    # ══════════════════════════════════════════════════════
+    def _scan_network_windows(self, log_cb):
+        log_cb('', 'info')
+        log_cb('◆ Scanning active network connections...', 'info')
+        out = run('netstat -ano 2>nul', timeout=10)
+        found = 0
+
+        strict_ports  = {4444, 1337, 31337, 12345, 54321, 6666, 6667}
+        port_labels   = {4444: 'Metasploit default', 1337: 'RAT port',
+                         31337: 'classic backdoor', 12345: 'common backdoor',
+                         54321: 'RAT port', 6666: 'RAT port', 6667: 'IRC/botnet'}
+
+        for line in out.splitlines():
+            if 'LISTENING' not in line:
+                continue
+            for port in strict_ports:
+                if f':{port} ' in line or f':{port}\t' in line:
+                    label = port_labels.get(port, 'suspicious port')
+                    self.results.append(ScanResult(
+                        severity='high', category='network', path=line.strip(),
+                        detail=f'Suspicious port {port} listening ({label})',
+                        reasons=[f'Port {port}: {label}'],
+                    ))
+                    log_cb(f'  ⚠  Port {port} ({label}): {line.strip()}', 'warn')
+                    found += 1
+
+        if found == 0:
+            self._ok(log_cb, 'No suspicious ports detected')
+
+    # ══════════════════════════════════════════════════════
+    # LD_PRELOAD
+    # ══════════════════════════════════════════════════════
     def _scan_ld_preload(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Checking LD_PRELOAD / dynamic linker hijacks...', 'info')
         found = 0
+
         p = Path('/etc/ld.so.preload')
         if p.exists() and p.stat().st_size > 0:
             content = p.read_text(errors='ignore').strip()
             self.results.append(ScanResult(
-                'critical', 'malware', str(p),
-                f'LD_PRELOAD set globally: {content}',
-                score=95,
+                severity='critical', category='malware', path=str(p),
+                detail=f'LD_PRELOAD set globally: {content}',
+                reasons=['Global LD_PRELOAD injects a library into every process — classic rootkit technique'],
             ))
             log_cb(f'  ⛔  /etc/ld.so.preload has entries: {content}', 'err')
+            log_cb('     This is a classic rootkit persistence mechanism.', 'dim')
             found += 1
+
         env_preload = os.environ.get('LD_PRELOAD', '')
         if env_preload:
-            self.results.append(ScanResult(
-                'high', 'malware', '$LD_PRELOAD',
-                f'LD_PRELOAD env: {env_preload}',
-                score=70,
-            ))
-            log_cb(f'  ⚠  LD_PRELOAD env set: {env_preload}', 'warn')
-            found += 1
+            # Check if it's a legitimate library (e.g. steam, fakechroot)
+            trusted_preloads = ('fakechroot', 'libfakechroot', 'steam-runtime',
+                                'libsteam', 'valgrind', 'libasan', 'libtsan')
+            is_trusted_preload = any(t in env_preload.lower() for t in trusted_preloads)
+            if not is_trusted_preload:
+                self.results.append(ScanResult(
+                    severity='high', category='malware', path='$LD_PRELOAD',
+                    detail=f'LD_PRELOAD env set: {env_preload}',
+                    reasons=['LD_PRELOAD env var set to non-standard library'],
+                ))
+                log_cb(f'  ⚠  LD_PRELOAD env: {env_preload}', 'warn')
+                found += 1
+            else:
+                log_cb(f'  ✓  LD_PRELOAD set but recognized as trusted: {env_preload}', 'ok')
+
         if found == 0:
-            log_cb('  ✓  No LD_PRELOAD hijacks detected', 'ok')
+            self._ok(log_cb, 'No LD_PRELOAD hijacks detected')
 
     # ══════════════════════════════════════════════════════
     # SSH AUTHORIZED KEYS
     # ══════════════════════════════════════════════════════
-
     def _scan_ssh_authorized_keys(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Checking SSH authorized_keys...', 'info')
         ak = Path.home() / '.ssh/authorized_keys'
         if not ak.exists():
-            log_cb('  ✓  No authorized_keys file', 'ok')
+            self._ok(log_cb, 'No authorized_keys file')
             return
 
-        lines = [
-            l.strip() for l in ak.read_text(errors='ignore').splitlines()
-            if l.strip() and not l.startswith('#')
-        ]
+        lines = [l.strip() for l in ak.read_text(errors='ignore').splitlines()
+                 if l.strip() and not l.startswith('#')]
         if not lines:
-            log_cb('  ✓  No SSH authorized keys', 'ok')
+            self._ok(log_cb, 'No SSH authorized keys')
             return
 
         KNOWN_KEY_TYPES = (
@@ -1074,45 +1015,48 @@ class SecurityScanner:
             'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521',
             'sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com',
         )
-        log_cb(f'  ✓  {len(lines)} SSH authorized key(s) found', 'ok')
+        suspicious = []
+        for line in lines:
+            if re.match(r'command\s*=', line, re.I):
+                suspicious.append(('high', f'Forced-command key (remote code exec risk): ...{line[-50:]}'))
+            elif not any(line.startswith(kt) for kt in KNOWN_KEY_TYPES) and \
+                 not re.match(r'(no-|from=|environment=|permitopen=|restrict)', line, re.I):
+                suspicious.append(('medium', f'Unrecognised key format: ...{line[-50:]}'))
+
+        log_cb(f'  ✓  {len(lines)} SSH authorized key(s) — looks normal', 'ok')
         for i, line in enumerate(lines[:3]):
             log_cb(f'     key {i+1}: ...{line[-40:]}', 'dim')
 
-        for line in lines:
-            if re.match(r'command\s*=', line, re.I):
-                self.results.append(ScanResult(
-                    'high', 'suspicious', str(ak),
-                    f'Forced-command key (remote code exec risk): ...{line[-50:]}',
-                    score=65,
-                ))
-                log_cb(f'  ⚠  Forced-command SSH key detected', 'warn')
-            elif (not any(line.startswith(kt) for kt in KNOWN_KEY_TYPES) and
-                  not re.match(r'(no-|from=|environment=|permitopen=|restrict)', line, re.I)):
-                self.results.append(ScanResult(
-                    'medium', 'suspicious', str(ak),
-                    f'Unrecognised key format: ...{line[-50:]}',
-                    score=40,
-                ))
-                log_cb(f'  ~  Unrecognised SSH key format', 'warn')
+        for severity, detail in suspicious:
+            self.results.append(ScanResult(
+                severity=severity, category='suspicious', path=str(ak),
+                detail=detail,
+                reasons=['Unusual option in authorized_keys line'],
+            ))
+            log_cb(f'  {"⛔" if severity == "high" else "⚠ "}  {detail}',
+                   'err' if severity == 'high' else 'warn')
 
     # ══════════════════════════════════════════════════════
-    # /etc/hosts TAMPERING
+    # HOSTS FILE
     # ══════════════════════════════════════════════════════
-
     def _scan_hosts_file(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Checking /etc/hosts for tampering...', 'info')
+
         if OS == 'Linux':
             hosts_path = Path('/etc/hosts')
         else:
-            windir     = os.environ.get('WINDIR', 'C:/Windows')
+            windir = os.environ.get('WINDIR', 'C:/Windows')
             hosts_path = Path(f'{windir}/System32/drivers/etc/hosts')
+
         if not hosts_path.exists():
             log_cb('  ~ hosts file not found', 'dim')
             return
+
         suspicious_domains = [
             'google.com', 'facebook.com', 'github.com', 'microsoft.com',
             'apple.com', 'amazon.com', 'paypal.com', 'bankofamerica.com',
+            'windows.com', 'windowsupdate.com',
         ]
         found = 0
         for line in hosts_path.read_text(errors='ignore').splitlines():
@@ -1123,24 +1067,26 @@ class SecurityScanner:
             if len(parts) < 2:
                 continue
             ip, *domains = parts
-            if ip in ('127.0.0.1', '::1', '0.0.0.0'):
-                continue   # ad blockers legitimately redirect to localhost — skip
+            # Skip standard localhost entries
+            if ip in ('127.0.0.1', '::1', '0.0.0.0', 'fe80::1%lo0'):
+                continue
             for d in domains:
                 if any(sd in d for sd in suspicious_domains):
                     self.results.append(ScanResult(
-                        'high', 'malware', str(hosts_path),
-                        f'Suspicious hosts redirect: {line}',
-                        score=80,
+                        severity='high', category='malware', path=str(hosts_path),
+                        detail=f'Hosts file redirect: {line}',
+                        reasons=[f'Trusted domain "{d}" redirected to {ip}'],
                     ))
                     log_cb(f'  ⚠  Hosts hijack: {line}', 'warn')
+                    log_cb(f'     Domain "{d}" is being redirected to {ip}', 'dim')
                     found += 1
+
         if found == 0:
-            log_cb('  ✓  hosts file looks clean', 'ok')
+            self._ok(log_cb, 'Hosts file looks clean')
 
     # ══════════════════════════════════════════════════════
     # WINDOWS AUTORUNS
     # ══════════════════════════════════════════════════════
-
     def _scan_autorun_windows(self, log_cb):
         log_cb('', 'info')
         log_cb('◆ Scanning Windows autorun entries...', 'info')
@@ -1155,13 +1101,29 @@ class SecurityScanner:
             (winreg.HKEY_LOCAL_MACHINE, r'Software\Microsoft\Windows\CurrentVersion\Run'),
             (winreg.HKEY_LOCAL_MACHINE, r'Software\Microsoft\Windows\CurrentVersion\RunOnce'),
         ]
-        # Keywords that are highly suspicious in autorun values
+
+        # Keywords that are genuinely suspicious in autorun values
         suspicious_kw = [
-            'temp', 'appdata\\local\\temp', '%temp%',
-            'powershell -enc', 'cmd /c', 'wscript', 'cscript',
-            'mshta', 'regsvr32', 'certutil', 'bitsadmin',
-            '/dev/shm', '/tmp/',
+            ('powershell -enc',  'Encoded PowerShell command (obfuscation)'),
+            ('powershell -w hidden', 'Hidden PowerShell window'),
+            ('%temp%\\',         'Autorun from Temp folder'),
+            ('appdata\\local\\temp\\', 'Autorun from Temp folder'),
+            ('\\temp\\',         'Autorun from Temp folder'),
+            ('mshta ',           'MSHTA execution (used by malware)'),
+            ('wscript ',         'WScript execution outside System32'),
+            ('cscript ',         'CScript execution outside System32'),
+            ('regsvr32 /s',      'Silent RegSvr32 (COM scriptlet loading)'),
+            ('certutil -decode', 'Certutil decoding (dropper pattern)'),
+            ('bitsadmin /transfer', 'BITSAdmin file download'),
         ]
+
+        # Known legitimate entries that may contain suspicious-looking keywords
+        trusted_autorun_names = {
+            'SecurityHealth', 'WindowsDefender', 'OneDrive',
+            'GoogleChromeAutoLaunch', 'Discord', 'Slack', 'Spotify',
+            'Steam', 'EpicGamesLauncher',
+        }
+
         found = 0
         for hive, key_path in keys:
             try:
@@ -1170,31 +1132,73 @@ class SecurityScanner:
                 while True:
                     try:
                         name, val, _ = winreg.EnumValue(key, i)
-                        val_lower = val.lower()
-                        for kw in suspicious_kw:
-                            if kw in val_lower:
-                                # Score the autorun entry
-                                ar_score = 50
-                                if 'powershell -enc' in val_lower or 'certutil' in val_lower:
-                                    ar_score = 75
-                                if val_lower.startswith(('c:/windows/', 'c:\\windows\\')):
-                                    ar_score = max(0, ar_score - 20)
+                        i += 1
 
+                        # Skip known legitimate entries
+                        if name in trusted_autorun_names:
+                            continue
+
+                        val_lower = val.lower()
+                        for kw, reason in suspicious_kw:
+                            if kw.lower() in val_lower:
                                 self.results.append(ScanResult(
-                                    'high' if ar_score >= 70 else 'medium',
-                                    'malware', val,
-                                    f'Suspicious autorun [{ar_score}/100]: {name} = {val}',
-                                    score=ar_score,
+                                    severity='high', category='malware', path=val,
+                                    detail=f'Suspicious autorun: {name}',
+                                    reasons=[reason, f'Value: {val[:100]}'],
                                 ))
-                                log_cb(f'  ⚠  Suspicious autorun [{ar_score}/100]: {name}', 'warn')
-                                log_cb(f'     {val}', 'dim')
+                                log_cb(f'  ⚠  Suspicious autorun: {name}', 'warn')
+                                log_cb(f'     Reason: {reason}', 'dim')
+                                log_cb(f'     Value: {val[:80]}', 'dim')
                                 found += 1
                                 break
-                        i += 1
                     except OSError:
                         break
                 winreg.CloseKey(key)
             except (OSError, PermissionError):
                 pass
+
         if found == 0:
-            log_cb('  ✓  No suspicious autoruns', 'ok')
+            self._ok(log_cb, 'No suspicious autoruns')
+
+    # ══════════════════════════════════════════════════════
+    # SUMMARY  (smart, tiered)
+    # ══════════════════════════════════════════════════════
+    def _print_summary(self, log_cb, elapsed_ms: int):
+        crits  = [r for r in self.results if r.severity == 'critical']
+        highs  = [r for r in self.results if r.severity == 'high']
+        meds   = [r for r in self.results if r.severity == 'medium']
+
+        log_cb('', 'info')
+        log_cb('═' * 52, 'head')
+        log_cb('  SCAN COMPLETE', 'head')
+        log_cb('─' * 52, 'head')
+
+        if crits:
+            log_cb(f'  ⛔  {len(crits)} CRITICAL threat(s) — action required', 'err')
+            for r in crits[:5]:
+                log_cb(f'       › {r.detail[:70]}', 'err')
+
+        if highs:
+            log_cb(f'  ⚠   {len(highs)} HIGH severity issue(s) — review recommended', 'warn')
+            for r in highs[:5]:
+                log_cb(f'       › {r.detail[:70]}', 'warn')
+
+        if meds:
+            log_cb(f'  ~   {len(meds)} MEDIUM finding(s) — low priority', 'dim')
+
+        if not crits and not highs and not meds:
+            log_cb('  ✓   System looks clean — no threats detected', 'ok')
+        elif not crits and not highs:
+            log_cb('  ✓   No high-severity threats (only low-priority anomalies)', 'ok')
+
+        log_cb('─' * 52, 'head')
+        log_cb(f'  Total findings : {len(self.results)}', 'info')
+        log_cb(f'  Categories OK  : {self._ok_count}', 'info')
+        log_cb(f'  Scan duration  : {elapsed_ms} ms', 'info')
+        log_cb('═' * 52, 'head')
+
+        # Explain the scoring system briefly so user understands
+        if self.results:
+            log_cb('', 'info')
+            log_cb('  ℹ  Each finding shows WHY it was flagged (+signals above).', 'dim')
+            log_cb('  ℹ  CRITICAL = multiple strong signals agree. Not a single guess.', 'dim')

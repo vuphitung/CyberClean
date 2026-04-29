@@ -195,6 +195,92 @@ TRANSLATIONS = {
     'zombie_title':   'Background Process Detected',
     'zombie_msg':     'CyberClean is running in background but cannot be shown.\n\nForce kill the old process and reopen?',
     'zombie_err':     'Could not kill old process. Please restart your computer.',
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'DRY-RUN',
+    'log_mode_clean': 'CLEAN',
+    'log_freed': 'freed',
+    'log_removed': 'removed',
+    'log_items': 'items',
+    'log_total_freed': 'TOTAL FREED',
+    'log_total_estimated': 'TOTAL ESTIMATED',
+    'log_scanning_net': 'Scanning active network processes...',
+    'log_scan_header': 'SECURITY SCAN  //  Smart Analysis v2.3',
+    'log_scan_processes': 'Scanning running processes...',
+    'log_scan_suid': 'Scanning SUID/SGID binaries...',
+    'log_scan_writable': 'Scanning world-writable files in system dirs...',
+    'log_scan_cron': 'Scanning cron jobs for backdoors...',
+    'log_scan_tempfiles': 'Scanning suspicious files in temp/user dirs...',
+    'log_scan_network': 'Scanning active network connections...',
+    'log_scan_ldpreload': 'Checking LD_PRELOAD / dynamic linker hijacks...',
+    'log_scan_ssh': 'Checking SSH authorized_keys...',
+    'log_scan_hosts': 'Checking /etc/hosts for tampering...',
+    'log_scan_autorun': 'Scanning Windows autorun entries...',
+    'log_scan_ok_processes': 'No malicious processes detected',
+    'log_scan_ok_suid': 'No unexpected SUID binaries',
+    'log_scan_ok_writable': 'No world-writable system files',
+    'log_scan_ok_cron': 'No cron backdoors found',
+    'log_scan_ok_tempfiles': 'No suspicious files found in temp/user dirs',
+    'log_scan_ok_network': 'No suspicious listening ports',
+    'log_scan_ok_ldpreload': 'No LD_PRELOAD hijacks detected',
+    'log_scan_ok_ssh': 'No authorized_keys file',
+    'log_scan_ok_hosts': 'Hosts file looks clean',
+    'log_scan_complete': 'SCAN COMPLETE',
+    'log_scan_clean': 'System looks clean — no threats detected',
+    'log_scan_total': 'Total findings',
+    'log_scan_categories': 'Categories OK',
+    'log_scan_duration': 'Scan duration',
+    'log_detecting_tier': 'Detecting PC tier (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost ON  [HIGH-END — Gaming rig]',
+    'log_boost_on_mid': 'Smart Boost ON  [MID — Solid machine]',
+    'log_boost_on_low': 'Smart Boost ON  [LOW-END — Potato mode]',
+    'log_boost_off': 'Smart Boost OFF — settings restored',
+    'log_starting_game': 'Starting Game Mode...',
+    'log_starting_eco': 'Starting Eco Mode...',
+    'log_freeing_ram': 'Freeing RAM...',
+    'log_freeing_ram_cache': 'Freeing RAM (cache-preserving)...',
+    'log_game_on': '⚡ GAME MODE ON',
+    'log_game_off': 'GAME MODE OFF — restored',
+    'log_tuning_mem': 'Tuning memory settings...',
+    'log_clearing_cache': 'Clearing disk & GPU cache...',
+    'log_scan_bloat': 'Scanning for background bloat...',
+    'log_psi_active': 'PSI monitor: active — auto kill-bloat on memory pressure',
+    'log_mem_compacted': 'Memory compacted — fragmented pages defragged',
+    'log_cache_preserved': 'Page cache preserved — browser/app data stays warm',
+    'log_boost_all_done': 'Smart Boost ON [{tier}] — all layers applied',
+    'log_no_game_running': 'No game running — browser/media apps will NOT be jailed',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'BEFORE',
+    'lbl_after': 'AFTER',
+    'lbl_after_est': 'AFTER (EST)',
+    'lbl_pct_used': 'used',
+    'lbl_simulated': 'simulated',
+    'btn_preview': 'PREVIEW FILES',
+    'preview_title': 'Preview — Files to be Deleted',
+    'preview_desc': 'Files that would be deleted (up to 200 per target):',
+    'auto_clean_title': 'AUTO-CLEAN SCHEDULE',
+    'auto_clean_desc': 'Auto-clean safe targets when system is idle.',
+    'sched_off': 'Off',
+    'sched_6h': 'Every 6 hours',
+    'sched_12h': 'Every 12 hours',
+    'sched_24h': 'Every 24 hours',
+    'sched_idle': 'When idle only',
+    'lbl_last_run': 'Last run',
+    'lbl_never_run': 'Never run yet',
+    'btn_run_now': 'RUN NOW',
+    'lbl_disk_trend': 'DISK USAGE TREND (30 days)',
+    'nav_startup': 'STARTUP',
+    'startup_sub': 'Enable or disable programs that run at login',
+    'startup_info': 'Changes take effect at next login. Only disable items you recognise.',
+    'startup_items_count': 'items',
+    'col_toggle': 'TOGGLE',
+    'status_enabled': 'ENABLED',
+    'status_disabled': 'DISABLED',
+    'btn_enable': 'ENABLE',
+    'btn_disable': 'DISABLE',
+    'lbl_loading': 'Loading…',
+    'btn_close': 'CLOSE',
 },
 
 # ════════════════════════════════════════════════════
@@ -363,7 +449,94 @@ TRANSLATIONS = {
     'zombie_title':   'Phát Hiện Tiến Trình Cũ',
     'zombie_msg':     'CyberClean đang chạy ngầm và không thể hiển thị.\n\nBạn có muốn tắt ép tiến trình cũ và mở lại không?',
     'zombie_err':     'Không thể tắt tiến trình cũ. Vui lòng khởi động lại máy tính.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'THỬ NGHIỆM',
+    'log_mode_clean': 'DỌN RÁC',
+    'log_freed': 'đã giải phóng',
+    'log_removed': 'đã xóa',
+    'log_items': 'mục',
+    'log_total_freed': 'TỔNG DỌN ĐƯỢC',
+    'log_total_estimated': 'TỔNG ƯỚC TÍNH',
+    'log_scanning_net': 'Đang quét tiến trình mạng...',
+    'log_scan_header': 'QUÉT BẢO MẬT  //  Phân tích thông minh v2.3',
+    'log_scan_processes': 'Đang quét tiến trình đang chạy...',
+    'log_scan_suid': 'Đang quét file SUID/SGID...',
+    'log_scan_writable': 'Đang quét file ghi-được-bởi-mọi-người...',
+    'log_scan_cron': 'Đang quét cron job tìm backdoor...',
+    'log_scan_tempfiles': 'Đang quét file nghi ngờ trong thư mục tạm...',
+    'log_scan_network': 'Đang quét kết nối mạng đang hoạt động...',
+    'log_scan_ldpreload': 'Kiểm tra LD_PRELOAD / chiếm quyền linker...',
+    'log_scan_ssh': 'Kiểm tra SSH authorized_keys...',
+    'log_scan_hosts': 'Kiểm tra /etc/hosts bị chỉnh sửa...',
+    'log_scan_autorun': 'Đang quét autorun Windows...',
+    'log_scan_ok_processes': 'Không phát hiện tiến trình độc hại',
+    'log_scan_ok_suid': 'Không có file SUID bất thường',
+    'log_scan_ok_writable': 'Không có file hệ thống có thể ghi tự do',
+    'log_scan_ok_cron': 'Không phát hiện backdoor trong cron',
+    'log_scan_ok_tempfiles': 'Không có file đáng ngờ trong thư mục tạm',
+    'log_scan_ok_network': 'Không có cổng lắng nghe đáng ngờ',
+    'log_scan_ok_ldpreload': 'Không phát hiện chiếm quyền LD_PRELOAD',
+    'log_scan_ok_ssh': 'Không có file authorized_keys',
+    'log_scan_ok_hosts': 'File hosts trông sạch',
+    'log_scan_complete': 'QUÉT HOÀN TẤT',
+    'log_scan_clean': 'Hệ thống trông sạch — không phát hiện mối đe dọa',
+    'log_scan_total': 'Tổng phát hiện',
+    'log_scan_categories': 'Danh mục an toàn',
+    'log_scan_duration': 'Thời gian quét',
+    'log_detecting_tier': 'Đang xác định cấu hình máy (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost BẬT  [CAO CẤP — Máy chơi game]',
+    'log_boost_on_mid': 'Smart Boost BẬT  [TRUNG BÌNH — Máy ổn định]',
+    'log_boost_on_low': 'Smart Boost BẬT  [THẤP CẤP — Chế độ khoai tây]',
+    'log_boost_off': 'Smart Boost TẮT — đã khôi phục cài đặt',
+    'log_starting_game': 'Đang bật Chế độ Game...',
+    'log_starting_eco': 'Đang bật Chế độ Tiết kiệm...',
+    'log_freeing_ram': 'Đang giải phóng RAM...',
+    'log_freeing_ram_cache': 'Đang giải phóng RAM (giữ cache)...',
+    'log_game_on': '⚡ CHẾ ĐỘ GAME BẬT',
+    'log_game_off': 'CHẾ ĐỘ GAME TẮT — đã khôi phục',
+    'log_tuning_mem': 'Đang điều chỉnh bộ nhớ...',
+    'log_clearing_cache': 'Đang xóa cache ổ đĩa & GPU...',
+    'log_scan_bloat': 'Đang quét phần mềm nền...',
+    'log_psi_active': 'Giám sát PSI: đang hoạt động — tự tắt app nền khi áp lực RAM',
+    'log_mem_compacted': 'Bộ nhớ đã được gom — chống phân mảnh xong',
+    'log_cache_preserved': 'Giữ nguyên page cache — dữ liệu trình duyệt không bị xóa',
+    'log_boost_all_done': 'Smart Boost BẬT [{tier}] — đã áp dụng tất cả lớp',
+    'log_no_game_running': 'Không có game đang chạy — trình duyệt/media sẽ KHÔNG bị cách ly',
+
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'TRƯỚC',
+    'lbl_after': 'SAU',
+    'lbl_after_est': 'SAU (ƯỚC)',
+    'lbl_pct_used': 'đã dùng',
+    'lbl_simulated': 'mô phỏng',
+    'btn_preview': 'XEM TRƯỚC',
+    'preview_title': 'Xem trước — Các file sẽ bị xóa',
+    'preview_desc': 'Các file sẽ bị xóa (tối đa 200 file mỗi mục tiêu):',
+    'auto_clean_title': 'LỊCH DỌN TỰ ĐỘNG',
+    'auto_clean_desc': 'Tự động dọn các mục an toàn khi máy rảnh.',
+    'sched_off': 'Tắt',
+    'sched_6h': 'Mỗi 6 tiếng',
+    'sched_12h': 'Mỗi 12 tiếng',
+    'sched_24h': 'Mỗi 24 tiếng',
+    'sched_idle': 'Khi máy rảnh',
+    'lbl_last_run': 'Lần cuối',
+    'lbl_never_run': 'Chưa chạy lần nào',
+    'btn_run_now': 'CHẠY NGAY',
+    'lbl_disk_trend': 'XU HƯỚNG Ổ ĐĨA (30 ngày)',
+    'nav_startup': 'KHỞI ĐỘNG',
+    'startup_sub': 'Bật hoặc tắt chương trình chạy khi đăng nhập',
+    'startup_info': 'Thay đổi có hiệu lực lần đăng nhập tiếp theo. Chỉ tắt những mục bạn biết.',
+    'startup_items_count': 'mục',
+    'col_toggle': 'BẬT/TẮT',
+    'status_enabled': 'BẬT',
+    'status_disabled': 'TẮT',
+    'btn_enable': 'BẬT',
+    'btn_disable': 'TẮT',
+    'lbl_loading': 'Đang tải…',
+    'btn_close': 'ĐÓNG',
+    'upd_err_small_win': 'File tải về quá nhỏ — kiểm tra kết nối internet',},
 
 # ════════════════════════════════════════════════════
 # 中文 (Simplified Chinese)
@@ -484,7 +657,102 @@ TRANSLATIONS = {
     'zombie_title': '检测到后台进程',
     'zombie_msg': 'CyberClean 正在后台运行但无法显示。\n\n强制终止旧进程并重新打开？',
     'zombie_err': '无法终止旧进程。请重启计算机。',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': '预览模式',
+    'log_mode_clean': '清理',
+    'log_freed': '已释放',
+    'log_removed': '已删除',
+    'log_items': '项目',
+    'log_total_freed': '总计释放',
+    'log_total_estimated': '总计估算',
+    'log_scanning_net': '正在扫描活动网络进程...',
+    'log_scan_header': '安全扫描  //  智能分析 v2.3',
+    'log_scan_processes': '正在扫描运行中的进程...',
+    'log_scan_suid': '正在扫描SUID/SGID文件...',
+    'log_scan_writable': '正在扫描系统目录可写文件...',
+    'log_scan_cron': '正在扫描计划任务后门...',
+    'log_scan_tempfiles': '正在扫描临时目录可疑文件...',
+    'log_scan_network': '正在扫描活动网络连接...',
+    'log_scan_ldpreload': '检查LD_PRELOAD劫持...',
+    'log_scan_ssh': '检查SSH授权密钥...',
+    'log_scan_hosts': '检查/etc/hosts是否被篡改...',
+    'log_scan_autorun': '正在扫描Windows自启动项...',
+    'log_scan_ok_processes': '未检测到恶意进程',
+    'log_scan_ok_suid': '无异常SUID文件',
+    'log_scan_ok_writable': '无可全局写入的系统文件',
+    'log_scan_ok_cron': '未发现cron后门',
+    'log_scan_ok_tempfiles': '临时目录无可疑文件',
+    'log_scan_ok_network': '无可疑监听端口',
+    'log_scan_ok_ldpreload': '未检测到LD_PRELOAD劫持',
+    'log_scan_ok_ssh': '无authorized_keys文件',
+    'log_scan_ok_hosts': 'hosts文件正常',
+    'log_scan_complete': '扫描完成',
+    'log_scan_clean': '系统正常 — 未检测到威胁',
+    'log_scan_total': '总计发现',
+    'log_scan_categories': '安全类别',
+    'log_scan_duration': '扫描耗时',
+    'log_detecting_tier': '正在检测电脑配置(内存/处理器/显卡)...',
+    'log_boost_on_high': '智能加速已开启  [高端游戏主机]',
+    'log_boost_on_mid': '智能加速已开启  [中端稳定机]',
+    'log_boost_on_low': '智能加速已开启  [低端土豆模式]',
+    'log_boost_off': '智能加速已关闭 — 设置已恢复',
+    'log_starting_game': '正在启动游戏模式...',
+    'log_starting_eco': '正在启动节能模式...',
+    'log_freeing_ram': '正在释放内存...',
+    'log_freeing_ram_cache': '正在释放内存(保留缓存)...',
+    'log_game_on': '⚡ 游戏模式已开启',
+    'log_game_off': '游戏模式已关闭 — 已恢复',
+    'log_tuning_mem': '正在调整内存设置...',
+    'log_clearing_cache': '正在清除磁盘和GPU缓存...',
+    'log_scan_bloat': '正在扫描后台冗余程序...',
+    'log_psi_active': 'PSI监控已启动 — 内存压力时自动清理',
+    'log_mem_compacted': '内存已整理 — 碎片页面已整理',
+    'log_cache_preserved': '页面缓存已保留 — 浏览器/应用数据保持活跃',
+    'log_boost_all_done': '智能加速已开启 [{tier}] — 所有层级已应用',
+    'log_no_game_running': '无游戏运行 — 浏览器/媒体应用不会被限制',
+
+    'close_pref_reset_body': '您下次关闭窗口时将再次询问。',
+    'close_pref_reset_title': '偏好已重置',
+    'remember_close_choice': '记住我的选择 — 下次跳过此对话框',
+    'rollback_open_folder': '在文件管理器中打开',
+    'tray_reset_close_pref': '重置关闭窗口首选项…',
+    'tray_running_bg': '在后台运行。每6小时自动清理。',
+    'upd_final_message': '更新完成！',
+    'upd_installing_optimizing': '正在安装并优化…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': '清理前',
+    'lbl_after': '清理后',
+    'lbl_after_est': '清理后(估算)',
+    'lbl_pct_used': '已使用',
+    'lbl_simulated': '模拟',
+    'btn_preview': '预览文件',
+    'preview_title': '预览 — 将被删除的文件',
+    'preview_desc': '将被删除的文件（每个目标最多显示200个）：',
+    'auto_clean_title': '自动清理计划',
+    'auto_clean_desc': '系统空闲时自动清理安全目标。',
+    'sched_off': '关闭',
+    'sched_6h': '每6小时',
+    'sched_12h': '每12小时',
+    'sched_24h': '每24小时',
+    'sched_idle': '仅在空闲时',
+    'lbl_last_run': '上次运行',
+    'lbl_never_run': '从未运行',
+    'btn_run_now': '立即运行',
+    'lbl_disk_trend': '磁盘使用趋势（30天）',
+    'nav_startup': '启动项',
+    'startup_sub': '启用或禁用登录时运行的程序',
+    'startup_info': '更改在下次登录时生效。仅禁用您熟悉的项目。',
+    'startup_items_count': '项',
+    'col_toggle': '切换',
+    'status_enabled': '已启用',
+    'status_disabled': '已禁用',
+    'btn_enable': '启用',
+    'btn_disable': '禁用',
+    'lbl_loading': '加载中…',
+    'btn_close': '关闭',
+    'upd_restart_countdown': '将在{n}秒内重启…',},
 
 # ════════════════════════════════════════════════════
 # 日本語
@@ -597,7 +865,102 @@ TRANSLATIONS = {
     'zombie_title': 'バックグラウンドプロセス検出',
     'zombie_msg': 'CyberCleanはバックグラウンドで実行中ですが表示できません。\n\n強制終了して再起動しますか？',
     'zombie_err': '古いプロセスを終了できません。コンピュータを再起動してください。',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'ドライラン',
+    'log_mode_clean': 'クリーン',
+    'log_freed': '解放済み',
+    'log_removed': '削除済み',
+    'log_items': 'アイテム',
+    'log_total_freed': '合計解放',
+    'log_total_estimated': '合計推定',
+    'log_scanning_net': 'アクティブなネットワークプロセスをスキャン中...',
+    'log_scan_header': 'セキュリティスキャン  //  スマート解析 v2.3',
+    'log_scan_processes': '実行中のプロセスをスキャン中...',
+    'log_scan_suid': 'SUID/SGIDバイナリをスキャン中...',
+    'log_scan_writable': 'ワールドライタブルファイルをスキャン中...',
+    'log_scan_cron': 'cronジョブのバックドアをスキャン中...',
+    'log_scan_tempfiles': '一時ディレクトリの不審なファイルをスキャン中...',
+    'log_scan_network': 'アクティブなネットワーク接続をスキャン中...',
+    'log_scan_ldpreload': 'LD_PRELOADハイジャックを確認中...',
+    'log_scan_ssh': 'SSH authorized_keysを確認中...',
+    'log_scan_hosts': '/etc/hostsの改ざんを確認中...',
+    'log_scan_autorun': 'Windowsの自動起動エントリをスキャン中...',
+    'log_scan_ok_processes': '悪意のあるプロセスは検出されませんでした',
+    'log_scan_ok_suid': '予期しないSUIDバイナリなし',
+    'log_scan_ok_writable': 'ワールドライタブルなシステムファイルなし',
+    'log_scan_ok_cron': 'cronバックドアは見つかりませんでした',
+    'log_scan_ok_tempfiles': '一時ディレクトリに不審なファイルなし',
+    'log_scan_ok_network': '疑わしいリスニングポートなし',
+    'log_scan_ok_ldpreload': 'LD_PRELOADハイジャックは検出されませんでした',
+    'log_scan_ok_ssh': 'authorized_keysファイルなし',
+    'log_scan_ok_hosts': 'hostsファイルは正常です',
+    'log_scan_complete': 'スキャン完了',
+    'log_scan_clean': 'システムは正常です — 脅威は検出されませんでした',
+    'log_scan_total': '合計検出数',
+    'log_scan_categories': 'カテゴリOK',
+    'log_scan_duration': 'スキャン時間',
+    'log_detecting_tier': 'PCクラスを検出中(RAM/CPU/GPU)...',
+    'log_boost_on_high': 'スマートブーストON  [ハイエンド — ゲーミングPC]',
+    'log_boost_on_mid': 'スマートブーストON  [ミッドレンジ — 安定機]',
+    'log_boost_on_low': 'スマートブーストON  [ローエンド — ポテトモード]',
+    'log_boost_off': 'スマートブーストOFF — 設定を復元しました',
+    'log_starting_game': 'ゲームモードを開始中...',
+    'log_starting_eco': 'エコモードを開始中...',
+    'log_freeing_ram': 'RAMを解放中...',
+    'log_freeing_ram_cache': 'RAMを解放中(キャッシュ保持)...',
+    'log_game_on': '⚡ ゲームモードON',
+    'log_game_off': 'ゲームモードOFF — 復元しました',
+    'log_tuning_mem': 'メモリ設定を調整中...',
+    'log_clearing_cache': 'ディスク＆GPUキャッシュをクリア中...',
+    'log_scan_bloat': 'バックグラウンドの無駄なプロセスをスキャン中...',
+    'log_psi_active': 'PSIモニター起動中 — メモリ圧迫時に自動クリーン',
+    'log_mem_compacted': 'メモリを整理しました — 断片化ページをデフラグ',
+    'log_cache_preserved': 'ページキャッシュ保持 — ブラウザ/アプリデータはウォーム',
+    'log_boost_all_done': 'スマートブーストON [{tier}] — 全レイヤー適用済み',
+    'log_no_game_running': 'ゲームは実行されていません — ブラウザ/メディアは制限されません',
+
+    'close_pref_reset_body': '次回ウィンドウを閉じる際に再度確認します。',
+    'close_pref_reset_title': '設定がリセットされました',
+    'remember_close_choice': '選択を記憶する — 次回このダイアログをスキップ',
+    'rollback_open_folder': 'フォルダを開く',
+    'tray_reset_close_pref': 'ウィンドウ閉じる設定をリセット…',
+    'tray_running_bg': 'バックグラウンドで実行中。6時間ごとに自動クリーン。',
+    'upd_final_message': '更新完了！',
+    'upd_installing_optimizing': 'インストール中…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'クリーン前',
+    'lbl_after': 'クリーン後',
+    'lbl_after_est': 'クリーン後(推定)',
+    'lbl_pct_used': '使用中',
+    'lbl_simulated': 'シミュレーション',
+    'btn_preview': 'ファイル確認',
+    'preview_title': 'プレビュー — 削除されるファイル',
+    'preview_desc': '削除されるファイル（各ターゲット最大200件）：',
+    'auto_clean_title': '自動クリーンスケジュール',
+    'auto_clean_desc': 'システムがアイドル時に安全なターゲットを自動クリーン。',
+    'sched_off': 'オフ',
+    'sched_6h': '6時間ごと',
+    'sched_12h': '12時間ごと',
+    'sched_24h': '24時間ごと',
+    'sched_idle': 'アイドル時のみ',
+    'lbl_last_run': '最終実行',
+    'lbl_never_run': '未実行',
+    'btn_run_now': '今すぐ実行',
+    'lbl_disk_trend': 'ディスク使用トレンド（30日）',
+    'nav_startup': 'スタートアップ',
+    'startup_sub': 'ログイン時に実行するプログラムを有効/無効にする',
+    'startup_info': '変更は次回ログイン時に有効になります。認識しているものだけ無効にしてください。',
+    'startup_items_count': '件',
+    'col_toggle': '切替',
+    'status_enabled': '有効',
+    'status_disabled': '無効',
+    'btn_enable': '有効化',
+    'btn_disable': '無効化',
+    'lbl_loading': '読み込み中…',
+    'btn_close': '閉じる',
+    'upd_restart_countdown': '{n}秒後に再起動…',},
 
 # ════════════════════════════════════════════════════
 # 한국어
@@ -683,7 +1046,102 @@ TRANSLATIONS = {
     'zombie_title': '백그라운드 프로세스 감지',
     'zombie_msg': 'CyberClean이 백그라운드에서 실행 중이지만 표시할 수 없습니다.\n\n이전 프로세스를 강제 종료하고 다시 열까요?',
     'zombie_err': '이전 프로세스를 종료할 수 없습니다. 컴퓨터를 다시 시작하세요.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': '미리보기',
+    'log_mode_clean': '정리',
+    'log_freed': '해제됨',
+    'log_removed': '삭제됨',
+    'log_items': '항목',
+    'log_total_freed': '총 해제',
+    'log_total_estimated': '총 추정',
+    'log_scanning_net': '활성 네트워크 프로세스 스캔 중...',
+    'log_scan_header': '보안 스캔  //  스마트 분석 v2.3',
+    'log_scan_processes': '실행 중인 프로세스 스캔 중...',
+    'log_scan_suid': 'SUID/SGID 바이너리 스캔 중...',
+    'log_scan_writable': '시스템 디렉토리 쓰기 가능 파일 스캔 중...',
+    'log_scan_cron': '크론 작업에서 백도어 스캔 중...',
+    'log_scan_tempfiles': '임시 디렉토리 의심 파일 스캔 중...',
+    'log_scan_network': '활성 네트워크 연결 스캔 중...',
+    'log_scan_ldpreload': 'LD_PRELOAD 하이재킹 확인 중...',
+    'log_scan_ssh': 'SSH 인증 키 확인 중...',
+    'log_scan_hosts': '/etc/hosts 변조 확인 중...',
+    'log_scan_autorun': 'Windows 자동 실행 항목 스캔 중...',
+    'log_scan_ok_processes': '악성 프로세스 감지 안 됨',
+    'log_scan_ok_suid': '예상치 않은 SUID 바이너리 없음',
+    'log_scan_ok_writable': '전체 쓰기 가능 시스템 파일 없음',
+    'log_scan_ok_cron': '크론 백도어 없음',
+    'log_scan_ok_tempfiles': '임시 디렉토리에 의심 파일 없음',
+    'log_scan_ok_network': '의심스러운 수신 포트 없음',
+    'log_scan_ok_ldpreload': 'LD_PRELOAD 하이재킹 감지 안 됨',
+    'log_scan_ok_ssh': 'authorized_keys 파일 없음',
+    'log_scan_ok_hosts': 'hosts 파일 정상',
+    'log_scan_complete': '스캔 완료',
+    'log_scan_clean': '시스템 정상 — 위협 감지 안 됨',
+    'log_scan_total': '총 발견',
+    'log_scan_categories': '안전한 카테고리',
+    'log_scan_duration': '스캔 소요 시간',
+    'log_detecting_tier': 'PC 등급 감지 중(RAM / CPU / GPU)...',
+    'log_boost_on_high': '스마트 부스트 켜짐  [고사양 — 게이밍 PC]',
+    'log_boost_on_mid': '스마트 부스트 켜짐  [중간 — 안정적인 머신]',
+    'log_boost_on_low': '스마트 부스트 켜짐  [저사양 — 감자 모드]',
+    'log_boost_off': '스마트 부스트 꺼짐 — 설정 복원됨',
+    'log_starting_game': '게임 모드 시작 중...',
+    'log_starting_eco': '절전 모드 시작 중...',
+    'log_freeing_ram': 'RAM 해제 중...',
+    'log_freeing_ram_cache': 'RAM 해제 중(캐시 보존)...',
+    'log_game_on': '⚡ 게임 모드 켜짐',
+    'log_game_off': '게임 모드 꺼짐 — 복원됨',
+    'log_tuning_mem': '메모리 설정 조정 중...',
+    'log_clearing_cache': '디스크 및 GPU 캐시 삭제 중...',
+    'log_scan_bloat': '백그라운드 불필요 프로세스 스캔 중...',
+    'log_psi_active': 'PSI 모니터 활성 — 메모리 압력 시 자동 정리',
+    'log_mem_compacted': '메모리 정리됨 — 단편화된 페이지 최적화',
+    'log_cache_preserved': '페이지 캐시 보존 — 브라우저/앱 데이터 유지',
+    'log_boost_all_done': '스마트 부스트 켜짐 [{tier}] — 모든 레이어 적용됨',
+    'log_no_game_running': '실행 중인 게임 없음 — 브라우저/미디어 앱은 제한 안 됨',
+
+    'close_pref_reset_body': '다음에 창을 닫을 때 다시 묻습니다.',
+    'close_pref_reset_title': '기본 설정 초기화',
+    'remember_close_choice': '내 선택 기억하기 — 다음번에 이 대화 건너뛰기',
+    'rollback_open_folder': '폴더 열기',
+    'tray_reset_close_pref': '창 닫기 기본 설정 초기화…',
+    'tray_running_bg': '백그라운드에서 실행 중. 6시간마다 자동 정리.',
+    'upd_final_message': '업데이트 완료!',
+    'upd_installing_optimizing': '설치 및 최적화 중…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': '정리 전',
+    'lbl_after': '정리 후',
+    'lbl_after_est': '정리 후(추정)',
+    'lbl_pct_used': '사용됨',
+    'lbl_simulated': '시뮬레이션',
+    'btn_preview': '파일 미리보기',
+    'preview_title': '미리보기 — 삭제될 파일',
+    'preview_desc': '삭제될 파일 (대상당 최대 200개):',
+    'auto_clean_title': '자동 정리 일정',
+    'auto_clean_desc': '시스템이 유휴 상태일 때 안전한 대상을 자동 정리합니다.',
+    'sched_off': '꺼짐',
+    'sched_6h': '6시간마다',
+    'sched_12h': '12시간마다',
+    'sched_24h': '24시간마다',
+    'sched_idle': '유휴 시에만',
+    'lbl_last_run': '마지막 실행',
+    'lbl_never_run': '실행된 적 없음',
+    'btn_run_now': '지금 실행',
+    'lbl_disk_trend': '디스크 사용 추세 (30일)',
+    'nav_startup': '시작 프로그램',
+    'startup_sub': '로그인 시 실행되는 프로그램 활성화 또는 비활성화',
+    'startup_info': '변경 사항은 다음 로그인 시 적용됩니다. 아는 항목만 비활성화하세요.',
+    'startup_items_count': '항목',
+    'col_toggle': '전환',
+    'status_enabled': '활성화됨',
+    'status_disabled': '비활성화됨',
+    'btn_enable': '활성화',
+    'btn_disable': '비활성화',
+    'lbl_loading': '로딩 중…',
+    'btn_close': '닫기',
+    'upd_restart_countdown': '{n}초 후 재시작…',},
 
 # ════════════════════════════════════════════════════
 # Français
@@ -771,7 +1229,102 @@ TRANSLATIONS = {
     'zombie_title': 'Processus en arrière-plan détecté',
     'zombie_msg': 'CyberClean tourne en arrière-plan mais ne peut pas s\'afficher.\n\nForcer la fermeture et rouvrir ?',
     'zombie_err': 'Impossible de tuer l\'ancien processus. Veuillez redémarrer votre ordinateur.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'SIMULATION',
+    'log_mode_clean': 'NETTOYAGE',
+    'log_freed': 'libéré',
+    'log_removed': 'supprimé',
+    'log_items': 'éléments',
+    'log_total_freed': 'TOTAL LIBÉRÉ',
+    'log_total_estimated': 'TOTAL ESTIMÉ',
+    'log_scanning_net': 'Analyse des processus réseau actifs...',
+    'log_scan_header': 'SCAN SÉCURITÉ  //  Analyse Intelligente v2.3',
+    'log_scan_processes': 'Analyse des processus en cours...',
+    'log_scan_suid': 'Analyse des binaires SUID/SGID...',
+    'log_scan_writable': 'Analyse des fichiers accessibles en écriture...',
+    'log_scan_cron': 'Analyse des crons pour backdoors...',
+    'log_scan_tempfiles': 'Analyse des fichiers suspects dans les dossiers temp...',
+    'log_scan_network': 'Analyse des connexions réseau actives...',
+    'log_scan_ldpreload': 'Vérification des détournements LD_PRELOAD...',
+    'log_scan_ssh': 'Vérification des clés SSH autorisées...',
+    'log_scan_hosts': 'Vérification des modifications /etc/hosts...',
+    'log_scan_autorun': 'Analyse des entrées de démarrage automatique Windows...',
+    'log_scan_ok_processes': 'Aucun processus malveillant détecté',
+    'log_scan_ok_suid': 'Aucun binaire SUID inattendu',
+    'log_scan_ok_writable': 'Aucun fichier système accessible en écriture',
+    'log_scan_ok_cron': 'Aucun backdoor dans cron',
+    'log_scan_ok_tempfiles': 'Aucun fichier suspect dans les dossiers temp',
+    'log_scan_ok_network': 'Aucun port suspect en écoute',
+    'log_scan_ok_ldpreload': 'Aucun détournement LD_PRELOAD détecté',
+    'log_scan_ok_ssh': 'Aucun fichier authorized_keys',
+    'log_scan_ok_hosts': 'Le fichier hosts semble propre',
+    'log_scan_complete': 'SCAN TERMINÉ',
+    'log_scan_clean': 'Système propre — aucune menace détectée',
+    'log_scan_total': 'Total des résultats',
+    'log_scan_categories': 'Catégories OK',
+    'log_scan_duration': 'Durée du scan',
+    'log_detecting_tier': 'Détection du niveau PC (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost ACTIVÉ  [HAUT DE GAMME — PC Gaming]',
+    'log_boost_on_mid': 'Smart Boost ACTIVÉ  [MILIEU DE GAMME — Machine solide]',
+    'log_boost_on_low': 'Smart Boost ACTIVÉ  [BAS DE GAMME — Mode patate]',
+    'log_boost_off': 'Smart Boost DÉSACTIVÉ — paramètres restaurés',
+    'log_starting_game': 'Démarrage du mode jeu...',
+    'log_starting_eco': 'Démarrage du mode éco...',
+    'log_freeing_ram': 'Libération de la RAM...',
+    'log_freeing_ram_cache': 'Libération RAM (cache préservé)...',
+    'log_game_on': '⚡ MODE JEU ACTIVÉ',
+    'log_game_off': 'MODE JEU DÉSACTIVÉ — restauré',
+    'log_tuning_mem': 'Réglage des paramètres mémoire...',
+    'log_clearing_cache': 'Effacement du cache disque et GPU...',
+    'log_scan_bloat': 'Analyse des programmes en arrière-plan...',
+    'log_psi_active': 'Moniteur PSI actif — nettoyage auto sous pression mémoire',
+    'log_mem_compacted': 'Mémoire compactée — pages fragmentées défragmentées',
+    'log_cache_preserved': 'Cache de pages préservé — données navigateur/app maintenues',
+    'log_boost_all_done': 'Smart Boost ACTIVÉ [{tier}] — toutes les couches appliquées',
+    'log_no_game_running': 'Aucun jeu en cours — navigateur/media non confinés',
+
+    'close_pref_reset_body': 'Vous serez à nouveau sollicité à la prochaine fermeture.',
+    'close_pref_reset_title': 'Préférence réinitialisée',
+    'remember_close_choice': 'Mémoriser mon choix — ignorer ce dialogue la prochaine fois',
+    'rollback_open_folder': 'Ouvrir dans l\'explorateur',
+    'tray_reset_close_pref': 'Réinitialiser la préférence de fermeture…',
+    'tray_running_bg': 'Fonctionnement en arrière-plan. Nettoyage auto toutes les 6h.',
+    'upd_final_message': 'Mise à jour terminée !',
+    'upd_installing_optimizing': 'Installation…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'AVANT',
+    'lbl_after': 'APRÈS',
+    'lbl_after_est': 'APRÈS (EST.)',
+    'lbl_pct_used': 'utilisé',
+    'lbl_simulated': 'simulé',
+    'btn_preview': 'APERÇU',
+    'preview_title': 'Aperçu — Fichiers à supprimer',
+    'preview_desc': 'Fichiers qui seraient supprimés (200 max par cible) :',
+    'auto_clean_title': 'PLANIF. NETTOYAGE AUTO',
+    'auto_clean_desc': 'Nettoyer automatiquement les cibles sûres quand le système est inactif.',
+    'sched_off': 'Désactivé',
+    'sched_6h': 'Toutes les 6h',
+    'sched_12h': 'Toutes les 12h',
+    'sched_24h': 'Toutes les 24h',
+    'sched_idle': 'Seulement en veille',
+    'lbl_last_run': 'Dernière exéc.',
+    'lbl_never_run': 'Jamais exécuté',
+    'btn_run_now': 'EXÉCUTER',
+    'lbl_disk_trend': 'TENDANCE DISQUE (30 jours)',
+    'nav_startup': 'DÉMARRAGE',
+    'startup_sub': 'Activer ou désactiver les programmes au démarrage',
+    'startup_info': 'Les modifications prennent effet à la prochaine connexion. Ne désactivez que ce que vous reconnaissez.',
+    'startup_items_count': 'éléments',
+    'col_toggle': 'BASCULER',
+    'status_enabled': 'ACTIVÉ',
+    'status_disabled': 'DÉSACTIVÉ',
+    'btn_enable': 'ACTIVER',
+    'btn_disable': 'DÉSACTIVER',
+    'lbl_loading': 'Chargement…',
+    'btn_close': 'FERMER',
+    'upd_restart_countdown': 'Redémarre dans {n}s…',},
 
 # ════════════════════════════════════════════════════
 # Deutsch
@@ -859,7 +1412,102 @@ TRANSLATIONS = {
     'zombie_title': 'Hintergrundprozess erkannt',
     'zombie_msg': 'CyberClean läuft im Hintergrund, kann aber nicht angezeigt werden.\n\nAlten Prozess erzwingen beenden und neu öffnen?',
     'zombie_err': 'Konnte alten Prozess nicht beenden. Bitte Computer neu starten.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'TESTLAUF',
+    'log_mode_clean': 'BEREINIGEN',
+    'log_freed': 'freigegeben',
+    'log_removed': 'entfernt',
+    'log_items': 'Elemente',
+    'log_total_freed': 'GESAMT FREI',
+    'log_total_estimated': 'GESAMT GESCHÄTZT',
+    'log_scanning_net': 'Aktive Netzwerkprozesse scannen...',
+    'log_scan_header': 'SICHERHEITSSCAN  //  Intelligente Analyse v2.3',
+    'log_scan_processes': 'Laufende Prozesse scannen...',
+    'log_scan_suid': 'SUID/SGID-Binärdateien scannen...',
+    'log_scan_writable': 'Weltbeschreibbare Dateien scannen...',
+    'log_scan_cron': 'Cron-Jobs auf Backdoors scannen...',
+    'log_scan_tempfiles': 'Verdächtige Dateien in Temp-Verzeichnissen scannen...',
+    'log_scan_network': 'Aktive Netzwerkverbindungen scannen...',
+    'log_scan_ldpreload': 'LD_PRELOAD-Hijacks prüfen...',
+    'log_scan_ssh': 'SSH-Autorisierte Schlüssel prüfen...',
+    'log_scan_hosts': '/etc/hosts auf Manipulationen prüfen...',
+    'log_scan_autorun': 'Windows-Autostart-Einträge scannen...',
+    'log_scan_ok_processes': 'Keine schädlichen Prozesse gefunden',
+    'log_scan_ok_suid': 'Keine unerwarteten SUID-Binärdateien',
+    'log_scan_ok_writable': 'Keine weltbeschreibbaren Systemdateien',
+    'log_scan_ok_cron': 'Keine Cron-Backdoors gefunden',
+    'log_scan_ok_tempfiles': 'Keine verdächtigen Dateien in Temp-Verzeichnissen',
+    'log_scan_ok_network': 'Keine verdächtigen Listening-Ports',
+    'log_scan_ok_ldpreload': 'Keine LD_PRELOAD-Hijacks erkannt',
+    'log_scan_ok_ssh': 'Keine authorized_keys-Datei',
+    'log_scan_ok_hosts': 'Hosts-Datei sieht sauber aus',
+    'log_scan_complete': 'SCAN ABGESCHLOSSEN',
+    'log_scan_clean': 'System sieht sauber aus — keine Bedrohungen erkannt',
+    'log_scan_total': 'Gesamt Befunde',
+    'log_scan_categories': 'Kategorien OK',
+    'log_scan_duration': 'Scandauer',
+    'log_detecting_tier': 'PC-Klasse erkennen (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost EIN  [HIGHEND — Gaming-PC]',
+    'log_boost_on_mid': 'Smart Boost EIN  [MITTELKLASSE — Solider PC]',
+    'log_boost_on_low': 'Smart Boost EIN  [LOWEND — Kartoffelmodus]',
+    'log_boost_off': 'Smart Boost AUS — Einstellungen wiederhergestellt',
+    'log_starting_game': 'Spielmodus wird gestartet...',
+    'log_starting_eco': 'Öko-Modus wird gestartet...',
+    'log_freeing_ram': 'RAM wird freigegeben...',
+    'log_freeing_ram_cache': 'RAM freigeben (Cache erhalten)...',
+    'log_game_on': '⚡ SPIELMODUS EIN',
+    'log_game_off': 'SPIELMODUS AUS — wiederhergestellt',
+    'log_tuning_mem': 'Speichereinstellungen anpassen...',
+    'log_clearing_cache': 'Datenträger- & GPU-Cache leeren...',
+    'log_scan_bloat': 'Hintergrundprogramme scannen...',
+    'log_psi_active': 'PSI-Monitor aktiv — automatisch bei Speicherdruck',
+    'log_mem_compacted': 'Speicher komprimiert — fragmentierte Seiten defragmentiert',
+    'log_cache_preserved': 'Seitencache erhalten — Browser/App-Daten bleiben warm',
+    'log_boost_all_done': 'Smart Boost EIN [{tier}] — alle Ebenen angewendet',
+    'log_no_game_running': 'Kein Spiel läuft — Browser/Media-Apps werden NICHT eingeschränkt',
+
+    'close_pref_reset_body': 'Sie werden beim nächsten Schließen erneut gefragt.',
+    'close_pref_reset_title': 'Einstellung zurückgesetzt',
+    'remember_close_choice': 'Meine Wahl merken — diesen Dialog überspringen',
+    'rollback_open_folder': 'Im Dateimanager öffnen',
+    'tray_reset_close_pref': 'Schließen-Präferenz zurücksetzen…',
+    'tray_running_bg': 'Läuft im Hintergrund. Automatische Bereinigung alle 6h.',
+    'upd_final_message': 'Update abgeschlossen!',
+    'upd_installing_optimizing': 'Wird installiert…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'VORHER',
+    'lbl_after': 'NACHHER',
+    'lbl_after_est': 'NACHHER (GESCH.)',
+    'lbl_pct_used': 'belegt',
+    'lbl_simulated': 'simuliert',
+    'btn_preview': 'VORSCHAU',
+    'preview_title': 'Vorschau — Zu löschende Dateien',
+    'preview_desc': 'Zu löschende Dateien (max. 200 pro Ziel):',
+    'auto_clean_title': 'AUTO-CLEAN ZEITPLAN',
+    'auto_clean_desc': 'Sichere Ziele automatisch bereinigen, wenn das System inaktiv ist.',
+    'sched_off': 'Aus',
+    'sched_6h': 'Alle 6 Stunden',
+    'sched_12h': 'Alle 12 Stunden',
+    'sched_24h': 'Alle 24 Stunden',
+    'sched_idle': 'Nur bei Inaktivität',
+    'lbl_last_run': 'Letzter Lauf',
+    'lbl_never_run': 'Noch nie gelaufen',
+    'btn_run_now': 'JETZT STARTEN',
+    'lbl_disk_trend': 'DISK-TREND (30 Tage)',
+    'nav_startup': 'AUTOSTART',
+    'startup_sub': 'Programme beim Start aktivieren oder deaktivieren',
+    'startup_info': 'Änderungen wirken sich beim nächsten Login aus. Nur bekannte Einträge deaktivieren.',
+    'startup_items_count': 'Einträge',
+    'col_toggle': 'UMSCHALTEN',
+    'status_enabled': 'AKTIV',
+    'status_disabled': 'DEAKTIVIERT',
+    'btn_enable': 'AKTIVIEREN',
+    'btn_disable': 'DEAKTIVIEREN',
+    'lbl_loading': 'Wird geladen…',
+    'btn_close': 'SCHLIESSEN',
+    'upd_restart_countdown': 'Neustart in {n}s…',},
 
 # ════════════════════════════════════════════════════
 # Español
@@ -947,7 +1595,102 @@ TRANSLATIONS = {
     'zombie_title': 'Proceso en segundo plano detectado',
     'zombie_msg': 'CyberClean está ejecutándose en segundo plano pero no puede mostrarse.\n\n¿Forzar cierre del proceso antiguo y reabrir?',
     'zombie_err': 'No se pudo terminar el proceso antiguo. Por favor reinicie su computadora.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'SIMULACIÓN',
+    'log_mode_clean': 'LIMPIEZA',
+    'log_freed': 'liberado',
+    'log_removed': 'eliminado',
+    'log_items': 'elementos',
+    'log_total_freed': 'TOTAL LIBRE',
+    'log_total_estimated': 'TOTAL ESTIMADO',
+    'log_scanning_net': 'Analizando procesos de red activos...',
+    'log_scan_header': 'ANÁLISIS SEGURIDAD  //  Análisis Inteligente v2.3',
+    'log_scan_processes': 'Analizando procesos en ejecución...',
+    'log_scan_suid': 'Analizando binarios SUID/SGID...',
+    'log_scan_writable': 'Analizando archivos escribibles por todos...',
+    'log_scan_cron': 'Analizando cron jobs en busca de backdoors...',
+    'log_scan_tempfiles': 'Analizando archivos sospechosos en directorios temp...',
+    'log_scan_network': 'Analizando conexiones de red activas...',
+    'log_scan_ldpreload': 'Comprobando secuestros LD_PRELOAD...',
+    'log_scan_ssh': 'Comprobando claves SSH autorizadas...',
+    'log_scan_hosts': 'Comprobando manipulaciones en /etc/hosts...',
+    'log_scan_autorun': 'Analizando entradas de inicio automático de Windows...',
+    'log_scan_ok_processes': 'No se detectaron procesos maliciosos',
+    'log_scan_ok_suid': 'No hay binarios SUID inesperados',
+    'log_scan_ok_writable': 'No hay archivos de sistema escribibles por todos',
+    'log_scan_ok_cron': 'No se encontraron backdoors en cron',
+    'log_scan_ok_tempfiles': 'No hay archivos sospechosos en directorios temp',
+    'log_scan_ok_network': 'No hay puertos de escucha sospechosos',
+    'log_scan_ok_ldpreload': 'No se detectaron secuestros LD_PRELOAD',
+    'log_scan_ok_ssh': 'No hay archivo authorized_keys',
+    'log_scan_ok_hosts': 'El archivo hosts parece limpio',
+    'log_scan_complete': 'ANÁLISIS COMPLETADO',
+    'log_scan_clean': 'Sistema limpio — no se detectaron amenazas',
+    'log_scan_total': 'Total de hallazgos',
+    'log_scan_categories': 'Categorías OK',
+    'log_scan_duration': 'Duración del análisis',
+    'log_detecting_tier': 'Detectando nivel de PC (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost ACTIVADO  [GAMA ALTA — PC Gaming]',
+    'log_boost_on_mid': 'Smart Boost ACTIVADO  [GAMA MEDIA — Máquina sólida]',
+    'log_boost_on_low': 'Smart Boost ACTIVADO  [GAMA BAJA — Modo patata]',
+    'log_boost_off': 'Smart Boost DESACTIVADO — configuración restaurada',
+    'log_starting_game': 'Iniciando modo de juego...',
+    'log_starting_eco': 'Iniciando modo eco...',
+    'log_freeing_ram': 'Liberando RAM...',
+    'log_freeing_ram_cache': 'Liberando RAM (preservando caché)...',
+    'log_game_on': '⚡ MODO JUEGO ACTIVADO',
+    'log_game_off': 'MODO JUEGO DESACTIVADO — restaurado',
+    'log_tuning_mem': 'Ajustando configuración de memoria...',
+    'log_clearing_cache': 'Limpiando caché de disco y GPU...',
+    'log_scan_bloat': 'Analizando programas en segundo plano...',
+    'log_psi_active': 'Monitor PSI activo — limpieza auto bajo presión de memoria',
+    'log_mem_compacted': 'Memoria compactada — páginas fragmentadas desfragmentadas',
+    'log_cache_preserved': 'Caché de páginas preservado — datos de navegador/app conservados',
+    'log_boost_all_done': 'Smart Boost ACTIVADO [{tier}] — todas las capas aplicadas',
+    'log_no_game_running': 'Sin juego en ejecución — apps de navegador/media NO serán aisladas',
+
+    'close_pref_reset_body': 'Se le preguntará de nuevo la próxima vez que cierre la ventana.',
+    'close_pref_reset_title': 'Preferencia restablecida',
+    'remember_close_choice': 'Recordar mi elección — omitir este diálogo la próxima vez',
+    'rollback_open_folder': 'Abrir en el explorador',
+    'tray_reset_close_pref': 'Restablecer preferencia de cierre…',
+    'tray_running_bg': 'Ejecutándose en segundo plano. Limpieza automática cada 6h.',
+    'upd_final_message': '¡Actualización completada!',
+    'upd_installing_optimizing': 'Instalando…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'ANTES',
+    'lbl_after': 'DESPUÉS',
+    'lbl_after_est': 'DESPUÉS (EST.)',
+    'lbl_pct_used': 'usado',
+    'lbl_simulated': 'simulado',
+    'btn_preview': 'VISTA PREVIA',
+    'preview_title': 'Vista previa — Archivos a eliminar',
+    'preview_desc': 'Archivos que se eliminarían (máx. 200 por objetivo):',
+    'auto_clean_title': 'PROGRAMA AUTO-LIMPIEZA',
+    'auto_clean_desc': 'Limpiar automáticamente los objetivos seguros cuando el sistema esté inactivo.',
+    'sched_off': 'Desactivado',
+    'sched_6h': 'Cada 6 horas',
+    'sched_12h': 'Cada 12 horas',
+    'sched_24h': 'Cada 24 horas',
+    'sched_idle': 'Solo en reposo',
+    'lbl_last_run': 'Última ejecución',
+    'lbl_never_run': 'Nunca ejecutado',
+    'btn_run_now': 'EJECUTAR YA',
+    'lbl_disk_trend': 'TENDENCIA DISCO (30 días)',
+    'nav_startup': 'INICIO',
+    'startup_sub': 'Activar o desactivar programas al iniciar sesión',
+    'startup_info': 'Los cambios se aplicarán en el próximo inicio de sesión. Solo desactiva lo que reconoces.',
+    'startup_items_count': 'elementos',
+    'col_toggle': 'CAMBIAR',
+    'status_enabled': 'ACTIVADO',
+    'status_disabled': 'DESACTIVADO',
+    'btn_enable': 'ACTIVAR',
+    'btn_disable': 'DESACTIVAR',
+    'lbl_loading': 'Cargando…',
+    'btn_close': 'CERRAR',
+    'upd_restart_countdown': 'Reinicia en {n}s…',},
 
 # ════════════════════════════════════════════════════
 # Português
@@ -1035,7 +1778,102 @@ TRANSLATIONS = {
     'zombie_title': 'Processo em segundo plano detectado',
     'zombie_msg': 'CyberClean está executando em segundo plano mas não pode ser exibido.\n\nForçar encerramento do processo antigo e reabrir?',
     'zombie_err': 'Não foi possível encerrar o processo antigo. Por favor reinicie seu computador.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'SIMULAÇÃO',
+    'log_mode_clean': 'LIMPEZA',
+    'log_freed': 'liberado',
+    'log_removed': 'removido',
+    'log_items': 'itens',
+    'log_total_freed': 'TOTAL LIVRE',
+    'log_total_estimated': 'TOTAL ESTIMADO',
+    'log_scanning_net': 'Verificando processos de rede ativos...',
+    'log_scan_header': 'SCAN SEGURANÇA  //  Análise Inteligente v2.3',
+    'log_scan_processes': 'Verificando processos em execução...',
+    'log_scan_suid': 'Verificando binários SUID/SGID...',
+    'log_scan_writable': 'Verificando arquivos graváveis por todos...',
+    'log_scan_cron': 'Verificando cron jobs por backdoors...',
+    'log_scan_tempfiles': 'Verificando arquivos suspeitos em diretórios temp...',
+    'log_scan_network': 'Verificando conexões de rede ativas...',
+    'log_scan_ldpreload': 'Verificando sequestros LD_PRELOAD...',
+    'log_scan_ssh': 'Verificando chaves SSH autorizadas...',
+    'log_scan_hosts': 'Verificando /etc/hosts por adulteração...',
+    'log_scan_autorun': 'Verificando entradas de inicialização automática do Windows...',
+    'log_scan_ok_processes': 'Nenhum processo malicioso detectado',
+    'log_scan_ok_suid': 'Nenhum binário SUID inesperado',
+    'log_scan_ok_writable': 'Nenhum arquivo de sistema gravável por todos',
+    'log_scan_ok_cron': 'Nenhum backdoor em cron encontrado',
+    'log_scan_ok_tempfiles': 'Nenhum arquivo suspeito em diretórios temp',
+    'log_scan_ok_network': 'Nenhuma porta suspeita em escuta',
+    'log_scan_ok_ldpreload': 'Nenhum sequestro LD_PRELOAD detectado',
+    'log_scan_ok_ssh': 'Nenhum arquivo authorized_keys',
+    'log_scan_ok_hosts': 'Arquivo hosts parece limpo',
+    'log_scan_complete': 'SCAN CONCLUÍDO',
+    'log_scan_clean': 'Sistema parece limpo — nenhuma ameaça detectada',
+    'log_scan_total': 'Total de achados',
+    'log_scan_categories': 'Categorias OK',
+    'log_scan_duration': 'Duração do scan',
+    'log_detecting_tier': 'Detectando nível do PC (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost ATIVADO  [ALTO NÍVEL — PC Gamer]',
+    'log_boost_on_mid': 'Smart Boost ATIVADO  [MÉDIO — Máquina sólida]',
+    'log_boost_on_low': 'Smart Boost ATIVADO  [BAIXO NÍVEL — Modo batata]',
+    'log_boost_off': 'Smart Boost DESATIVADO — configurações restauradas',
+    'log_starting_game': 'Iniciando modo de jogo...',
+    'log_starting_eco': 'Iniciando modo eco...',
+    'log_freeing_ram': 'Liberando RAM...',
+    'log_freeing_ram_cache': 'Liberando RAM (preservando cache)...',
+    'log_game_on': '⚡ MODO JOGO ATIVADO',
+    'log_game_off': 'MODO JOGO DESATIVADO — restaurado',
+    'log_tuning_mem': 'Ajustando configurações de memória...',
+    'log_clearing_cache': 'Limpando cache de disco e GPU...',
+    'log_scan_bloat': 'Verificando programas em segundo plano...',
+    'log_psi_active': 'Monitor PSI ativo — limpeza auto sob pressão de memória',
+    'log_mem_compacted': 'Memória compactada — páginas fragmentadas desfragmentadas',
+    'log_cache_preserved': 'Cache de páginas preservado — dados do navegador/app mantidos',
+    'log_boost_all_done': 'Smart Boost ATIVADO [{tier}] — todas as camadas aplicadas',
+    'log_no_game_running': 'Nenhum jogo em execução — apps de navegador/mídia NÃO serão isolados',
+
+    'close_pref_reset_body': 'Você será perguntado novamente na próxima vez que fechar a janela.',
+    'close_pref_reset_title': 'Preferência redefinida',
+    'remember_close_choice': 'Lembrar minha escolha — pular este diálogo na próxima vez',
+    'rollback_open_folder': 'Abrir no explorador',
+    'tray_reset_close_pref': 'Redefinir preferência de fechamento…',
+    'tray_running_bg': 'Executando em segundo plano. Limpeza automática a cada 6h.',
+    'upd_final_message': 'Atualização concluída!',
+    'upd_installing_optimizing': 'Instalando…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'ANTES',
+    'lbl_after': 'DEPOIS',
+    'lbl_after_est': 'DEPOIS (EST.)',
+    'lbl_pct_used': 'usado',
+    'lbl_simulated': 'simulado',
+    'btn_preview': 'VISUALIZAR',
+    'preview_title': 'Visualizar — Arquivos a excluir',
+    'preview_desc': 'Arquivos que seriam excluídos (máx. 200 por alvo):',
+    'auto_clean_title': 'AGENDA AUTO-LIMPEZA',
+    'auto_clean_desc': 'Limpar automaticamente alvos seguros quando o sistema estiver inativo.',
+    'sched_off': 'Desligado',
+    'sched_6h': 'A cada 6 horas',
+    'sched_12h': 'A cada 12 horas',
+    'sched_24h': 'A cada 24 horas',
+    'sched_idle': 'Somente ocioso',
+    'lbl_last_run': 'Última execução',
+    'lbl_never_run': 'Nunca executado',
+    'btn_run_now': 'EXECUTAR AGORA',
+    'lbl_disk_trend': 'TENDÊNCIA DISCO (30 dias)',
+    'nav_startup': 'INICIALIZAÇÃO',
+    'startup_sub': 'Ativar ou desativar programas na inicialização',
+    'startup_info': 'As alterações entram em vigor no próximo login. Desative apenas itens que você reconhece.',
+    'startup_items_count': 'itens',
+    'col_toggle': 'ALTERNAR',
+    'status_enabled': 'ATIVADO',
+    'status_disabled': 'DESATIVADO',
+    'btn_enable': 'ATIVAR',
+    'btn_disable': 'DESATIVAR',
+    'lbl_loading': 'Carregando…',
+    'btn_close': 'FECHAR',
+    'upd_restart_countdown': 'Reinicia em {n}s…',},
 
 # ════════════════════════════════════════════════════
 # Русский
@@ -1123,7 +1961,102 @@ TRANSLATIONS = {
     'zombie_title': 'Обнаружен фоновый процесс',
     'zombie_msg': 'CyberClean работает в фоне, но не может быть показан.\n\nПринудительно завершить старый процесс и открыть заново?',
     'zombie_err': 'Не удалось завершить старый процесс. Пожалуйста, перезагрузите компьютер.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'ТЕСТ-РАН',
+    'log_mode_clean': 'ОЧИСТКА',
+    'log_freed': 'освобождено',
+    'log_removed': 'удалено',
+    'log_items': 'элементов',
+    'log_total_freed': 'ИТОГО ОСВОБ.',
+    'log_total_estimated': 'ИТОГО (ОЦЕНКА)',
+    'log_scanning_net': 'Сканирование сетевых процессов...',
+    'log_scan_header': 'СКАНИРОВАНИЕ  //  Умный анализ v2.3',
+    'log_scan_processes': 'Сканирование процессов...',
+    'log_scan_suid': 'Сканирование SUID/SGID...',
+    'log_scan_writable': 'Сканирование общедоступных файлов...',
+    'log_scan_cron': 'Сканирование cron на бэкдоры...',
+    'log_scan_tempfiles': 'Сканирование подозрительных файлов во temp...',
+    'log_scan_network': 'Сканирование сетевых соединений...',
+    'log_scan_ldpreload': 'Проверка LD_PRELOAD-перехватов...',
+    'log_scan_ssh': 'Проверка SSH-ключей...',
+    'log_scan_hosts': 'Проверка /etc/hosts на подделку...',
+    'log_scan_autorun': 'Сканирование автозапуска Windows...',
+    'log_scan_ok_processes': 'Вредоносные процессы не обнаружены',
+    'log_scan_ok_suid': 'Неожиданных SUID-файлов нет',
+    'log_scan_ok_writable': 'Общедоступных системных файлов нет',
+    'log_scan_ok_cron': 'Бэкдоры в cron не найдены',
+    'log_scan_ok_tempfiles': 'Подозрительных файлов во temp нет',
+    'log_scan_ok_network': 'Подозрительных портов нет',
+    'log_scan_ok_ldpreload': 'Перехватов LD_PRELOAD нет',
+    'log_scan_ok_ssh': 'Файла authorized_keys нет',
+    'log_scan_ok_hosts': 'Файл hosts в порядке',
+    'log_scan_complete': 'СКАНИРОВАНИЕ ЗАВЕРШЕНО',
+    'log_scan_clean': 'Система чиста — угроз не обнаружено',
+    'log_scan_total': 'Итого обнаружений',
+    'log_scan_categories': 'Категорий в норме',
+    'log_scan_duration': 'Время сканирования',
+    'log_detecting_tier': 'Определение класса ПК (ОЗУ / ЦПУ / ГПУ)...',
+    'log_boost_on_high': 'Smart Boost ВКЛ  [ВЫСОКИЙ КЛАСС — Игровой ПК]',
+    'log_boost_on_mid': 'Smart Boost ВКЛ  [СРЕДНИЙ КЛАСС — Надёжная машина]',
+    'log_boost_on_low': 'Smart Boost ВКЛ  [НИЗКИЙ КЛАСС — Режим картошки]',
+    'log_boost_off': 'Smart Boost ВЫКЛ — настройки восстановлены',
+    'log_starting_game': 'Запуск игрового режима...',
+    'log_starting_eco': 'Запуск экономного режима...',
+    'log_freeing_ram': 'Освобождение ОЗУ...',
+    'log_freeing_ram_cache': 'Освобождение ОЗУ (кэш сохранён)...',
+    'log_game_on': '⚡ ИГРОВОЙ РЕЖИМ ВКЛ',
+    'log_game_off': 'ИГРОВОЙ РЕЖИМ ВЫКЛ — восстановлено',
+    'log_tuning_mem': 'Настройка параметров памяти...',
+    'log_clearing_cache': 'Очистка кэша диска и GPU...',
+    'log_scan_bloat': 'Сканирование фоновых процессов...',
+    'log_psi_active': 'PSI-монитор активен — авто-очистка при нехватке ОЗУ',
+    'log_mem_compacted': 'Память уплотнена — фрагментация устранена',
+    'log_cache_preserved': 'Кэш страниц сохранён — данные браузера/приложений не стёрты',
+    'log_boost_all_done': 'Smart Boost ВКЛ [{tier}] — все слои применены',
+    'log_no_game_running': 'Игры не запущены — браузер/медиа не будут ограничены',
+
+    'close_pref_reset_body': 'При следующем закрытии окна вопрос будет задан снова.',
+    'close_pref_reset_title': 'Настройка сброшена',
+    'remember_close_choice': 'Запомнить выбор — пропускать этот диалог',
+    'rollback_open_folder': 'Открыть в менеджере файлов',
+    'tray_reset_close_pref': 'Сбросить настройку закрытия…',
+    'tray_running_bg': 'Работает в фоне. Автоочистка каждые 6 ч.',
+    'upd_final_message': 'Обновление завершено!',
+    'upd_installing_optimizing': 'Установка…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'ДО',
+    'lbl_after': 'ПОСЛЕ',
+    'lbl_after_est': 'ПОСЛЕ (ОЦ.)',
+    'lbl_pct_used': 'занято',
+    'lbl_simulated': 'расчётное',
+    'btn_preview': 'ПРОСМОТР',
+    'preview_title': 'Просмотр — Файлы для удаления',
+    'preview_desc': 'Файлы для удаления (до 200 на цель):',
+    'auto_clean_title': 'РАСПИСАНИЕ ОЧИСТКИ',
+    'auto_clean_desc': 'Автоочистка безопасных целей при простое системы.',
+    'sched_off': 'Выкл.',
+    'sched_6h': 'Каждые 6 часов',
+    'sched_12h': 'Каждые 12 часов',
+    'sched_24h': 'Каждые 24 часа',
+    'sched_idle': 'Только в простое',
+    'lbl_last_run': 'Последний запуск',
+    'lbl_never_run': 'Ещё не запускалось',
+    'btn_run_now': 'ЗАПУСТИТЬ',
+    'lbl_disk_trend': 'ТРЕНД ДИСКА (30 дней)',
+    'nav_startup': 'АВТОЗАПУСК',
+    'startup_sub': 'Включение и отключение программ при входе в систему',
+    'startup_info': 'Изменения вступят в силу при следующем входе. Отключайте только знакомые элементы.',
+    'startup_items_count': 'элементов',
+    'col_toggle': 'ПЕРЕКЛЮЧИТЬ',
+    'status_enabled': 'ВКЛ',
+    'status_disabled': 'ВЫКЛ',
+    'btn_enable': 'ВКЛЮЧИТЬ',
+    'btn_disable': 'ОТКЛЮЧИТЬ',
+    'lbl_loading': 'Загрузка…',
+    'btn_close': 'ЗАКРЫТЬ',
+    'upd_restart_countdown': 'Перезапуск через {n} с…',},
 
 # ════════════════════════════════════════════════════
 # Italiano
@@ -1211,7 +2144,102 @@ TRANSLATIONS = {
     'zombie_title': 'Processo in background rilevato',
     'zombie_msg': 'CyberClean è in esecuzione in background ma non può essere mostrato.\n\nForzare la chiusura del processo vecchio e riaprire?',
     'zombie_err': 'Impossibile terminare il vecchio processo. Si prega di riavviare il computer.',
-},
+
+    # ── Log output (runtime messages) ──────────────
+    'log_mode_dryrun': 'SIMULAZIONE',
+    'log_mode_clean': 'PULIZIA',
+    'log_freed': 'liberato',
+    'log_removed': 'rimosso',
+    'log_items': 'elementi',
+    'log_total_freed': 'TOTALE LIBERO',
+    'log_total_estimated': 'TOTALE STIMATO',
+    'log_scanning_net': 'Scansione processi di rete attivi...',
+    'log_scan_header': 'SCANSIONE SICUREZZA  //  Analisi Intelligente v2.3',
+    'log_scan_processes': 'Scansione processi in esecuzione...',
+    'log_scan_suid': 'Scansione binari SUID/SGID...',
+    'log_scan_writable': 'Scansione file scrivibili universalmente...',
+    'log_scan_cron': 'Scansione cron job per backdoor...',
+    'log_scan_tempfiles': 'Scansione file sospetti nelle directory temp...',
+    'log_scan_network': 'Scansione connessioni di rete attive...',
+    'log_scan_ldpreload': 'Controllo dirottamenti LD_PRELOAD...',
+    'log_scan_ssh': 'Controllo chiavi SSH autorizzate...',
+    'log_scan_hosts': 'Controllo /etc/hosts per manomissioni...',
+    'log_scan_autorun': 'Scansione voci avvio automatico Windows...',
+    'log_scan_ok_processes': 'Nessun processo dannoso rilevato',
+    'log_scan_ok_suid': 'Nessun binario SUID inatteso',
+    'log_scan_ok_writable': 'Nessun file di sistema scrivibile universalmente',
+    'log_scan_ok_cron': 'Nessun backdoor cron trovato',
+    'log_scan_ok_tempfiles': 'Nessun file sospetto nelle directory temp',
+    'log_scan_ok_network': 'Nessuna porta in ascolto sospetta',
+    'log_scan_ok_ldpreload': 'Nessun dirottamento LD_PRELOAD rilevato',
+    'log_scan_ok_ssh': 'Nessun file authorized_keys',
+    'log_scan_ok_hosts': 'Il file hosts sembra pulito',
+    'log_scan_complete': 'SCANSIONE COMPLETATA',
+    'log_scan_clean': 'Sistema pulito — nessuna minaccia rilevata',
+    'log_scan_total': 'Totale rilevamenti',
+    'log_scan_categories': 'Categorie OK',
+    'log_scan_duration': 'Durata scansione',
+    'log_detecting_tier': 'Rilevamento livello PC (RAM / CPU / GPU)...',
+    'log_boost_on_high': 'Smart Boost ATTIVATO  [ALTA GAMMA — PC Gaming]',
+    'log_boost_on_mid': 'Smart Boost ATTIVATO  [FASCIA MEDIA — Macchina solida]',
+    'log_boost_on_low': 'Smart Boost ATTIVATO  [BASSA GAMMA — Modalità patata]',
+    'log_boost_off': 'Smart Boost DISATTIVATO — impostazioni ripristinate',
+    'log_starting_game': 'Avvio modalità gioco...',
+    'log_starting_eco': 'Avvio modalità eco...',
+    'log_freeing_ram': 'Liberazione RAM...',
+    'log_freeing_ram_cache': 'Liberazione RAM (cache preservata)...',
+    'log_game_on': '⚡ MODALITÀ GIOCO ATTIVA',
+    'log_game_off': 'MODALITÀ GIOCO DISATTIVA — ripristinato',
+    'log_tuning_mem': 'Ottimizzazione impostazioni memoria...',
+    'log_clearing_cache': 'Pulizia cache disco e GPU...',
+    'log_scan_bloat': 'Scansione programmi in background...',
+    'log_psi_active': 'Monitor PSI attivo — pulizia auto sotto pressione memoria',
+    'log_mem_compacted': 'Memoria compattata — pagine frammentate deframmentate',
+    'log_cache_preserved': 'Cache pagine preservata — dati browser/app mantenuti',
+    'log_boost_all_done': 'Smart Boost ATTIVATO [{tier}] — tutti i livelli applicati',
+    'log_no_game_running': 'Nessun gioco in esecuzione — browser/media NON saranno isolati',
+
+    'close_pref_reset_body': 'Verrà nuovamente chiesto la prossima volta che chiuderai la finestra.',
+    'close_pref_reset_title': 'Preferenza reimpostata',
+    'remember_close_choice': 'Ricorda la mia scelta — salta questo dialogo la prossima volta',
+    'rollback_open_folder': 'Apri nel file manager',
+    'tray_reset_close_pref': 'Reimposta preferenza di chiusura…',
+    'tray_running_bg': 'In esecuzione in background. Pulizia automatica ogni 6h.',
+    'upd_final_message': 'Aggiornamento completato!',
+    'upd_installing_optimizing': 'Installazione…',
+
+    # ── New feature keys (v2.3.0) ─────────────────
+    'lbl_before': 'PRIMA',
+    'lbl_after': 'DOPO',
+    'lbl_after_est': 'DOPO (STIM.)',
+    'lbl_pct_used': 'usato',
+    'lbl_simulated': 'simulato',
+    'btn_preview': 'ANTEPRIMA',
+    'preview_title': 'Anteprima — File da eliminare',
+    'preview_desc': 'File che verrebbero eliminati (max. 200 per destinazione):',
+    'auto_clean_title': 'PIANIF. PULIZIA AUTO',
+    'auto_clean_desc': 'Pulire automaticamente i target sicuri quando il sistema è inattivo.',
+    'sched_off': 'Disattivato',
+    'sched_6h': 'Ogni 6 ore',
+    'sched_12h': 'Ogni 12 ore',
+    'sched_24h': 'Ogni 24 ore',
+    'sched_idle': 'Solo a riposo',
+    'lbl_last_run': 'Ultima esecuzione',
+    'lbl_never_run': 'Mai eseguito',
+    'btn_run_now': 'ESEGUI ORA',
+    'lbl_disk_trend': 'TENDENZA DISCO (30 giorni)',
+    'nav_startup': 'AVVIO',
+    'startup_sub': 'Abilitare o disabilitare i programmi all\'avvio',
+    'startup_info': 'Le modifiche hanno effetto al prossimo accesso. Disabilita solo le voci che conosci.',
+    'startup_items_count': 'elementi',
+    'col_toggle': 'ATTIVA/DISATTIVA',
+    'status_enabled': 'ATTIVO',
+    'status_disabled': 'DISATTIVATO',
+    'btn_enable': 'ABILITA',
+    'btn_disable': 'DISABILITA',
+    'lbl_loading': 'Caricamento…',
+    'btn_close': 'CHIUDI',
+    'upd_restart_countdown': 'Riavvio tra {n}s…',},
 
 }  # end TRANSLATIONS
 
@@ -1264,3 +2292,173 @@ def _t(key: str, default: str = '', **kwargs) -> str:
         except (KeyError, ValueError):
             pass
     return text
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LOG LINE TRANSLATOR
+# Pattern-match các chuỗi hardcode trong CleanWorker / scanner / booster
+# rồi trả về bản dịch theo ngôn ngữ hiện tại.
+# ═══════════════════════════════════════════════════════════════════════
+import re as _re
+
+# Map: (regex pattern, i18n_key, optional format_fn(match) -> dict)
+# format_fn nhận re.Match, trả về dict kwargs cho str.format()
+_LOG_PATTERNS: list = []
+
+def _p(pattern: str, key: str, fmt=None):
+    _LOG_PATTERNS.append((_re.compile(pattern, _re.IGNORECASE), key, fmt))
+
+# ── CleanWorker ──────────────────────────────────────────────────────────
+_p(r'^DRY-RUN$',       'log_mode_dryrun')
+_p(r'^CLEAN$',         'log_mode_clean')
+_p(r'(\d[\d.,]* \w+)\s+freed$',  'log_freed',
+   lambda m: {'size': m.group(1)})
+_p(r'(\d+)\s+removed$','log_removed',
+   lambda m: {'n': m.group(1)})
+_p(r'(\d+)\s+items$',  'log_items',
+   lambda m: {'n': m.group(1)})
+_p(r'^TOTAL FREED:\s*(.+)$',      'log_total_freed',
+   lambda m: {'size': m.group(1)})
+_p(r'^TOTAL ESTIMATED:\s*(.+)$',  'log_total_estimated',
+   lambda m: {'size': m.group(1)})
+_p(r'Scanning active network processes', 'log_scanning_net')
+
+# ── Scanner ──────────────────────────────────────────────────────────────
+_p(r'SECURITY SCAN.*Smart Analysis',  'log_scan_header')
+_p(r'Scanning running processes',      'log_scan_processes')
+_p(r'Scanning SUID/SGID',             'log_scan_suid')
+_p(r'Scanning world-writable',        'log_scan_writable')
+_p(r'Scanning cron jobs',             'log_scan_cron')
+_p(r'Scanning suspicious files.*temp','log_scan_tempfiles')
+_p(r'Scanning active network conn',   'log_scan_network')
+_p(r'Checking LD_PRELOAD',            'log_scan_ldpreload')
+_p(r'Checking SSH authorized',        'log_scan_ssh')
+_p(r'Checking /etc/hosts',            'log_scan_hosts')
+_p(r'Scanning Windows autorun',       'log_scan_autorun')
+_p(r'No malicious processes detected \((\d+) processes scanned, (\d+) trusted\)',
+   'log_scan_ok_processes',
+   lambda m: {'scanned': m.group(1), 'trusted': m.group(2)})
+_p(r'No malicious processes detected','log_scan_ok_processes')
+_p(r'No unexpected SUID',             'log_scan_ok_suid')
+_p(r'No world-writable system files', 'log_scan_ok_writable')
+_p(r'No cron backdoors found',        'log_scan_ok_cron')
+_p(r'No suspicious files found',      'log_scan_ok_tempfiles')
+_p(r'No suspicious listening ports',  'log_scan_ok_network')
+_p(r'No suspicious ports detected',   'log_scan_ok_network')
+_p(r'No LD_PRELOAD hijacks',          'log_scan_ok_ldpreload')
+_p(r'No authorized_keys file',        'log_scan_ok_ssh')
+_p(r'Hosts file looks clean',         'log_scan_ok_hosts')
+_p(r'^SCAN COMPLETE$',                'log_scan_complete')
+_p(r'System looks clean.*no threats', 'log_scan_clean')
+_p(r'^Total findings\s*:',            'log_scan_total')
+_p(r'^Categories OK\s*:',             'log_scan_categories')
+_p(r'^Scan duration\s*:',             'log_scan_duration')
+
+# ── Booster ──────────────────────────────────────────────────────────────
+_p(r'Detecting PC tier',              'log_detecting_tier')
+_p(r'Smart Boost ON.*HIGH',           'log_boost_on_high')
+_p(r'Smart Boost ON.*MID',            'log_boost_on_mid')
+_p(r'Smart Boost ON.*[Ll][Oo][Ww]',  'log_boost_on_low')
+_p(r'Smart Boost OFF',                'log_boost_off')
+_p(r'Starting Game Mode',             'log_starting_game')
+_p(r'Starting Eco Mode',              'log_starting_eco')
+_p(r'Freeing RAM \(cache-preserving\)','log_freeing_ram_cache')
+_p(r'Freeing RAM',                    'log_freeing_ram')
+_p(r'GAME MODE ON',                   'log_game_on')
+_p(r'GAME MODE OFF',                  'log_game_off')
+_p(r'Tuning memory settings',         'log_tuning_mem')
+_p(r'Clearing disk.*GPU cache',       'log_clearing_cache')
+_p(r'Scanning for background bloat',  'log_scan_bloat')
+_p(r'PSI monitor.*active',            'log_psi_active')
+_p(r'Memory compacted.*defragg',      'log_mem_compacted')
+_p(r'Memory compacted',               'log_mem_compacted')
+_p(r'Page cache preserved',           'log_cache_preserved')
+_p(r'Smart Boost ON \[(\w+)\].*all layers', 'log_boost_all_done',
+   lambda m: {'tier': m.group(1)})
+_p(r'No game running',                'log_no_game_running')
+
+
+def translate_log_line(msg: str) -> str:
+    """
+    Nhận một chuỗi log hardcode tiếng Anh, trả về bản dịch theo T.lang.
+    Nếu không match pattern nào → giữ nguyên (technical strings như path/số).
+
+    Cách dùng trong ui_widgets.py:
+        from utils.i18n import translate_log_line
+        def _wrap_log(emit_fn):
+            return lambda m, l='text': emit_fn(translate_log_line(m), l)
+    """
+    stripped = msg.strip().lstrip('✓✗⚠⛔⬡◆▸ ~+i.!⚡⏸▶⟳ℹ•→')
+    stripped = stripped.strip()
+
+    for pattern, key, fmt_fn in _LOG_PATTERNS:
+        # Try match on full msg or stripped
+        m = pattern.search(msg) or pattern.search(stripped)
+        if m:
+            base = T.get(key, '')
+            if not base:
+                return msg  # key not translated yet → original
+            if fmt_fn:
+                try:
+                    kwargs = fmt_fn(m)
+                    # Build translated with placeholders
+                    # e.g. "freed" key doesn't have {size}, but total_freed does
+                    try:
+                        translated = base.format(**kwargs)
+                    except (KeyError, IndexError):
+                        translated = base
+                except Exception:
+                    translated = base
+            else:
+                translated = base
+            # Preserve leading prefix symbols from original
+            prefix_match = _re.match(r'^([\s✓✗⚠⛔◆▸~+i.⚡⏸▶⟳ℹ•→⬡]+)', msg)
+            prefix = prefix_match.group(1) if prefix_match else ''
+            # Preserve trailing info (e.g. counts, paths)
+            # For lines that end with extra data not in the pattern
+            suffix = ''
+            if key in ('log_scan_duration',):
+                # Keep the number after the colon
+                num_m = _re.search(r':\s*(\d+.*?)$', msg)
+                if num_m:
+                    suffix = ': ' + num_m.group(1)
+            elif key in ('log_scan_total', 'log_scan_categories'):
+                num_m = _re.search(r':\s*(\d+)', msg)
+                if num_m:
+                    suffix = ' : ' + num_m.group(1)
+            elif key in ('log_freed',):
+                # "  ✓  273.9 MB freed" → "  ✓  273.9 MB đã giải phóng"
+                size_m = _re.search(r'([\d.,]+\s+\w+)\s+freed', msg)
+                if size_m:
+                    return prefix.rstrip() + '  ' + size_m.group(1) + ' ' + T.get('log_freed', 'freed')
+            elif key in ('log_removed',):
+                n_m = _re.search(r'(\d+)\s+removed', msg)
+                if n_m:
+                    return prefix.rstrip() + '  ' + n_m.group(1) + ' ' + T.get('log_removed', 'removed')
+            elif key in ('log_items',):
+                n_m = _re.search(r'(\d+)\s+items', msg)
+                if n_m:
+                    return prefix.rstrip() + '  ' + n_m.group(1) + ' ' + T.get('log_items', 'items')
+            elif key in ('log_total_freed','log_total_estimated'):
+                size_m = _re.search(r':\s*([\d.,]+\s+\w+)', msg)
+                if size_m:
+                    return '  ' + translated + ': ' + size_m.group(1)
+            elif key in ('log_scan_ok_processes',):
+                # "No malicious processes detected (201 scanned, 91 trusted)"
+                detail = _re.search(r'\((\d+) processes scanned, (\d+) trusted\)', msg)
+                if detail:
+                    suffix = f' ({detail.group(1)} / {detail.group(2)})'
+
+            # Một số key đã có icon/prefix trong translation (game_on/off)
+            # → không nhân đôi prefix gốc
+            _no_prefix_keys = {'log_game_on','log_game_off','log_boost_on_high',
+                                'log_boost_on_mid','log_boost_on_low','log_boost_off',
+                                'log_boost_all_done','log_scan_complete','log_scan_header',
+                                'log_mode_dryrun','log_mode_clean'}
+            if key in _no_prefix_keys:
+                return translated + suffix
+            return prefix + translated + suffix
+
+    return msg  # unchanged
+
+

@@ -10,7 +10,7 @@
 ```
 
 **Smart System Cleaner & Performance Optimizer**
-**Windows · Linux · Cross-platform · v2.2.9**
+**Windows · Linux · Cross-platform · v3.0.0**
 
 <br/>
 
@@ -94,7 +94,7 @@ sudo cyberclean --uninstall
 
 ### 🪟 Windows — Installer
 
-**[⬇ Download CyberClean Setup v2.2.9 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Download CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 > UAC elevation on **first install only** · No background services · Uninstall via `Settings → Apps → CyberClean`
 

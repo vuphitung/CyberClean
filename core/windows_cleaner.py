@@ -140,6 +140,9 @@ class WindowsCleaner(BaseCleaner):
                 'Clear all Windows Event Viewer logs (wevtutil)',             'caution', needs_root=True),
             CleanTarget('win_error_reports','Windows Error Reports',
                 'App crash dumps and WER report files',                       'safe'),
+            CleanTarget('win_crash_dumps',  'Crash Dumps (Minidump)',
+                'C:\\Windows\\Minidump + %LOCALAPPDATA%\\CrashDumps',         'safe',
+                needs_root=True),
             CleanTarget('chrome_cache',     'Chrome Cache',
                 'All Chrome profiles — cache auto-rebuilds',                  'safe'),
             CleanTarget('firefox_cache',    'Firefox Cache',
@@ -178,6 +181,7 @@ class WindowsCleaner(BaseCleaner):
                 'win_winsxs':        self._win_winsxs,
                 'win_eventlog':      self._win_eventlog,
                 'win_error_reports': self._win_error_reports,
+                'win_crash_dumps':   self._win_crash_dumps,
                 'chrome_cache':      lambda d: self._browser_cache('chrome_cache',  d),
                 'firefox_cache':     lambda d: self._browser_cache('firefox_cache', d),
                 'edge_cache':        lambda d: self._browser_cache('edge_cache',    d),
@@ -643,4 +647,96 @@ class WindowsCleaner(BaseCleaner):
                 total_freed += _real_freed(size_before, cache_path)
         if not dry:
             r.freed_bytes = total_freed
+        return r
+
+    # ── Crash Dumps (Minidump) ────────────────────────────
+    def _win_crash_dumps(self, dry):
+        """
+        Delete Windows crash dump files (kernel + user-mode).
+
+        Covers:
+          C:\\Windows\\Minidump\\          — kernel BSOD minidumps
+          C:\\Windows\\MEMORY.DMP          — full/kernel memory dump from BSOD
+          %LOCALAPPDATA%\\CrashDumps\\     — user-mode app crash dumps (WER)
+          %LOCALAPPDATA%\\Temp\\*.dmp      — temp crash dumps written by apps
+          %APPDATA%\\..\\Local\\Temp\\*.dmp
+
+        Why safe: crash dumps are point-in-time snapshots of a crash that
+        already happened. They're only useful if you're actively debugging
+        that specific crash. Leaving them on disk wastes GB of space.
+
+        Note: win_error_reports already covers WER report archives (.wer, .xml).
+        This target covers the actual .dmp binary dump files, which are much larger.
+        """
+        r = CleanResult('win_crash_dumps')
+        sysroot = os.environ.get('SystemRoot', 'C:\\Windows')
+        _local  = os.environ.get('LOCALAPPDATA', '')
+
+        # Collect all .dmp files
+        dmp_dirs = [
+            Path(sysroot) / 'Minidump',
+        ]
+        if _local:
+            dmp_dirs += [
+                Path(_local) / 'CrashDumps',
+                Path(_local) / 'Temp',
+            ]
+
+        # MEMORY.DMP — full memory dump, can be multiple GB
+        memory_dump = Path(sysroot) / 'MEMORY.DMP'
+
+        all_files = []
+        if memory_dump.exists():
+            all_files.append(memory_dump)
+
+        for d in dmp_dirs:
+            if not d.exists():
+                continue
+            try:
+                for f in d.glob('*.dmp'):
+                    if f.is_file():
+                        all_files.append(f)
+            except (OSError, PermissionError):
+                pass
+
+        for f in all_files:
+            try:
+                sz = f.stat().st_size
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'win_crash_dumps',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'crash dump — safe to delete',
+                })
+                if not dry:
+                    try:
+                        # Try direct delete first (user-mode dumps in LOCALAPPDATA)
+                        f.unlink(missing_ok=True)
+                    except (PermissionError, OSError):
+                        # Minidump and MEMORY.DMP need admin
+                        if is_admin():
+                            try:
+                                f.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        else:
+                            # Attempt via takeown + del (PowerShell)
+                            run_win(
+                                f'PowerShell -NoProfile -Command "Remove-Item -Force '
+                                f'-LiteralPath \'{f}\' -EA SilentlyContinue" 2>$null'
+                            )
+            except OSError:
+                pass
+        if not dry:
+            # Recompute actual freed (some files may have already been removed)
+            remaining = 0
+            for f in all_files:
+                try:
+                    remaining += f.stat().st_size
+                except OSError:
+                    pass   # already deleted — counts as freed
+            r.freed_bytes = max(0, r.freed_bytes - remaining)
         return r

@@ -39,10 +39,20 @@ def run_privileged(action_key, raw_cmd=None, stdin_data=None):
     Execute a privileged action via the NOPASSWD helper.
     Priority: IS_ROOT → sudo -n NOPASSWD helper → pkexec (only if agent) → fail
     Never blocks GUI.
+
+    Special action_key='raw': skips the helper entirely and runs raw_cmd directly
+    via sudo -n. Use this for one-off commands that aren't in the helper's allowlist.
     """
     if IS_ROOT:
         cmd = raw_cmd or action_key
         return run(cmd, timeout=120)
+
+    # 'raw' sentinel: caller wants to run raw_cmd directly, not via helper
+    if action_key == 'raw' and raw_cmd:
+        out, code = run(f'sudo -n {raw_cmd} 2>/dev/null', timeout=60)
+        if code == 0:
+            return out, 0
+        return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
 
     if action_key:
         out, code = run(
@@ -152,7 +162,28 @@ class LinuxCleaner(BaseCleaner):
                 '~/.cache/pip downloaded wheels',                          'safe'),
             CleanTarget('tmp_files',     'Temp Files',
                 f'/tmp files older than {TMP_DAYS} days, not in use',    'safe'),
+            CleanTarget('empty_trash',   'Empty Trash',
+                'Permanently delete files in ~/.local/share/Trash',        'safe'),
+            CleanTarget('system_logs',   'Old System Logs',
+                '/var/log rotated logs (.gz, .1, .old) — active logs kept', 'safe',
+                needs_root=True),
+            CleanTarget('crash_reports', 'Crash Reports',
+                '/var/crash dumps + ~/.local/share/apport + systemd coredumps', 'safe'),
+            CleanTarget('dev_cache',     'Developer Caches',
+                'npm, yarn, gradle, cargo, maven, go cache — re-downloads on next build',
+                'caution'),
         ]
+        # ── Warn user if distro not recognized (no pkg manager targets) ──────
+        if not PKG_MANAGER:
+            # Insert an informational pseudo-target at top so user sees the warning
+            targets.insert(0, CleanTarget(
+                id='_unknown_distro_warn',
+                name='⚠ Package Manager Not Detected',
+                desc=f'Distro not recognized — package cache targets unavailable. '
+                     f'Run: cat /etc/os-release',
+                safety='caution',
+                enabled=False,
+            ))
         return targets
 
     def estimate(self, target_id: str) -> int:
@@ -163,6 +194,9 @@ class LinuxCleaner(BaseCleaner):
 
     def _run_target(self, tid, dry):
         result = CleanResult(target_id=tid)
+        if tid.startswith('_'):
+            result.error = 'Info-only target — nothing to clean'
+            return result
         try:
             fn = {
                 'pacman_cache':  self._pacman_cache,
@@ -185,6 +219,10 @@ class LinuxCleaner(BaseCleaner):
                 'thumbnails':    lambda d: self._browser_or_thumbs('thumbnails', d),
                 'pip_cache':     self._pip_cache,
                 'tmp_files':     self._tmp_files,
+                'empty_trash':   self._empty_trash,
+                'system_logs':   self._system_logs,
+                'crash_reports': self._crash_reports,
+                'dev_cache':     self._dev_cache,
             }.get(tid)
             if fn: result = fn(dry)
         except Exception as e:
@@ -343,12 +381,13 @@ class LinuxCleaner(BaseCleaner):
             if not d.exists(): continue
             r.freed_bytes += self.dir_size(d)
             r.files_removed += sum(1 for _ in d.rglob('*') if _.is_file())
-            if not dry:
-                for item in d.iterdir():
-                    sz = self.dir_size(item)
-                    r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                       'type': 'aur_cache', 'path': str(item),
-                                       'size': sz, 'note': 'AUR build cache — re-downloads on next install'})
+            # Populate rollback in both dry and real modes for preview
+            for item in d.iterdir():
+                sz = self.dir_size(item)
+                r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                                   'type': 'aur_cache', 'path': str(item),
+                                   'size': sz, 'note': 'AUR build cache — re-downloads on next install'})
+                if not dry:
                     safe_delete(item, use_trash=False)
         return r
 
@@ -541,11 +580,12 @@ class LinuxCleaner(BaseCleaner):
             # ── AI / ML (model cache cực lớn, tải lại rất lâu) ──
             'huggingface', 'torch', 'transformers',
 
-            # ── Dev tools (tải lại tốn bandwidth / thời gian) ──
-            'pip', 'yarn', 'Cypress', 'JetBrains',
-            'go-build', 'node-gyp', 'cargo',
-            'clangd', 'vscode-cpptools',
+            # ── Dev tools — MOVED to dev_cache target (user can opt in) ──
+            # npm, yarn, cargo, go-build, gradle, maven are no longer protected here.
+            # pip and yay/paru stay: pip has its own target; yay/paru have aur_cache.
+            'pip',
             'zsh', 'prezto',
+            'clangd', 'vscode-cpptools',
 
             # ── Gaming (Lutris / Wine prefix cache) ──
             'lutris', 'winetricks',
@@ -630,16 +670,17 @@ class LinuxCleaner(BaseCleaner):
             try:
                 sz = self.dir_size(item)
                 r.freed_bytes += sz
+                r.files_removed += 1
+                # Populate rollback in both dry and real modes so Preview dialog works
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'user_cache',
+                    'path': str(item),
+                    'size': sz,
+                    'note': 'app cache — auto-rebuilds on next launch',
+                })
                 if not dry:
-                    r.rollback.append({
-                        'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                        'type': 'user_cache',
-                        'path': str(item),
-                        'size': sz,
-                        'note': 'app cache — auto-rebuilds on next launch',
-                    })
                     safe_delete(item, use_trash=False)
-                    r.files_removed += 1
             except PermissionError:
                 pass   # snap cache dirs owned by root — skip silently
             except OSError as e:
@@ -661,6 +702,23 @@ class LinuxCleaner(BaseCleaner):
             if not path.exists(): continue
             sz = self.dir_size(path)
             r.freed_bytes += sz
+            # List files for preview in both dry and real modes
+            try:
+                for item in path.iterdir():
+                    try:
+                        isz = self.dir_size(item) if item.is_dir() else item.stat().st_size
+                        r.rollback.append({
+                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                            'type': tid,
+                            'path': str(item),
+                            'size': isz,
+                            'note': 'browser cache — auto-rebuilds on next launch',
+                        })
+                        r.files_removed += 1
+                    except OSError:
+                        pass
+            except OSError:
+                pass
             if not dry:
                 for item in path.iterdir():
                     safe_delete(item, use_trash=False)
@@ -694,8 +752,308 @@ class LinuxCleaner(BaseCleaner):
                 sz = self.dir_size(f) if f.is_dir() else f.stat().st_size
                 r.freed_bytes += sz
                 r.files_removed += 1
+                # Populate rollback in both modes for preview dialog
+                r.rollback.append({
+                    'time': _t.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'tmp_files',
+                    'path': str(f),
+                    'size': sz,
+                    'note': f'temp file older than {TMP_DAYS} days',
+                })
                 if not dry:
                     safe_delete(f, use_trash=False)
             except (OSError, PermissionError):
                 pass   # files owned by other users, or deleted between scan and delete
+        return r
+
+    # ── Empty Trash ───────────────────────────────────────
+    def _empty_trash(self, dry):
+        """
+        Permanently delete files in the FreeDesktop Trash.
+
+        This is the #1 reason disk usage doesn't drop after running the cleaner:
+        safe_delete() sends items to Trash instead of permanent delete, freeing
+        zero disk space until the Trash is emptied here.
+
+        Covers:
+          ~/.local/share/Trash/            — main XDG trash
+          ~/.Trash/                        — legacy macOS/old-Linux fallback
+          /media/*/.../.Trash-<uid>/       — removable media trash dirs
+        """
+        r = CleanResult('empty_trash')
+        home = Path.home()
+        import os as _os
+
+        trash_roots = [
+            home / '.local/share/Trash',
+            home / '.Trash',
+        ]
+
+        # Also sweep removable media trash dirs (e.g. /media/user/disk/.Trash-1000)
+        try:
+            uid = _os.getuid() if hasattr(_os, 'getuid') else None
+            if uid is not None:
+                for media_root in [Path('/media'), Path('/run/media')]:
+                    if not media_root.exists():
+                        continue
+                    try:
+                        for mount in media_root.rglob(f'.Trash-{uid}'):
+                            if mount.is_dir():
+                                trash_roots.append(mount)
+                    except (OSError, PermissionError):
+                        pass
+        except Exception:
+            pass
+
+        for trash_dir in trash_roots:
+            if not trash_dir.exists():
+                continue
+            for sub in ['files', 'expunged']:
+                sub_path = trash_dir / sub
+                if not sub_path.exists():
+                    continue
+                sz = self.dir_size(sub_path)
+                r.freed_bytes += sz
+                try:
+                    for item in sub_path.iterdir():
+                        try:
+                            isz = self.dir_size(item) if item.is_dir() else item.stat().st_size
+                            r.rollback.append({
+                                'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                                'type': 'empty_trash',
+                                'path': str(item),
+                                'size': isz,
+                                'note': 'permanently deleted from Trash',
+                            })
+                            r.files_removed += 1
+                        except OSError:
+                            pass
+                except (OSError, PermissionError):
+                    pass
+                if not dry:
+                    shutil.rmtree(sub_path, ignore_errors=True)
+                    sub_path.mkdir(parents=True, exist_ok=True)
+            # Clean up orphaned .trashinfo files (no matching file in files/)
+            if not dry:
+                info_dir  = trash_dir / 'info'
+                files_dir = trash_dir / 'files'
+                if info_dir.exists() and files_dir.exists():
+                    for info_file in list(info_dir.glob('*.trashinfo')):
+                        if not (files_dir / info_file.stem).exists():
+                            try:
+                                info_file.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+        return r
+
+    # ── Old System Logs ───────────────────────────────────
+    def _system_logs(self, dry):
+        """
+        Delete rotated/compressed log copies from /var/log.
+
+        SAFE rules:
+          • Only files matching *.gz / *.bz2 / *.xz / *.1 / *.2 / ... / *.old / *.bak
+          • Active logs (syslog, auth.log, kern.log, etc.) never touched
+          • Files modified in the last hour skipped (rotation still in progress)
+          • needs_root=True because most /var/log is root-owned
+
+        Why safe: logrotate itself created these as compressed/numbered archives.
+        Deleting them frees space without affecting any running logging process.
+        """
+        r = CleanResult('system_logs')
+        log_root = Path('/var/log')
+        if not log_root.exists():
+            return r
+
+        ROTATED_PATTERNS = [
+            '*.gz', '*.bz2', '*.xz', '*.zst',
+            '*.1', '*.2', '*.3', '*.4', '*.5',
+            '*.6', '*.7', '*.8', '*.9', '*.10',
+            '*.old', '*.bak', '*.archived',
+        ]
+        now = time.time()
+        RECENT_SEC = 3600   # skip files touched within last hour
+
+        seen = set()
+        files_to_clean = []
+        try:
+            for pattern in ROTATED_PATTERNS:
+                for f in log_root.rglob(pattern):
+                    key = str(f)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        if not f.is_file() or f.is_symlink():
+                            continue
+                        if (now - f.stat().st_mtime) < RECENT_SEC:
+                            continue
+                        files_to_clean.append(f)
+                    except OSError:
+                        pass
+        except (OSError, PermissionError) as e:
+            r.error = f'Cannot read /var/log: {e} — needs root'
+            return r
+
+        for f in files_to_clean:
+            try:
+                sz = f.stat().st_size
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'system_logs',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'rotated log archive — active logs untouched',
+                })
+                if not dry:
+                    _, code = run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
+                    if code != 0:
+                        r.error = 'Need root — run install.sh or launch with sudo'
+                        break
+            except OSError:
+                pass
+        return r
+
+    # ── Crash Reports ─────────────────────────────────────
+    def _crash_reports(self, dry):
+        """
+        Delete crash dumps and apport reports. All safe to remove.
+
+        Covers:
+          /var/crash/*.crash              — apport crash dumps (Ubuntu/Debian)
+          ~/.local/share/apport/          — user-level apport reports
+          /var/lib/systemd/coredump/      — systemd-coredump (Arch, Fedora, openSUSE)
+          ~/core + /tmp/core.*            — raw core dump files
+
+        Rationale: crash dumps are only useful for debugging the specific crash
+        that generated them. They're never needed again after the report is filed.
+        """
+        r = CleanResult('crash_reports')
+        home = Path.home()
+
+        candidates = []
+
+        # 1. apport crash files in /var/crash
+        var_crash = Path('/var/crash')
+        if var_crash.exists():
+            try:
+                candidates += [f for f in var_crash.glob('*.crash') if f.is_file()]
+                candidates += [f for f in var_crash.glob('*.upload') if f.is_file()]
+            except (OSError, PermissionError):
+                pass
+
+        # 2. User-level apport reports
+        user_apport = home / '.local/share/apport'
+        if user_apport.exists():
+            try:
+                candidates += [f for f in user_apport.rglob('*') if f.is_file()]
+            except (OSError, PermissionError):
+                pass
+
+        # 3. systemd-coredump storage
+        coredump_dir = Path('/var/lib/systemd/coredump')
+        if coredump_dir.exists():
+            try:
+                candidates += [f for f in coredump_dir.iterdir() if f.is_file()]
+            except (OSError, PermissionError):
+                pass
+
+        # 4. Raw core files at home root
+        for f in home.glob('core'):
+            if f.is_file():
+                candidates.append(f)
+        for f in Path('/tmp').glob('core.*'):
+            if f.is_file():
+                candidates.append(f)
+
+        for f in candidates:
+            try:
+                sz = f.stat().st_size
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'crash_reports',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'crash dump — safe to delete',
+                })
+                if not dry:
+                    try:
+                        safe_delete(f, use_trash=False)
+                    except (OSError, PermissionError):
+                        run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
+            except OSError:
+                pass
+        return r
+
+    # ── Developer Caches ──────────────────────────────────
+    def _dev_cache(self, dry):
+        """
+        Clean developer tool caches. Marked 'caution' because packages will
+        re-download on the next build, costing time and bandwidth.
+
+        Covers (user-level only, no root needed):
+          npm / npx       ~/.npm/_cacache          (often 500 MB–3 GB)
+          yarn v1         ~/.yarn/cache
+          yarn (cache)    ~/.cache/yarn
+          pnpm            ~/.local/share/pnpm/store  (can exceed 5 GB)
+          Gradle          ~/.gradle/caches
+          Maven           ~/.m2/repository
+          Cargo           ~/.cargo/registry/cache   (NOT src/ — source kept)
+          Go dl cache     ~/go/pkg/mod/cache
+          Go build cache  ~/.cache/go-build
+          Cypress         ~/.cache/Cypress           (~300–600 MB per version)
+          JetBrains       ~/.cache/JetBrains
+          node-gyp        ~/.cache/node-gyp
+
+        Deliberately NOT included:
+          pip cache       — has its own dedicated target
+          yay/paru cache  — has its own aur_cache target
+          cargo src/      — source code, not cache; rebuilding needs it
+          go/pkg/mod/     — module source tree; only the cache/ subdir is removed
+        """
+        r = CleanResult('dev_cache')
+        home = Path.home()
+
+        dev_paths = [
+            (home / '.npm/_cacache',                'npm package cache'),
+            (home / '.yarn/cache',                  'yarn v1 cache'),
+            (home / '.cache/yarn',                  'yarn global cache'),
+            (home / '.local/share/pnpm/store',      'pnpm content-addressable store'),
+            (home / '.pnpm-store',                  'pnpm store (legacy path)'),
+            (home / '.gradle/caches',               'Gradle build + dependency cache'),
+            (home / '.m2/repository',               'Maven local repository'),
+            (home / '.cargo/registry/cache',        'Cargo crate download cache'),
+            (home / 'go/pkg/mod/cache',             'Go module download cache'),
+            (home / '.cache/go-build',              'Go build cache'),
+            (home / '.cache/Cypress',               'Cypress test runner (per version)'),
+            (home / '.cache/JetBrains',             'JetBrains IDE caches'),
+            (home / '.cache/node-gyp',              'node-gyp native build cache'),
+        ]
+
+        for path, label in dev_paths:
+            if not path.exists():
+                continue
+            try:
+                sz = self.dir_size(path)
+                if sz == 0:
+                    continue
+                r.freed_bytes   += sz
+                r.files_removed += sum(1 for _ in path.rglob('*') if _.is_file())
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'dev_cache',
+                    'path': str(path),
+                    'size': sz,
+                    'note': f'{label} — re-downloads on next build',
+                })
+                if not dry:
+                    shutil.rmtree(path, ignore_errors=True)
+                    # Recreate empty dir so tool doesn't error on next invocation
+                    path.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError):
+                pass
         return r

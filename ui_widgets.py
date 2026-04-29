@@ -6,7 +6,8 @@ Tách từ main.py để giảm kích thước file (145 KB → ~80 KB).
 Contains:
   • Design tokens (C, MONO, DISPLAY)
   • QPainter-drawn nav icons (_make_icon, _icon_*, _nav_icon)
-  • Custom widgets  (SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton)
+  • Custom widgets  (SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton,
+                     CyberTerminal)
   • QThread workers (SysInfoWorker, CleanWorker, _SmartOnWorker, _SmartOffWorker,
                      _OneClickWorker, _ScanWorker, _UninstallWorker, _AutoCleanWorker)
   • UI helper functions (_btn, _lbl_section, _lbl_val, _card, _divider)
@@ -23,15 +24,35 @@ import math
 import platform
 from datetime import datetime
 
-from PyQt6.QtCore  import Qt, QThread, QRectF, QPointF, QSize, pyqtSignal
+from PyQt6.QtCore  import (
+    Qt, QThread, QRectF, QPointF, QSize, pyqtSignal,
+    QPropertyAnimation, QEasingCurve, QTimer, pyqtProperty,
+)
 from PyQt6.QtGui   import (
     QFont, QColor, QBrush, QPen, QPainter, QLinearGradient,
-    QPolygonF, QPixmap, QIcon,
+    QPolygonF, QPixmap, QIcon, QTextCursor, QTextCharFormat,
 )
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
 )
+
+# i18n runtime log translator (lazy import to avoid circular)
+def _tlog(msg: str) -> str:
+    """Translate a hardcoded English log line to current UI language."""
+    try:
+        from utils.i18n import translate_log_line
+        return translate_log_line(msg)
+    except Exception:
+        return msg
+
+def _t(key: str, default: str = '') -> str:
+    """Lazy-import _t from i18n to avoid circular imports."""
+    try:
+        from utils.i18n import _t as _t_real
+        return _t_real(key, default)
+    except Exception:
+        return default or key
 
 IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX   = platform.system() == 'Linux'
@@ -191,6 +212,7 @@ class SparklineChart(QWidget):
         if len(self.data) > self.max_pts:
             self.data.pop(0)
         self.update()
+
 
     def paintEvent(self, _):
         if len(self.data) < 2:
@@ -491,6 +513,141 @@ class NavButton(QWidget):
 
 
 # ═════════════════════════════════════════════════════════════
+# CYBER TERMINAL  — custom log output cho clean / scan pages
+# ═════════════════════════════════════════════════════════════
+from PyQt6.QtWidgets import QPlainTextEdit, QScrollBar
+from PyQt6.QtGui     import QTextCursor, QTextCharFormat
+
+
+class CyberTerminal(QWidget):
+    """
+    Cyberpunk-styled terminal log widget.
+    Thay thế QTextEdit thông thường trong trang Dọn Rác.
+
+    Usage:
+        t = CyberTerminal()
+        t.append_log("message", level)   # level: ok/err/dry/head/info/warn/text
+        t.clear()
+        t.set_placeholder("text")
+    """
+
+    # Level → (hex_color, prefix_icon)
+    _LEVEL = {
+        'ok':   ('#00e676', '  ✓  '),
+        'err':  ('#ff3d5a', '  ✗  '),
+        'dry':  ('#ffd740', '  ~  '),
+        'head': ('#00e5ff', ''),
+        'info': ('#3d6678', ''),
+        'warn': ('#ffd740', '  ⚠  '),
+        'text': ('#7eb8cc', ''),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+
+        # ── header bar ──────────────────────────────────────────────────
+        hdr = QFrame()
+        hdr.setFixedHeight(26)
+        hdr.setStyleSheet(
+            f'QFrame{{background:{C["bg3"]};'
+            f'border-top:1px solid {C["border2"]};'
+            f'border-left:1px solid {C["border2"]};'
+            f'border-right:1px solid {C["border2"]};'
+            f'border-bottom:1px solid {C["border3"]};'
+            f'border-top-left-radius:3px;border-top-right-radius:3px;}}'
+        )
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(10, 0, 10, 0); hdr_lay.setSpacing(6)
+        for col in ('#ff3d5a', '#ffd740', '#00e676'):
+            dot = QFrame(); dot.setFixedSize(9, 9)
+            dot.setStyleSheet(
+                f'QFrame{{background:{col}30;border:1px solid {col}60;'
+                f'border-radius:4px;}}'
+            )
+            hdr_lay.addWidget(dot)
+        hdr_lay.addStretch()
+        self._hdr_lbl = QLabel('TERMINAL OUTPUT')
+        self._hdr_lbl.setStyleSheet(
+            f'color:{C["text3"]};font-size:8px;letter-spacing:3px;font-family:{MONO};'
+        )
+        hdr_lay.addWidget(self._hdr_lbl)
+        hdr_lay.addStretch()
+        root.addWidget(hdr)
+
+        # ── text area ────────────────────────────────────────────────────
+        self._te = QPlainTextEdit()
+        self._te.setReadOnly(True)
+        self._te.setMaximumBlockCount(600)
+        self._te.document().setMaximumBlockCount(600)
+        self._te.setStyleSheet(f'''
+            QPlainTextEdit {{
+                background: {C["bg"]};
+                color: {C["text2"]};
+                border-left: 1px solid {C["border2"]};
+                border-right: 1px solid {C["border2"]};
+                border-bottom: 1px solid {C["border2"]};
+                border-bottom-left-radius: 3px;
+                border-bottom-right-radius: 3px;
+                border-top: none;
+                font-family: {MONO};
+                font-size: 11px;
+                padding: 10px 14px;
+                selection-background-color: {C["cyan"]}25;
+                line-height: 1.5;
+            }}
+            QScrollBar:vertical {{
+                background: {C["bg2"]};
+                width: 6px;
+                border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C["border3"]};
+                border-radius: 3px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {C["cyan"]}60;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+        ''')
+        root.addWidget(self._te, 1)
+
+    # ── Public API ───────────────────────────────────────────────────────
+    def append_log(self, msg: str, level: str = 'text'):
+        """Append một dòng log có màu theo level."""
+        col, _prefix = self._LEVEL.get(level, ('#7eb8cc', ''))
+        cursor = self._te.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(col))
+        cursor.setCharFormat(fmt)
+        cursor.insertText(msg + '\n')
+        self._te.setTextCursor(cursor)
+        sb = self._te.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def clear(self):
+        self._te.clear()
+
+    def set_placeholder(self, text: str):
+        self._te.setPlaceholderText(text)
+
+    def set_header(self, text: str):
+        self._hdr_lbl.setText(text.upper())
+
+    def to_html(self) -> str:
+        return self._te.toHtml()
+
+
+# ═════════════════════════════════════════════════════════════
 # WORKER THREADS
 # All QThread subclasses with pyqtSignal MUST be at module scope.
 # ═════════════════════════════════════════════════════════════
@@ -527,6 +684,11 @@ class CleanWorker(QThread):
         self.targets = targets
         self.dry     = dry
         self._cleaner = cleaner   # passed in from main.py (avoids import cycle)
+        self._stop_requested = False
+
+    def stop(self):
+        """Request graceful stop — current target finishes, then loop exits."""
+        self._stop_requested = True
 
     def run(self):
         from utils.sysinfo import fmt_size
@@ -536,16 +698,21 @@ class CleanWorker(QThread):
 
         self.log.emit('─' * 44, 'head')
         mode = 'DRY-RUN' if self.dry else 'CLEAN'
-        self.log.emit(f'  {mode}  ·  {datetime.now().strftime("%H:%M:%S")}', 'head')
+        self.log.emit(f'  {_tlog(mode)}  ·  {datetime.now().strftime("%H:%M:%S")}', 'head')
         self.log.emit('─' * 44, 'head')
 
         for i, tid in enumerate(self.targets):
+            # ── Graceful stop: emit partial results before exiting ──
+            if self._stop_requested:
+                self.log.emit('  ⚠  Interrupted — partial results below', 'warn')
+                break
+
             slice_start = int((i / steps) * 95)
             slice_mid   = int(((i + 0.5) / steps) * 95)
             slice_end   = int(((i + 1) / steps) * 95)
             label = tid.replace('_', ' ').upper()
             self.progress.emit(slice_start, f'{label}...')
-            self.log.emit(f'\n  ▸ {label}', 'head')
+            self.log.emit(f'\n  ▸ {_tlog(label)}', 'head')
             self.progress.emit(slice_mid, f'{label} — working...')
             result = CLEANER.clean(tid, dry=self.dry)
             self.progress.emit(slice_end, f'{label} — done')
@@ -555,11 +722,11 @@ class CleanWorker(QThread):
             elif self.dry:
                 self.log.emit(f'  ~  ~{fmt_size(result.freed_bytes)}', 'dry')
                 if result.files_removed:
-                    self.log.emit(f'     {result.files_removed} items', 'dry')
+                    self.log.emit(_tlog(f'     {result.files_removed} items'), 'dry')
             else:
-                self.log.emit(f'  ✓  {fmt_size(result.freed_bytes)} freed', 'ok')
+                self.log.emit(_tlog(f'  ✓  {fmt_size(result.freed_bytes)} freed'), 'ok')
                 if result.files_removed:
-                    self.log.emit(f'     {result.files_removed} removed', 'ok')
+                    self.log.emit(_tlog(f'     {result.files_removed} removed'), 'ok')
 
             total_freed += result.freed_bytes
             rollback    += result.rollback
@@ -569,7 +736,7 @@ class CleanWorker(QThread):
         self.progress.emit(100, 'done')
         self.log.emit('\n' + '─' * 44, 'head')
         label = 'ESTIMATED' if self.dry else 'FREED'
-        self.log.emit(f'  TOTAL {label}: {fmt_size(total_freed)}', 'ok')
+        self.log.emit(_tlog(f'TOTAL {label}: {fmt_size(total_freed)}'), 'ok')
         self.done.emit({'freed': total_freed, 'dry': self.dry,
                         'summary': ' | '.join(summary), 'rollback': rollback})
 
@@ -578,10 +745,17 @@ class _SmartOnWorker(QThread):
     log_signal = pyqtSignal(str, str)
     done       = pyqtSignal(object)
 
+    def __init__(self):
+        super().__init__()
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
     def run(self):
         try:
             from core.booster import smart_boost_on
-            saved = smart_boost_on(lambda m, l='text': self.log_signal.emit(m, l))
+            saved = smart_boost_on(lambda m, l='text': self.log_signal.emit(_tlog(m), l))
             self.done.emit(saved)
         except Exception as e:
             self.log_signal.emit(f'  x Smart Boost error: {e}', 'err')
@@ -594,12 +768,16 @@ class _SmartOffWorker(QThread):
 
     def __init__(self, saved_state):
         super().__init__()
+        self._stop_requested = False
         self._saved_state = saved_state
+
+    def stop(self):
+        self._stop_requested = True
 
     def run(self):
         try:
             from core.booster import smart_boost_off
-            smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(m, l))
+            smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(_tlog(m), l))
         except Exception as e:
             self.log_signal.emit(f'  x Smart Boost restore error: {e}', 'err')
         self.done.emit(None)
@@ -607,6 +785,13 @@ class _SmartOffWorker(QThread):
 
 class _OneClickWorker(QThread):
     done = pyqtSignal(str, bool)
+
+    def __init__(self):
+        super().__init__()
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
 
     def run(self):
         import subprocess as _sp, shutil as _sh
@@ -655,17 +840,24 @@ class _ScanWorker(QThread):
     log  = pyqtSignal(str, str)
     done = pyqtSignal(list, list)
 
+    def __init__(self):
+        super().__init__()
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
     def run(self):
         try:
             from core.scanner import SecurityScanner
             sc      = SecurityScanner()
-            results = sc.scan(lambda m, l: self.log.emit(m, l))
+            results = sc.scan(lambda m, l: self.log.emit(_tlog(m), l))
         except Exception as e:
-            self.log.emit(f'  x Scanner error: {e}', 'err')
+            self.log.emit(f'  ✗  Scanner error: {e}', 'err')
             results = []
         try:
             from core.analyzer import get_network_processes
-            self.log.emit('  ⟳  Scanning active network processes...', 'head')
+            self.log.emit('  ⟳  ' + _tlog('Scanning active network processes...'), 'head')
             net_results = get_network_processes()
         except Exception:
             net_results = []
@@ -675,12 +867,313 @@ class _ScanWorker(QThread):
 class _UninstallWorker(QThread):
     finished = pyqtSignal(list)
 
+    def __init__(self):
+        super().__init__()
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
     def run(self):
         try:
             from core.uninstaller import get_installed_apps
             self.finished.emit(get_installed_apps())
         except Exception:
             self.finished.emit([])
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DiskDeltaWidget  — "Tape-bar" disk before/after visualiser
+# ═══════════════════════════════════════════════════════════════════════════
+class DiskDeltaWidget(QWidget):
+    """
+    Custom-painted widget that shows disk state as a horizontal tape bar.
+
+    Layout (top → bottom):
+      ┌────────────── full width = total disk ──────────────┐
+      │░░░░░░░░░░ USED (before) ░░░░│▓▓▓ FREED ▓▓▓│        │  ← tape bar
+      └──────────────────────────────────────────────────────┘
+      TRƯỚC  14.5 GB free          ▼ 228 MB freed       SAU  14.8 GB free
+
+    States:
+      • IDLE  — bar shows current disk state, AFTER column hidden
+      • READY — AFTER column populates, freed segment revealed via animation
+    """
+
+    _ANIM_MS   = 700           # animation duration ms
+    _BAR_H     = 10            # tape bar height px
+    _SCAN_W    = 3             # animated scan-line width
+    _COL_W     = 110           # left/right label column width
+    _PAD_X     = 20
+    _PAD_Y_TOP = 14
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(88)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # state
+        self._total      = 0
+        self._free_bef   = 0
+        self._used_pct_b = 0.0
+        self._free_aft   = 0
+        self._used_pct_a = 0.0
+        self._freed      = 0
+        self._has_after  = False
+        self._is_dry     = True
+
+        # animated freed-width ratio 0.0 → actual
+        self.__freed_ratio = 0.0
+        self._anim = QPropertyAnimation(self, b'_freed_ratio', self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.setDuration(self._ANIM_MS)
+
+        # scan-line pulse position (0.0 → 1.0 across freed segment)
+        self.__scan_pos = 0.0
+        self._scan_timer = QTimer(self)
+        self._scan_timer.timeout.connect(self._tick_scan)
+        self._scan_timer.start(16)   # ~60 fps
+
+    # ── pyqtProperty for animation ────────────────────────────────────
+    def _get_freed_ratio(self): return self.__freed_ratio
+    def _set_freed_ratio(self, v):
+        self.__freed_ratio = v
+        self.update()
+    _freed_ratio = pyqtProperty(float, _get_freed_ratio, _set_freed_ratio)
+
+    def _tick_scan(self):
+        self.__scan_pos = (self.__scan_pos + 0.012) % 1.0
+        if self._has_after:
+            self.update()
+
+    # ── Public API ────────────────────────────────────────────────────
+    def set_before(self, free_bytes: int, total_bytes: int, used_pct: float):
+        self._free_bef   = free_bytes
+        self._total      = max(total_bytes, 1)
+        self._used_pct_b = used_pct
+        self._has_after  = False
+        self.__freed_ratio = 0.0
+        self._anim.stop()
+        self.update()
+
+    def set_after(self, free_bytes: int, used_pct: float,
+                  freed_bytes: int, dry: bool = True):
+        self._free_aft   = free_bytes
+        self._used_pct_a = used_pct
+        self._freed      = freed_bytes
+        self._is_dry     = dry
+        self._has_after  = True
+        target = freed_bytes / self._total if self._total > 0 else 0.0
+        self._anim.stop()
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(min(target, 1.0))
+        self._anim.start()
+
+    def reset(self):
+        self._has_after  = False
+        self.__freed_ratio = 0.0
+        self._anim.stop()
+        self.update()
+
+    # ── Helpers ───────────────────────────────────────────────────────
+    @staticmethod
+    def _fmt(b: int) -> str:
+        if b <= 0:        return '—'
+        if b >= 1 << 30:  return f'{b/(1<<30):.1f} GB'
+        if b >= 1 << 20:  return f'{b/(1<<20):.0f} MB'
+        return f'{b >> 10} KB'
+
+    # ── Paint ─────────────────────────────────────────────────────────
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+
+        # ── colours ──────────────────────────────────────────────────
+        col_bg      = QColor(C['bg2'])
+        col_used    = QColor('#0d3a52')          # dark teal
+        col_used_hi = QColor('#00bcd4')          # cyan edge
+        col_free    = QColor('#081820')          # near-black
+        col_freed   = QColor(C['green'])         # bright green
+        col_freed_d = QColor('#005522')          # freed dim
+        col_cyan    = QColor(C['cyan'])
+        col_text    = QColor(C['text'])
+        col_text2   = QColor(C['text2'])
+        col_text3   = QColor(C['text3'])
+        col_green   = QColor(C['green'])
+        col_border  = QColor(C['border3'])
+
+        # background
+        p.fillRect(0, 0, W, H, col_bg)
+
+        # ── geometry ─────────────────────────────────────────────────
+        pw = self._PAD_X
+        bar_x = pw + self._COL_W + 16
+        bar_w = W - bar_x - pw - self._COL_W - 16
+        bar_y = self._PAD_Y_TOP + 2
+        bh    = self._BAR_H
+
+        used_ratio  = 1.0 - (self._free_bef / self._total) if self._total > 0 else 0.0
+        used_ratio  = max(0.0, min(1.0, used_ratio))
+        freed_ratio = max(0.0, min(1.0 - used_ratio, self.__freed_ratio))
+
+        used_px   = int(bar_w * used_ratio)
+        freed_px  = int(bar_w * freed_ratio)
+        free_px   = bar_w - used_px - freed_px
+
+        # ── tape bar background (total free) ─────────────────────────
+        p.fillRect(bar_x, bar_y, bar_w, bh, col_free)
+
+        # ── used segment ─────────────────────────────────────────────
+        if used_px > 0:
+            g = QLinearGradient(bar_x, bar_y, bar_x + used_px, bar_y)
+            g.setColorAt(0.0, QColor('#082535'))
+            g.setColorAt(0.85, col_used)
+            g.setColorAt(1.0, col_used_hi)
+            p.fillRect(bar_x, bar_y, used_px, bh, QBrush(g))
+
+        # ── freed segment ─────────────────────────────────────────────
+        if freed_px > 0:
+            fx = bar_x + used_px
+            g2 = QLinearGradient(fx, bar_y, fx + freed_px, bar_y)
+            g2.setColorAt(0.0, col_freed_d)
+            g2.setColorAt(1.0, col_freed)
+            p.fillRect(fx, bar_y, freed_px, bh, QBrush(g2))
+
+            # scan-line shimmer across freed segment
+            sp = int(self.__scan_pos * (freed_px + self._SCAN_W * 4)) - self._SCAN_W * 2
+            sx = fx + sp
+            if fx <= sx <= fx + freed_px + self._SCAN_W:
+                sg = QLinearGradient(sx, bar_y, sx + self._SCAN_W * 4, bar_y)
+                sg.setColorAt(0.0, QColor(0, 230, 118, 0))
+                sg.setColorAt(0.5, QColor(0, 230, 118, 180))
+                sg.setColorAt(1.0, QColor(0, 230, 118, 0))
+                p.fillRect(sx, bar_y, self._SCAN_W * 4, bh, QBrush(sg))
+
+        # ── bar top highlight line ────────────────────────────────────
+        p.setPen(QPen(QColor(C['cyan'] + '30'), 1))
+        p.drawLine(bar_x, bar_y, bar_x + bar_w, bar_y)
+
+        # ── tick marks at 25% intervals ───────────────────────────────
+        p.setPen(QPen(col_border, 1))
+        for frac in (0.25, 0.50, 0.75):
+            tx = bar_x + int(bar_w * frac)
+            p.drawLine(tx, bar_y + bh, tx, bar_y + bh + 4)
+
+        # ── % label above bar ─────────────────────────────────────────
+        font_tiny = QFont()
+        font_tiny.setPixelSize(9)
+        font_tiny.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+        p.setFont(font_tiny)
+
+        if used_px > 20:
+            p.setPen(col_text3)
+            p.drawText(bar_x + 4, bar_y - 3, f'{self._used_pct_b:.0f}% {_t("lbl_pct_used","used")}')
+
+        if freed_px > 40 and self._has_after:
+            p.setPen(col_freed)
+            label = ('~' if self._is_dry else '') + self._fmt(self._freed) + ' freed'
+            p.drawText(bar_x + used_px + 4, bar_y - 3, label)
+
+        # ── ruler line below bar ─────────────────────────────────────
+        p.setPen(QPen(col_border, 1))
+        p.drawLine(bar_x, bar_y + bh + 5, bar_x + bar_w, bar_y + bh + 5)
+
+        # ── LEFT COLUMN — BEFORE ─────────────────────────────────────────
+        lx = pw
+        self._draw_stat_col(
+            p, lx, bar_y - 2, self._COL_W,
+            _t('lbl_before', 'BEFORE'),
+            self._fmt(self._free_bef),
+            f'{self._used_pct_b:.1f}% {_t("lbl_pct_used","used")}',
+            col_cyan, col_text, col_text3,
+            align_right=False,
+        )
+
+        # ── RIGHT COLUMN — SAU ────────────────────────────────────────
+        rx = W - pw - self._COL_W
+        if self._has_after:
+            self._draw_stat_col(
+                p, rx, bar_y - 2, self._COL_W,
+                _t('lbl_after_est', 'AFTER (EST)') if self._is_dry else _t('lbl_after', 'AFTER'),
+                self._fmt(self._free_aft),
+                f'{self._used_pct_a:.1f}% {_t("lbl_pct_used","used")}',
+                col_green, col_text, col_text3,
+                align_right=True,
+            )
+        else:
+            self._draw_stat_col(
+                p, rx, bar_y - 2, self._COL_W,
+                _t('lbl_after', 'AFTER'),
+                '—',
+                '',
+                col_text3, col_text3, col_text3,
+                align_right=True,
+            )
+
+        # ── CENTRE badge: freed amount (only when visible) ────────────
+        if self._has_after and freed_px > 0:
+            mid_x = bar_x + used_px + freed_px // 2
+            badge_y = bar_y + bh + 10
+            freed_str = ('~' if self._is_dry else '') + self._fmt(self._freed)
+
+            font_badge = QFont()
+            font_badge.setPixelSize(13)
+            font_badge.setBold(True)
+            p.setFont(font_badge)
+            fm = p.fontMetrics()
+            bw = fm.horizontalAdvance(freed_str) + 20
+            bh2 = fm.height() + 8
+            bx = mid_x - bw // 2
+            by = badge_y
+
+            # badge bg
+            p.setBrush(QBrush(QColor('#002a14')))
+            p.setPen(QPen(col_freed.darker(130), 1))
+            p.drawRoundedRect(bx, by, bw, bh2, 3, 3)
+
+            # badge text
+            p.setPen(col_freed)
+            p.drawText(
+                QRectF(bx, by, bw, bh2),
+                Qt.AlignmentFlag.AlignCenter,
+                freed_str,
+            )
+
+            # downward arrow from bar to badge
+            ax = mid_x
+            p.setPen(QPen(col_freed.darker(150), 1))
+            p.drawLine(ax, bar_y + bh + 5, ax, badge_y - 1)
+
+        p.end()
+
+    def _draw_stat_col(self, p, x, y, w,
+                       tag, val, sub,
+                       col_tag, col_val, col_sub,
+                       align_right=False):
+        flag = Qt.AlignmentFlag.AlignRight if align_right else Qt.AlignmentFlag.AlignLeft
+
+        font_tag = QFont()
+        font_tag.setPixelSize(8)
+        font_tag.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2.5)
+        font_tag.setBold(True)
+        p.setFont(font_tag)
+        p.setPen(QColor(col_tag).darker(130) if col_tag != QColor(C['text3']) else col_sub)
+        p.drawText(QRectF(x, y, w, 14), flag | Qt.AlignmentFlag.AlignTop, tag)
+
+        font_val = QFont()
+        font_val.setPixelSize(20)
+        font_val.setBold(True)
+        p.setFont(font_val)
+        p.setPen(col_val)
+        p.drawText(QRectF(x, y + 13, w, 26), flag, val)
+
+        font_sub = QFont()
+        font_sub.setPixelSize(10)
+        p.setFont(font_sub)
+        p.setPen(col_sub)
+        p.drawText(QRectF(x, y + 38, w, 14), flag, sub)
 
 
 class _AutoCleanWorker(QThread):
@@ -690,10 +1183,16 @@ class _AutoCleanWorker(QThread):
         super().__init__()
         self._safe_targets = safe_targets
         self._cleaner      = cleaner
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
 
     def run(self):
         total_freed = 0; cleaned = 0
         for tid in self._safe_targets:
+            if self._stop_requested:
+                break
             try:
                 result       = self._cleaner.clean(tid, dry=False)
                 total_freed += result.freed_bytes
@@ -701,3 +1200,4 @@ class _AutoCleanWorker(QThread):
             except Exception:
                 pass
         self.done.emit(total_freed, cleaned)
+
