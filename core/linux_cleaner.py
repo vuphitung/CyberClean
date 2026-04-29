@@ -40,20 +40,23 @@ def run_privileged(action_key, raw_cmd=None, stdin_data=None):
     Priority: IS_ROOT → sudo -n NOPASSWD helper → pkexec (only if agent) → fail
     Never blocks GUI.
 
-    Special action_key='raw': skips the helper entirely and runs raw_cmd directly
-    via sudo -n. Use this for one-off commands that aren't in the helper's allowlist.
+    Special action_key='raw':
+      Runs raw_cmd via 'sudo -n' ONLY — never falls through to pkexec.
+      pkexec would popup a password dialog per-file (128 files = 128 popups = app freeze).
+      sudo -n returns immediately with error if NOPASSWD not configured.
     """
     if IS_ROOT:
         cmd = raw_cmd or action_key
         return run(cmd, timeout=120)
 
-    # 'raw' sentinel: caller wants to run raw_cmd directly, not via helper
+    # 'raw' sentinel: sudo -n only, NEVER pkexec (would block GUI per-file)
     if action_key == 'raw' and raw_cmd:
         out, code = run(f'sudo -n {raw_cmd} 2>/dev/null', timeout=60)
         if code == 0:
             return out, 0
-        return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
+        return 'Need root — run install.sh to configure NOPASSWD sudo', 1
 
+    # Named helper actions: try helper via sudo -n, then pkexec fallback
     if action_key:
         out, code = run(
             f'sudo -n /usr/local/bin/cyber-clean-helper {action_key} 2>/dev/null',
@@ -908,7 +911,7 @@ class LinuxCleaner(BaseCleaner):
                     'note': 'rotated log archive — active logs untouched',
                 })
                 if not dry:
-                    _, code = run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
+                    _, code = run_privileged(raw_cmd=f'rm -f {shlex.quote(str(f))}')
                     if code != 0:
                         r.error = 'Need root — run install.sh or launch with sudo'
                         break
@@ -927,50 +930,63 @@ class LinuxCleaner(BaseCleaner):
           /var/lib/systemd/coredump/      — systemd-coredump (Arch, Fedora, openSUSE)
           ~/core + /tmp/core.*            — raw core dump files
 
-        Rationale: crash dumps are only useful for debugging the specific crash
-        that generated them. They're never needed again after the report is filed.
+        IMPORTANT: freed_bytes is only counted AFTER a file is confirmed deleted.
+        Files in /var/crash / /var/lib/systemd/coredump are root-owned — if deletion
+        fails we escalate via run_privileged and only count success.
         """
         r = CleanResult('crash_reports')
         home = Path.home()
 
-        candidates = []
+        # ── Separate candidates by ownership ──────────────────────────
+        user_candidates  = []   # deletable without root
+        root_candidates  = []   # need root (var/crash, coredump)
 
-        # 1. apport crash files in /var/crash
+        # 1. apport crash files in /var/crash (root-owned)
         var_crash = Path('/var/crash')
         if var_crash.exists():
             try:
-                candidates += [f for f in var_crash.glob('*.crash') if f.is_file()]
-                candidates += [f for f in var_crash.glob('*.upload') if f.is_file()]
+                root_candidates += [f for f in var_crash.glob('*.crash') if f.is_file()]
+                root_candidates += [f for f in var_crash.glob('*.upload') if f.is_file()]
             except (OSError, PermissionError):
                 pass
 
-        # 2. User-level apport reports
+        # 2. User-level apport reports (~/.local/share/apport)
         user_apport = home / '.local/share/apport'
         if user_apport.exists():
             try:
-                candidates += [f for f in user_apport.rglob('*') if f.is_file()]
+                user_candidates += [f for f in user_apport.rglob('*') if f.is_file()]
             except (OSError, PermissionError):
                 pass
 
-        # 3. systemd-coredump storage
+        # 3. systemd-coredump (root-owned)
         coredump_dir = Path('/var/lib/systemd/coredump')
         if coredump_dir.exists():
             try:
-                candidates += [f for f in coredump_dir.iterdir() if f.is_file()]
+                root_candidates += [f for f in coredump_dir.iterdir() if f.is_file()]
             except (OSError, PermissionError):
                 pass
 
-        # 4. Raw core files at home root
+        # 4. Raw core files in home / /tmp (user-owned)
         for f in home.glob('core'):
             if f.is_file():
-                candidates.append(f)
+                user_candidates.append(f)
         for f in Path('/tmp').glob('core.*'):
             if f.is_file():
-                candidates.append(f)
+                user_candidates.append(f)
 
-        for f in candidates:
+        need_root_bytes  = 0
+        need_root_count  = 0
+        root_fail_count  = 0
+
+        # ── Process user-owned files ───────────────────────────────────
+        for f in user_candidates:
             try:
                 sz = f.stat().st_size
+            except OSError:
+                continue
+
+            # DRY-RUN: count estimate only
+            if dry:
                 r.freed_bytes   += sz
                 r.files_removed += 1
                 r.rollback.append({
@@ -980,13 +996,83 @@ class LinuxCleaner(BaseCleaner):
                     'size': sz,
                     'note': 'crash dump — safe to delete',
                 })
-                if not dry:
-                    try:
-                        safe_delete(f, use_trash=False)
-                    except (OSError, PermissionError):
-                        run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
+                continue
+
+            # REAL DELETE: count only if deletion succeeds
+            deleted = False
+            try:
+                safe_delete(f, use_trash=False)
+                deleted = not f.exists()
+            except (OSError, PermissionError):
+                deleted = False
+
+            if deleted:
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'crash_reports',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'crash dump — deleted',
+                })
+            # If not deleted: silently skip (another process may hold it)
+
+        # ── Process root-owned files ───────────────────────────────────
+        for f in root_candidates:
+            try:
+                sz = f.stat().st_size
             except OSError:
+                continue
+
+            # DRY-RUN: always count (show user what WOULD be freed if they had root)
+            if dry:
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'crash_reports',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'crash dump (needs root) — dry-run estimate',
+                })
+                continue
+
+            # REAL DELETE via privileged helper — count only on confirmed success
+            deleted = False
+            try:
+                safe_delete(f, use_trash=False)
+                deleted = not f.exists()
+            except (OSError, PermissionError):
                 pass
+
+            if not deleted:
+                _, code = run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
+                deleted = (code == 0) and not f.exists()
+
+            if deleted:
+                r.freed_bytes   += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'crash_reports',
+                    'path': str(f),
+                    'size': sz,
+                    'note': 'crash dump (root-owned) — deleted',
+                })
+            else:
+                need_root_bytes += sz
+                need_root_count += 1
+                root_fail_count += 1
+
+        # ── Surface permission error clearly if any root files remain ──
+        if root_fail_count > 0:
+            skipped_mb = need_root_bytes / (1024 * 1024)
+            r.error = (
+                f'{root_fail_count} file(s) ({skipped_mb:.1f} MB) need root — '
+                f'NOT counted as freed. Run install.sh or launch with sudo to delete them.'
+            )
+
         return r
 
     # ── Developer Caches ──────────────────────────────────
