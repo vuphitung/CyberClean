@@ -182,6 +182,36 @@ case "$1" in
   remove-file)      [[ -z "$2" ]] && exit 1; rm -f "$2" 2>/dev/null ;;
   kill-pid)         [[ -z "$2" ]] && exit 1; kill -9 "$2" 2>/dev/null ;;
   stop-service)     [[ -z "$2" ]] && exit 1; systemctl stop "$2" 2>/dev/null ;;
+  clean-rotated-logs)
+    # Delete rotated/compressed log files passed via stdin (newline-separated paths).
+    # Only deletes files matching safe patterns — no wildcards, no dirs.
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      # Safety: only allow files under /var/log with rotated suffixes
+      case "$f" in
+        /var/log/*.gz|/var/log/*.bz2|/var/log/*.xz|/var/log/*.zst|\
+        /var/log/*.1|/var/log/*.2|/var/log/*.3|/var/log/*.4|/var/log/*.5|\
+        /var/log/*.6|/var/log/*.7|/var/log/*.8|/var/log/*.9|/var/log/*.10|\
+        /var/log/*.old|/var/log/*.bak|/var/log/*.archived|\
+        /var/log/**/*.gz|/var/log/**/*.bz2|/var/log/**/*.xz|\
+        /var/log/**/*.1|/var/log/**/*.2|/var/log/**/*.old)
+          [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true ;;
+        *) true ;;  # reject anything outside /var/log
+      esac
+    done ;;
+  clean-crash-dirs)
+    # Delete crash dump files passed via stdin (newline-separated paths).
+    # Only allows files under /var/crash and /var/lib/systemd/coredump.
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      case "$f" in
+        /var/crash/*.crash|/var/crash/*.upload|\
+        /var/lib/systemd/coredump/*|\
+        /tmp/core.*)
+          [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true ;;
+        *) true ;;  # reject unexpected paths
+      esac
+    done ;;
   pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "${@:2}" 2>/dev/null ;;
   apt-remove)       [[ -z "$2" ]] && exit 1; DEBIAN_FRONTEND=noninteractive apt-get remove -y "$2" 2>/dev/null ;;
   dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;

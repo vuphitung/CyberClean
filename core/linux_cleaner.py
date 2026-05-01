@@ -58,17 +58,22 @@ def run_privileged(action_key, raw_cmd=None, stdin_data=None):
 
     # Named helper actions: try helper via sudo -n, then pkexec fallback
     if action_key:
-        out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper {action_key} 2>/dev/null',
-            timeout=60)
-        if code == 0:
-            return out, 0
+        try:
+            result = subprocess.run(
+                ['sudo', '-n', '/usr/local/bin/cyber-clean-helper', action_key],
+                input=stdin_data or '',
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                return result.stdout.strip(), 0
+        except Exception:
+            pass
 
         if HAS_POLKIT and HAS_POLKIT_AGENT:
             try:
                 r = subprocess.run(
                     ['pkexec', '/usr/local/bin/cyber-clean-helper', action_key],
-                    input=stdin_data, capture_output=True, text=True, timeout=30)
+                    input=stdin_data or '', capture_output=True, text=True, timeout=60)
                 return r.stdout.strip(), r.returncode
             except Exception as e:
                 return str(e), 1
@@ -910,13 +915,23 @@ class LinuxCleaner(BaseCleaner):
                     'size': sz,
                     'note': 'rotated log archive — active logs untouched',
                 })
-                if not dry:
-                    _, code = run_privileged(raw_cmd=f'rm -f {shlex.quote(str(f))}')
-                    if code != 0:
-                        r.error = 'Need root — run install.sh or launch with sudo'
-                        break
             except OSError:
                 pass
+
+        if not dry and files_to_clean:
+            # Build null-separated file list, pass to helper in ONE sudo call
+            # instead of N sudo calls (which would popup pkexec N times).
+            file_list = '\n'.join(str(f) for f in files_to_clean)
+            _, code = run_privileged('clean-rotated-logs', stdin_data=file_list)
+            if code != 0:
+                # Fallback: try raw sudo -n with xargs (still 1 call, not N)
+                paths_str = ' '.join(shlex.quote(str(f)) for f in files_to_clean)
+                _, code2 = run_privileged('raw', raw_cmd=f'rm -f {paths_str}')
+                if code2 != 0:
+                    r.error = 'Need root — run install.sh to configure NOPASSWD sudo'
+                    # Revert counted bytes since nothing was actually deleted
+                    r.freed_bytes   = 0
+                    r.files_removed = 0
         return r
 
     # ── Crash Reports ─────────────────────────────────────
@@ -1025,7 +1040,7 @@ class LinuxCleaner(BaseCleaner):
             except OSError:
                 continue
 
-            # DRY-RUN: always count (show user what WOULD be freed if they had root)
+            # DRY-RUN: always count (shows user what WOULD be freed with root)
             if dry:
                 r.freed_bytes   += sz
                 r.files_removed += 1
@@ -1036,34 +1051,45 @@ class LinuxCleaner(BaseCleaner):
                     'size': sz,
                     'note': 'crash dump (needs root) — dry-run estimate',
                 })
-                continue
 
-            # REAL DELETE via privileged helper — count only on confirmed success
-            deleted = False
-            try:
-                safe_delete(f, use_trash=False)
-                deleted = not f.exists()
-            except (OSError, PermissionError):
-                pass
+        if not dry and root_candidates:
+            # Batch delete all root-owned files in ONE sudo call via helper
+            # (avoids per-file pkexec popups that would freeze the GUI)
+            file_list = '\n'.join(str(f) for f in root_candidates)
+            _, code = run_privileged('clean-crash-dirs', stdin_data=file_list)
+            if code != 0:
+                # Fallback: single xargs call via raw sudo -n
+                paths_str = ' '.join(shlex.quote(str(f)) for f in root_candidates)
+                _, code2 = run_privileged('raw', raw_cmd=f'rm -f {paths_str}')
+                code = code2
 
-            if not deleted:
-                _, code = run_privileged('raw', raw_cmd=f'rm -f {shlex.quote(str(f))}')
-                deleted = (code == 0) and not f.exists()
-
-            if deleted:
-                r.freed_bytes   += sz
-                r.files_removed += 1
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'crash_reports',
-                    'path': str(f),
-                    'size': sz,
-                    'note': 'crash dump (root-owned) — deleted',
-                })
-            else:
-                need_root_bytes += sz
-                need_root_count += 1
-                root_fail_count += 1
+            # Count only files that are actually gone
+            for f in root_candidates:
+                try:
+                    sz = f.stat().st_size if f.exists() else None
+                    if sz is None:  # file is gone = successfully deleted
+                        try:
+                            # get size from rollback if we need it — use 0 as fallback
+                            orig_sz = next(
+                                (entry['size'] for entry in r.rollback
+                                 if entry.get('path') == str(f)), 0
+                            )
+                        except StopIteration:
+                            orig_sz = 0
+                        r.freed_bytes   += orig_sz
+                        r.files_removed += 1
+                        r.rollback.append({
+                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                            'type': 'crash_reports',
+                            'path': str(f),
+                            'size': orig_sz,
+                            'note': 'crash dump (root-owned) — deleted',
+                        })
+                    else:
+                        need_root_bytes += sz
+                        root_fail_count += 1
+                except OSError:
+                    pass
 
         # ── Surface permission error clearly if any root files remain ──
         if root_fail_count > 0:
