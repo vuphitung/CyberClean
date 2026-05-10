@@ -77,10 +77,22 @@ _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW')
 
 
 def run(cmd, timeout=20):
+    """
+    FIX: encoding='utf-8' errors='replace' — prevents UnicodeDecodeError crash
+    on Vietnamese/CJK Windows locales where app names contain non-ASCII chars.
+    FIX: TimeoutExpired handled explicitly — was silently returning ('exc_str', 1)
+    which masked slow-command issues.
+    """
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout, creationflags=_NO_WIN)
+        r = subprocess.run(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, creationflags=_NO_WIN,
+            encoding='utf-8', errors='replace',
+        )
         return r.stdout.strip(), r.returncode
+    except subprocess.TimeoutExpired:
+        return f'timeout after {timeout}s', 1
     except Exception as e:
         return str(e), 1
 
@@ -287,6 +299,7 @@ def _get_windows() -> List[InstalledApp]:
 
     try:
         import winreg
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         reg_paths = [
             (winreg.HKEY_LOCAL_MACHINE,
@@ -297,11 +310,13 @@ def _get_windows() -> List[InstalledApp]:
              r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'),
         ]
 
-        for hive, path in reg_paths:
+        def _read_hive(hive_path):
+            hive, path = hive_path
+            results = []
             try:
                 key = winreg.OpenKey(hive, path)
             except OSError:
-                continue
+                return results
             num_subkeys, _, _ = winreg.QueryInfoKey(key)
             for i in range(num_subkeys):
                 try:
@@ -315,7 +330,7 @@ def _get_windows() -> List[InstalledApp]:
                             return default
 
                     name = _val('DisplayName')
-                    if not name or name in seen:
+                    if not name:
                         continue
                     if _val('SystemComponent', 0) == 1:
                         continue
@@ -332,14 +347,27 @@ def _get_windows() -> List[InstalledApp]:
                     except OSError:
                         size_mb = 0.0
 
-                    seen.add(name)
-                    apps.append(InstalledApp(
+                    results.append(InstalledApp(
                         name=name, version=version, size_mb=size_mb,
                         source='registry',
                         pkg_id=f'{sub_name}|||{uninstall_str}|||{quiet_str}',
                     ))
                 except OSError:
                     continue
+            return results
+
+        # Read all three registry hives in parallel — ~3x faster than serial
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures = [ex.submit(_read_hive, hp) for hp in reg_paths]
+            for fut in as_completed(futures):
+                try:
+                    for app in fut.result(timeout=10):
+                        if app.name not in seen:
+                            seen.add(app.name)
+                            apps.append(app)
+                except Exception:
+                    pass
+
     except ImportError:
         pass   # not on Windows
 
@@ -348,14 +376,22 @@ def _get_windows() -> List[InstalledApp]:
 
 
 def _enrich_with_winget(apps: List[InstalledApp]):
-    """Run 'winget list' to upgrade source to 'winget' for known packages."""
+    """Run 'winget list' to upgrade source to 'winget' for known packages.
+    
+    FIX: timeout raised 15→45s — winget can take 30s+ on office machines
+    that haven't run it recently (source refresh). Also add
+    --disable-interactivity so it never blocks waiting for user input.
+    """
     if OS != 'Windows':
         return
     import shutil
     if not shutil.which('winget'):
         return
     try:
-        out, code = run('winget list 2>nul', timeout=15)
+        out, code = run(
+            'winget list --disable-interactivity --accept-source-agreements 2>nul',
+            timeout=45,   # was 15 — too short on cold/office machines
+        )
         if code != 0:
             return
 

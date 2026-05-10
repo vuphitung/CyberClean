@@ -77,7 +77,7 @@ from core.os_detect  import (IS_LINUX, IS_WINDOWS, IS_WSL, PKG_MANAGER, platform
                                 HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
 from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linux, fmt_size, fmt_speed, fmt_uptime
 from core.scanner    import SecurityScanner
-from core.uninstaller import get_installed_apps, uninstall_app, InstalledApp
+from core.uninstaller import get_installed_apps, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
 from utils.updater import UpdateDialog, UpdateBadge, UpdateCheckThread
 from core.analyzer import get_network_processes, get_network_summary, IdleScheduler
@@ -152,7 +152,7 @@ from ui_widgets import (
     # Workers
     SysInfoWorker, CleanWorker,
     _SmartOnWorker, _SmartOffWorker, _OneClickWorker,
-    _ScanWorker, _UninstallWorker, _AutoCleanWorker,
+    _ScanWorker, _UninstallWorker, _DoUninstallWorker, _AutoCleanWorker,
 )
 
 # MAIN APP
@@ -833,19 +833,53 @@ class CyberCleanApp(QMainWindow):
         lay.addLayout(ar)
         lay.addSpacing(12)
 
-        # Progress
-        self.clean_prog = QProgressBar()
-        self.clean_prog.setTextVisible(False)
-        self.clean_prog.setFixedHeight(2)
-        self.clean_prog.setVisible(False)
+        # ── Progress bar (animated, glowing — hard to miss) ──────────────
+        self._prog_container = QFrame()
+        self._prog_container.setFixedHeight(44)
+        self._prog_container.setStyleSheet('background:transparent;')
+        self._prog_container.setVisible(False)
+        prog_cl = QVBoxLayout(self._prog_container)
+        prog_cl.setContentsMargins(0, 4, 0, 4); prog_cl.setSpacing(3)
+
+        # Label row: status text left, % right
+        prog_lbl_row = QHBoxLayout()
         self.clean_prog_lbl = QLabel('')
         self.clean_prog_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
+            f'color:{C["cyan"]};font-size:11px;font-family:{MONO};font-weight:600;'
+            f'letter-spacing:1px;'
         )
-        self.clean_prog_lbl.setVisible(False)
-        lay.addWidget(self.clean_prog)
-        lay.addWidget(self.clean_prog_lbl)
-        lay.addSpacing(8)
+        self._clean_prog_pct = QLabel('0%')
+        self._clean_prog_pct.setStyleSheet(
+            f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+        )
+        prog_lbl_row.addWidget(self.clean_prog_lbl)
+        prog_lbl_row.addStretch()
+        prog_lbl_row.addWidget(self._clean_prog_pct)
+        prog_cl.addLayout(prog_lbl_row)
+
+        # The actual bar — taller + styled with gradient + glow
+        self.clean_prog = QProgressBar()
+        self.clean_prog.setTextVisible(False)
+        self.clean_prog.setFixedHeight(5)
+        self.clean_prog.setStyleSheet(f'''
+            QProgressBar {{
+                background: {C["bg3"]};
+                border: none;
+                border-radius: 2px;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {C["cyan"]}99,
+                    stop:0.6 {C["cyan"]},
+                    stop:1.0 #ffffff
+                );
+                border-radius: 2px;
+            }}
+        ''')
+        prog_cl.addWidget(self.clean_prog)
+        lay.addWidget(self._prog_container)
+        lay.addSpacing(4)
 
         # Target list
         self._lbl_clean_targets_sec = _lbl_section(_t('clean_targets', 'TARGETS'))
@@ -914,8 +948,23 @@ class CyberCleanApp(QMainWindow):
         lay.addSpacing(12)
 
         # ── Disk Delta Widget (Before → Freed → After) ───────────────────
+        # Wrapper frame keeps it always visible — labeled so user knows what it is
+        delta_frame = QFrame()
+        delta_frame.setObjectName('delta_frame')
+        delta_frame.setStyleSheet(
+            f'QFrame#delta_frame{{'
+            f'background:{C["bg2"]};'
+            f'border:1px solid {C["border2"]};'
+            f'border-left:3px solid {C["cyan"]}60;'
+            f'border-radius:3px;'
+            f'}}'
+        )
+        delta_fl = QVBoxLayout(delta_frame)
+        delta_fl.setContentsMargins(0, 0, 0, 0); delta_fl.setSpacing(0)
         self._disk_delta = DiskDeltaWidget()
-        lay.addWidget(self._disk_delta)
+        self._disk_delta.setMinimumHeight(92)
+        delta_fl.addWidget(self._disk_delta)
+        lay.addWidget(delta_frame)
 
         # ── Cyber Terminal log ────────────────────────────────────────────
         self.clean_terminal = CyberTerminal()
@@ -1250,6 +1299,7 @@ class CyberCleanApp(QMainWindow):
         btn_row = QHBoxLayout()
         un_btn = _btn(f"✕  {_t('btn_uninstall','UNINSTALL SELECTED')}", 'red')
         un_btn.clicked.connect(self._do_uninstall)
+        self._uninst_btn = un_btn   # keep ref so _do_uninstall can lock/unlock it
         btn_row.addWidget(un_btn)
         btn_row.addStretch()
         lay.addSpacing(10)
@@ -1817,6 +1867,16 @@ class CyberCleanApp(QMainWindow):
                 summary = f"  {total_f} files  ·  ~{fmt_size(total_b)}"
                 self.result_ready.emit(html, summary)
 
+        # FIX v2.5: Clean up previous _prev_worker before creating a new one.
+        # Without this, opening the preview dialog multiple times accumulates
+        # orphaned workers and their signals fire multiple times.
+        if hasattr(self, '_prev_worker') and self._prev_worker is not None:
+            try: self._prev_worker.result_ready.disconnect()
+            except Exception: pass
+            if not self._prev_worker.isRunning():
+                self._prev_worker.deleteLater()
+            self._prev_worker = None
+
         self._prev_worker = _PrevWorker(list(self.selected), CLEANER)
 
         def _apply(html, summary):
@@ -1836,7 +1896,22 @@ class CyberCleanApp(QMainWindow):
 
     def _run_clean(self, dry=True):
         if not CLEANER or not self.selected: return
-        if self.worker and self.worker.isRunning(): return
+        # ── Properly tear down old worker before creating a new one ──────
+        # This prevents the double-signal crash (emit from dead Python object)
+        # that causes the app to crash on the 2nd clean run.
+        if self.worker is not None:
+            if self.worker.isRunning():
+                return   # still running — ignore button press
+            # Worker finished but still allocated: disconnect all signals to
+            # prevent them firing again when we assign a new worker below.
+            try:
+                self.worker.log.disconnect()
+                self.worker.progress.disconnect()
+                self.worker.done.disconnect()
+            except Exception:
+                pass
+            self.worker.deleteLater()
+            self.worker = None
         # Snapshot disk BEFORE for visualization
         self._disk_pct_before = self._snap.disks[0].percent if self._snap and self._snap.disks else 0
         _disk_free_before     = self._snap.disks[0].free   if self._snap and self._snap.disks else 0
@@ -1850,13 +1925,23 @@ class CyberCleanApp(QMainWindow):
         self.clean_terminal.set_header(
             _t('btn_dryrun','DRY-RUN') if dry else _t('btn_clean_now','CLEAN NOW')
         )
-        self.clean_prog.setVisible(True)
-        self.clean_prog_lbl.setVisible(True)
+        self.clean_prog_lbl.setText(f'⟳  {_t("btn_dryrun","DRY-RUN") if dry else _t("btn_clean_now","CLEAN NOW")}  ...')
+        self._clean_prog_pct.setText('0%')
+        self._prog_container.setVisible(True)
+        self.clean_prog.setValue(0)
         self.worker = CleanWorker(list(self.selected), dry=dry, cleaner=CLEANER)
         self.worker.log.connect(self._on_clean_log)
-        self.worker.progress.connect(
-            lambda p, l: (self.clean_prog.setValue(p), self.clean_prog_lbl.setText(l))
-        )
+        def _on_progress(p, l):
+            self.clean_prog.setValue(p)
+            self._clean_prog_pct.setText(f'{p}%')
+            # Show target name, strip trailing '...' noise
+            lbl = l.replace('— working...', '').replace('— done', '✓').strip()
+            self.clean_prog_lbl.setText(f'⟳  {lbl}' if p < 100 else f'✓  {_t("lbl_done","Done")}')
+        self.worker.progress.connect(_on_progress)
+        # Lock action buttons so user knows cleaning is in progress
+        self._dry_btn.setEnabled(False)
+        self._clean_btn.setEnabled(False)
+        self._dry_btn.setText(f'⟳  {_t("btn_dryrun","DRY-RUN")}')
         self.worker.done.connect(self._on_clean_done)
         self.worker.start()
 
@@ -1864,34 +1949,46 @@ class CyberCleanApp(QMainWindow):
         self.clean_terminal.append_log(msg, level)
 
     def _on_clean_done(self, result):
-        self.clean_prog.setVisible(False)
-        self.clean_prog_lbl.setVisible(False)
+        self._prog_container.setVisible(False)
+        # Restore action buttons
+        self._dry_btn.setEnabled(True)
+        self._clean_btn.setEnabled(True)
+        self._dry_btn.setText(f"⬡  {_t('btn_dryrun','DRY-RUN')}")
+        self._clean_btn.setText(f"⚡  {_t('btn_clean_now','CLEAN NOW')}")
         disk_after = self._disk_pct_before
         free_after = 0
         if not result['dry']:
             try:
-                # Wait 1s for kernel to flush disk stats before sampling
-                import time as _time; _time.sleep(1.0)
-                snap_after = get_snapshot(interval=0.2)
-                disk_after = snap_after.disks[0].percent if snap_after.disks else self._disk_pct_before
-                free_after = snap_after.disks[0].free   if snap_after.disks else 0
-                # Immediately update sidebar disk ring + self._snap
-                self._snap = snap_after
-                if snap_after.disks:
-                    d = snap_after.disks[0]
-                    self.disk_ring.set_percent(d.percent)
-                    self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
-                # Sync the full dashboard (disk table, health score, etc.)
-                try:
-                    self._on_snapshot(snap_after)
-                except Exception:
-                    pass
+                # FIX: was time.sleep(1.0) here — BLOCKS the main thread / UI.
+                # Use QTimer to delay the snapshot off-thread instead.
+                def _deferred_snapshot():
+                    try:
+                        snap_after = get_snapshot(interval=0.2)
+                        disk_after_pct = snap_after.disks[0].percent if snap_after.disks else self._disk_pct_before
+                        free_after_val = snap_after.disks[0].free   if snap_after.disks else 0
+                        self._snap = snap_after
+                        if snap_after.disks:
+                            d = snap_after.disks[0]
+                            self.disk_ring.set_percent(d.percent)
+                            self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
+                        try:
+                            self._on_snapshot(snap_after)
+                        except Exception:
+                            pass
+                        # Update disk delta widget
+                        if hasattr(self, '_disk_delta') and result['freed'] > 0 and free_after_val > 0:
+                            disk = self._snap.disks[0] if self._snap and self._snap.disks else None
+                            if disk:
+                                self._disk_delta.set_after(free_after_val, disk_after_pct, result['freed'], dry=False)
+                    except Exception:
+                        pass
+                QTimer.singleShot(800, _deferred_snapshot)
             except Exception:
-                disk_after = self._disk_pct_before
+                pass
             session = {
                 'time': datetime.now().isoformat(),
                 'disk_before': self._disk_pct_before,
-                'disk_after': round(disk_after, 1),
+                'disk_after': round(self._disk_pct_before, 1),  # updated async by _deferred_snapshot
                 'freed_bytes': result['freed'],
                 'summary': result['summary'],
             }
@@ -1902,30 +1999,33 @@ class CyberCleanApp(QMainWindow):
                     for e in result['rollback']:
                         f.write(json.dumps(e) + '\n')
 
-        # ── Update AFTER viz panel ───────────────────────────────────────
-        if hasattr(self, '_disk_delta') and result['freed'] > 0:
-            if result['dry']:
-                try:
-                    disk = self._snap.disks[0] if self._snap and self._snap.disks else None
-                    if disk and disk.total > 0:
-                        est_free = disk.free + result['freed']
-                        est_pct  = max(0.0, min(100.0,
-                            (disk.total - est_free) / disk.total * 100))
-                        self._disk_delta.set_before(disk.free, disk.total, disk.percent)
-                        self._disk_delta.set_after(
-                            est_free, est_pct, result['freed'], dry=True)
-                except Exception:
-                    pass
-            elif free_after > 0:
+        # ── Update AFTER viz panel (dry-run only — real handled in _deferred_snapshot) ─
+        if hasattr(self, '_disk_delta') and result['freed'] > 0 and result['dry']:
+            try:
                 disk = self._snap.disks[0] if self._snap and self._snap.disks else None
-                if disk:
-                    self._disk_delta.set_after(
-                        free_after, disk_after, result['freed'], dry=False)
+                if disk and disk.total > 0:
+                    est_free = disk.free + result['freed']
+                    est_pct  = max(0.0, min(100.0,
+                        (disk.total - est_free) / disk.total * 100))
+                    self._disk_delta.set_before(disk.free, disk.total, disk.percent)
+                    self._disk_delta.set_after(est_free, est_pct, result['freed'], dry=True)
+            except Exception:
+                pass
 
 
     def _run_scanner(self):
         if hasattr(self, '_scan_running') and self._scan_running:
             return
+        # Clean up previous scan worker to prevent double-signal crash on 2nd run
+        if hasattr(self, '_scan_worker') and self._scan_worker is not None:
+            try:
+                self._scan_worker.log.disconnect()
+                self._scan_worker.done.disconnect()
+            except Exception:
+                pass
+            if not self._scan_worker.isRunning():
+                self._scan_worker.deleteLater()
+            self._scan_worker = None
         self._scan_running = True
         self.scan_btn.setEnabled(False)
         self.scan_btn.setText(f"⟳  {_t('btn_run_scan','SCANNING...')}")
@@ -2114,19 +2214,30 @@ class CyberCleanApp(QMainWindow):
         self.opt_terminal.moveCursor(QTextCursor.MoveOperation.End)
 
     def _load_uninstall(self):
-        # Đã có guard isRunning() — thêm button lock để user biết đang chạy
+        # Guard: don't start a second scan while one is running
         if getattr(self, '_uninstall_worker', None) and self._uninstall_worker.isRunning():
             return
+        # Lock UI during scan so user knows something is happening
         if hasattr(self, '_uninst_ref_btn'):
             self._uninst_ref_btn.setEnabled(False)
-            self._uninst_ref_btn.setText('...')
+            self._uninst_ref_btn.setText('⟳ ...')
+        if hasattr(self, '_lbl_uninst_hint'):
+            self._lbl_uninst_hint.setText(
+                f'<span style="color:{C["cyan"]}">⟳  Scanning installed apps...</span>'
+            )
         self.uninstall_table.setRowCount(0)
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["cyan"]}">  ⟳  Scanning installed apps...</span>'
+            f'<span style="color:{C["cyan"]}">  ⟳  Reading app registry — please wait...</span>'
         )
 
         self._uninstall_worker = _UninstallWorker()
+        # Wire progress signal so hint label stays live during long winget scans
+        self._uninstall_worker.progress.connect(
+            lambda msg: self._lbl_uninst_hint.setText(
+                f'<span style="color:{C["cyan"]}">{msg}</span>'
+            ) if hasattr(self, '_lbl_uninst_hint') else None
+        )
         self._uninstall_worker.finished.connect(self._on_uninstall_loaded)
         self._uninstall_worker.start()
 
@@ -2135,9 +2246,14 @@ class CyberCleanApp(QMainWindow):
         self._populate_uninstall(apps)
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["text3"]}">  Found {len(apps)} apps</span>'
+            f'<span style="color:{C["text3"]}">  ✓  Found {len(apps)} apps — '
+            f'select one or more, then click Uninstall</span>'
         )
-        # Mở khóa nút refresh
+        # Restore hint label and unlock refresh button
+        if hasattr(self, '_lbl_uninst_hint'):
+            self._lbl_uninst_hint.setText(
+                _t('uninstall_hint', 'Select one or more apps  →  Uninstall')
+            )
         if hasattr(self, '_uninst_ref_btn'):
             self._uninst_ref_btn.setEnabled(True)
             self._uninst_ref_btn.setText(f"↻ {_t('btn_refresh','REFRESH')}")
@@ -2170,6 +2286,11 @@ class CyberCleanApp(QMainWindow):
         self._populate_uninstall(filtered)
 
     def _do_uninstall(self):
+        # Guard: don't start another uninstall while one is running
+        if getattr(self, '_do_uninst_worker', None) and self._do_uninst_worker.isRunning():
+            QMessageBox.information(self, 'Busy', 'An uninstall is already in progress.')
+            return
+
         rows = set(i.row() for i in self.uninstall_table.selectedItems())
         if not rows:
             QMessageBox.information(self, 'Select', 'Select at least one app first.')
@@ -2215,18 +2336,65 @@ class CyberCleanApp(QMainWindow):
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
+        # ── Lock UI so user sees progress, not a frozen window ──────
         self.uninstall_log.clear()
-        ui_opened = False
-        for app in apps:
-            _col_map = {'ok': C['green'], 'err': C['red'], 'info': C['text3'], 'warn': C['yellow']}
-            def _log_u(m, l='info', _cm=_col_map):
-                col = _cm.get(l, C['text3'])
-                self.uninstall_log.append(f'<span style="color:{col};">{m}</span>')
-            result = uninstall_app(app, _log_u)
-            if result == 'UI_OPENED':
-                ui_opened = True
-        if not ui_opened:
-            QTimer.singleShot(1500, self._load_uninstall)
+        self.uninstall_log.append(
+            f'<span style="color:{C["cyan"]}">  ▸  Starting uninstall ({len(apps)} app(s))...</span>'
+        )
+        # Disable uninstall + refresh buttons during operation
+        if hasattr(self, '_uninst_btn'):
+            self._uninst_btn.setEnabled(False)
+            self._uninst_btn.setText('⟳  UNINSTALLING...')
+        if hasattr(self, '_uninst_ref_btn'):
+            self._uninst_ref_btn.setEnabled(False)
+
+        _col_map = {
+            'ok': C['green'], 'err': C['red'],
+            'info': C['text3'], 'warn': C['yellow'],
+        }
+
+        def _append_log(msg, level='info'):
+            col = _col_map.get(level, C['text3'])
+            self.uninstall_log.append(f'<span style="color:{col};">{msg}</span>')
+            self.uninstall_log.verticalScrollBar().setValue(
+                self.uninstall_log.verticalScrollBar().maximum()
+            )
+
+        def _on_one_done(app, result):
+            """Remove successfully uninstalled app row immediately for instant feedback."""
+            if result is True or result == 'UI_OPENED':
+                for row in range(self.uninstall_table.rowCount()):
+                    item = self.uninstall_table.item(row, 0)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == app:
+                        self.uninstall_table.removeRow(row)
+                        if hasattr(self, '_all_apps'):
+                            try: self._all_apps.remove(app)
+                            except ValueError: pass
+                        break
+
+        def _on_all_done(had_ui):
+            """Re-enable UI after all apps processed."""
+            if hasattr(self, '_uninst_btn'):
+                self._uninst_btn.setEnabled(True)
+                self._uninst_btn.setText(f"✕  {_t('btn_uninstall','UNINSTALL SELECTED')}")
+            if hasattr(self, '_uninst_ref_btn'):
+                self._uninst_ref_btn.setEnabled(True)
+            _append_log('  ─────────────────────────────────────', 'info')
+            if had_ui:
+                _append_log(
+                    '  ℹ  Installer window opened — complete it, then click REFRESH.',
+                    'warn',
+                )
+            else:
+                _append_log('  ✓  Done — refreshing list...', 'ok')
+                QTimer.singleShot(1200, self._load_uninstall)
+
+        # ── Launch in background thread — UI stays fully responsive ─
+        self._do_uninst_worker = _DoUninstallWorker(apps)
+        self._do_uninst_worker.log_line.connect(_append_log)
+        self._do_uninst_worker.one_done.connect(_on_one_done)
+        self._do_uninst_worker.all_done.connect(_on_all_done)
+        self._do_uninst_worker.start()
 
     def _load_log(self):
         self.log_table.setRowCount(0)
