@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.os_detect  import (IS_LINUX, IS_WINDOWS, IS_WSL, PKG_MANAGER, platform_info,
                                 HAS_POLKIT, HAS_POLKIT_AGENT, HAS_FLATPAK, HAS_DOCKER,
                                 HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
-from utils.sysinfo   import get_snapshot, get_startup_items, toggle_startup_linux, fmt_size, fmt_speed, fmt_uptime
+from utils.sysinfo   import get_snapshot, fmt_size, fmt_speed, fmt_uptime
 from core.scanner    import SecurityScanner
 from core.uninstaller import get_installed_apps, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
@@ -402,10 +402,11 @@ class CyberCleanApp(QMainWindow):
         sf_lay.setSpacing(5)
         dot = QLabel('●')
         dot.setStyleSheet(f'color:{C["green"]};font-size:7px;')
-        status_lbl = QLabel('ACTIVE')
+        status_lbl = QLabel(_t('lbl_active', 'ACTIVE'))
         status_lbl.setStyleSheet(
             f'color:{C["text3"]};font-size:10px;letter-spacing:2px;font-family:{MONO};'
         )
+        self._lbl_status_active = status_lbl  # kept for retranslation
         sf_lay.addWidget(dot)
         sf_lay.addWidget(status_lbl)
 
@@ -446,11 +447,12 @@ class CyberCleanApp(QMainWindow):
         lay.setSpacing(0)
 
         # Navigation label
-        nav_label = QLabel('NAVIGATION')
+        nav_label = QLabel(_t('lbl_navigation', 'NAVIGATION'))
         nav_label.setStyleSheet(
             f'color:{C["dim"]};font-size:9px;letter-spacing:3px;'
             f'font-family:{MONO};padding:0 16px 8px 16px;font-weight:700;'
         )
+        self._lbl_navigation = nav_label  # kept for retranslation
         lay.addWidget(nav_label)
 
         # Nav buttons — using new NavButton widget (pure QPainter icons)
@@ -569,7 +571,6 @@ class CyberCleanApp(QMainWindow):
         self.stack.addWidget(self._build_log())
         self.stack.addWidget(self._build_rollback())
         self.stack.addWidget(self._build_browser_turbo())
-        self.stack.addWidget(self._build_startup())
         return self.stack
 
     # ── Page header helper ───────────────────────────────────
@@ -613,7 +614,6 @@ class CyberCleanApp(QMainWindow):
         if pid == 'log':       self._load_log()
         if pid == 'rollback':  self._load_rollback()
         if pid == 'uninstall': self._load_uninstall()
-        if pid == 'startup':   self._load_startup_items()
         if pid == 'clean' and hasattr(self, '_disk_delta') \
                 and self._snap and self._snap.disks:
             _d = self._snap.disks[0]
@@ -974,139 +974,6 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self.clean_terminal, 1)
         return w
 
-    # ─────────────────────────────────────────────────────────
-    # STARTUP ITEMS MANAGER
-    # ─────────────────────────────────────────────────────────
-    def _build_startup(self):
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(26, 22, 26, 22); lay.setSpacing(0)
-        lay.addWidget(self._page_header(
-            _t('nav_startup', 'STARTUP ITEMS'),
-            _t('startup_sub', 'Enable or disable programs that run at login'),
-            store_key='startup'
-        ))
-        tb = QHBoxLayout(); tb.setSpacing(8)
-        self._startup_refresh_btn = _btn(
-            f"↻  {_t('btn_refresh','REFRESH')}", 'cyan', small=True
-        )
-        self._startup_refresh_btn.clicked.connect(self._load_startup_items)
-        self._startup_count_lbl = QLabel('')
-        self._startup_count_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:11px;font-family:{MONO};'
-        )
-        tb.addWidget(self._startup_refresh_btn)
-        tb.addWidget(self._startup_count_lbl)
-        tb.addStretch()
-        lay.addLayout(tb)
-        lay.addSpacing(10)
-
-        self._startup_table = QTableWidget(0, 4)
-        self._startup_table.setHorizontalHeaderLabels([
-            _t('col_name','NAME'), _t('col_type','TYPE'),
-            _t('col_status','STATUS'), _t('col_toggle','TOGGLE'),
-        ])
-        hdr2 = self._startup_table.horizontalHeader()
-        hdr2.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hdr2.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr2.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hdr2.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self._startup_table.verticalHeader().setVisible(False)
-        self._startup_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._startup_table.setAlternatingRowColors(True)
-        lay.addWidget(self._startup_table, 1)
-
-        info = QLabel(_t('startup_info',
-            'Changes take effect at next login. '
-            'Only disable items you recognise.'))
-        info.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;font-family:{MONO};padding-top:6px;'
-        )
-        info.setWordWrap(True)
-        lay.addWidget(info)
-        return w
-
-    def _load_startup_items(self):
-        if not hasattr(self, '_startup_table'): return
-        import threading as _thr
-        if hasattr(self, '_startup_count_lbl'):
-            self._startup_count_lbl.setText(_t('lbl_loading', 'Loading…'))
-        def _fetch():
-            try:
-                items = get_startup_items()
-            except Exception:
-                items = []
-            QTimer.singleShot(0, lambda its=items: self._populate_startup_table(its))
-        _thr.Thread(target=_fetch, daemon=True).start()
-
-    def _populate_startup_table(self, items):
-        if not hasattr(self, '_startup_table'): return
-        t = self._startup_table
-        t.setRowCount(0)
-        for item in items:
-            row = t.rowCount(); t.insertRow(row)
-            name_i = QTableWidgetItem(item.get('name', ''))
-            name_i.setForeground(QColor(C['text']))
-            t.setItem(row, 0, name_i)
-            type_i = QTableWidgetItem(item.get('type', ''))
-            type_i.setForeground(QColor(C['text3']))
-            t.setItem(row, 1, type_i)
-            enabled  = item.get('enabled', True)
-            scol     = C['green'] if enabled else C['red']
-            stxt     = (_t('status_enabled','ENABLED') if enabled
-                        else _t('status_disabled','DISABLED'))
-            st_i = QTableWidgetItem(stxt)
-            st_i.setForeground(QColor(scol))
-            t.setItem(row, 2, st_i)
-            tog_lbl  = (f"⊘  {_t('btn_disable','DISABLE')}" if enabled
-                        else f"⊙  {_t('btn_enable','ENABLE')}")
-            tog_btn  = _btn(tog_lbl, 'red' if enabled else 'cyan', small=True)
-            _snap    = dict(item)
-            tog_btn.clicked.connect(
-                lambda _, it=_snap: self._toggle_startup_item(it)
-            )
-            t.setCellWidget(row, 3, tog_btn)
-            t.setRowHeight(row, 36)
-        if hasattr(self, '_startup_count_lbl'):
-            self._startup_count_lbl.setText(
-                f"{len(items)} {_t('startup_items_count','items')}"
-            )
-
-    def _toggle_startup_item(self, item):
-        name      = item.get('name', '')
-        itype     = item.get('type', '')
-        enabled   = item.get('enabled', True)
-        new_state = not enabled
-        try:
-            if IS_LINUX:
-                toggle_startup_linux(
-                    name=name, item_type=itype,
-                    enable=new_state, path=item.get('path', '')
-                )
-            elif IS_WINDOWS:
-                import winreg as _wr
-                key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
-                try:
-                    key = _wr.OpenKey(
-                        _wr.HKEY_CURRENT_USER, key_path, 0,
-                        _wr.KEY_SET_VALUE | _wr.KEY_READ
-                    )
-                    if new_state and item.get('path'):
-                        _wr.SetValueEx(key, name, 0, _wr.REG_SZ, item['path'])
-                    elif not new_state:
-                        try:
-                            _wr.DeleteValue(key, name)
-                        except FileNotFoundError:
-                            pass
-                    _wr.CloseKey(key)
-                except PermissionError:
-                    # HKLM requires admin — just skip silently
-                    pass
-        except Exception as e:
-            if hasattr(self, '_startup_count_lbl'):
-                self._startup_count_lbl.setText(f"  ✗  {e}")
-            return
-        QTimer.singleShot(400, self._load_startup_items)
 
     def _log_startup_disk_snapshot(self, disk_pct: float):
         """Log one disk-usage data point per day so the 30-day trend always has data."""
@@ -2246,8 +2113,7 @@ class CyberCleanApp(QMainWindow):
         self._populate_uninstall(apps)
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["text3"]}">  ✓  Found {len(apps)} apps — '
-            f'select one or more, then click Uninstall</span>'
+            f'<span style="color:{C["text3"]}">  ✓  {_t("uninstall_found","Found {n} apps — select one or more, then click Uninstall").replace("{n}", str(len(apps)))}</span>'
         )
         # Restore hint label and unlock refresh button
         if hasattr(self, '_lbl_uninst_hint'):
@@ -2382,7 +2248,7 @@ class CyberCleanApp(QMainWindow):
             _append_log('  ─────────────────────────────────────', 'info')
             if had_ui:
                 _append_log(
-                    '  ℹ  Installer window opened — complete it, then click REFRESH.',
+                    f'  ℹ  {_t("lbl_installer_open","Installer window opened — complete it, then click REFRESH")}.',
                     'warn',
                 )
             else:
@@ -2834,6 +2700,11 @@ class CyberCleanApp(QMainWindow):
         # ── Sidebar nav buttons ──────────────────────────────
         for (pid, icon_name, label), btn in zip(self.NAV_ITEMS, self.nav_btns.values()):
             btn.set_label(label)
+        # Sidebar static labels (NAVIGATION / ACTIVE)
+        if hasattr(self, '_lbl_navigation'):
+            self._lbl_navigation.setText(_t('lbl_navigation', 'NAVIGATION'))
+        if hasattr(self, '_lbl_status_active'):
+            self._lbl_status_active.setText(_t('lbl_active', 'ACTIVE'))
 
         # ── Header ───────────────────────────────────────────
         if hasattr(self, '_os_info_lbl'):
@@ -2889,7 +2760,10 @@ class CyberCleanApp(QMainWindow):
             ])
         if hasattr(self, 'disk_table'):
             self.disk_table.setHorizontalHeaderLabels([
-                _t('col_drive','Drive'), '▲ Used', '▽ Free', '%'
+                _t('col_drive','Drive'),
+                f"▲ {_t('col_used','Used')}",
+                f"▽ {_t('col_free','Free')}",
+                '%'
             ])
 
         # ── Clean tab ─────────────────────────────────────────
@@ -2914,15 +2788,6 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_disk_delta') and self._snap and self._snap.disks:
             _d = self._snap.disks[0]
             self._disk_delta.set_before(_d.free, _d.total, _d.percent)
-
-        # ── Startup tab ───────────────────────────────────────
-        if hasattr(self, '_startup_refresh_btn'):
-            self._startup_refresh_btn.setText(f"↻  {_t('btn_refresh','REFRESH')}")
-        if hasattr(self, '_startup_table'):
-            self._startup_table.setHorizontalHeaderLabels([
-                _t('col_name','NAME'), _t('col_type','TYPE'),
-                _t('col_status','STATUS'), _t('col_toggle','TOGGLE'),
-            ])
 
         # ── Scanner tab ───────────────────────────────────────
         if hasattr(self, '_scan_readonly_lbl'):
@@ -3070,7 +2935,7 @@ class CyberCleanApp(QMainWindow):
         if self._smart_btn.isChecked():
             tier     = detect_pc_tier()
             tier_lbl = {'high':'👑 HIGH-END','mid':'💪 MID','low':'🥔 LOW-END'}.get(tier, tier)
-            self._smart_btn.setText(f'■  {tier_lbl} — ACTIVE')
+            self._smart_btn.setText(f'■  {tier_lbl} — {_t("lbl_smart_active","ACTIVE")}')
             self._game_btn.setEnabled(False)
             self._eco_btn.setEnabled(False)
             self._smart_btn.setEnabled(False)

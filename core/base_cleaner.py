@@ -66,8 +66,9 @@ class BaseCleaner(ABC):
             for f in Path(path).rglob('*'):
                 if f.is_file() and not f.is_symlink():
                     try: total += f.stat().st_size
-                    except: pass
-        except: pass
+                    except OSError: pass
+        except OSError:
+            pass
         return total
 
     @staticmethod
@@ -86,5 +87,6 @@ class BaseCleaner(ABC):
                 if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
                 else:             item.unlink(missing_ok=True)
                 freed += sz
-            except: pass
+            except (OSError, PermissionError):
+                pass
         return freed
