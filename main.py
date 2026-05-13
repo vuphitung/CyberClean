@@ -827,6 +827,10 @@ class CyberCleanApp(QMainWindow):
         self._none_btn.clicked.connect(self._sel_none)
         self._preview_btn = _btn(f"⊡  {_t('btn_preview','PREVIEW FILES')}", 'yellow', small=True)
         self._preview_btn.clicked.connect(self._show_preview_files)
+        # PREVIEW FILES chỉ có nghĩa trên Linux — trên Windows WinSxS và các
+        # target hệ thống không enumerate được file list, gây đứng app.
+        if IS_WINDOWS:
+            self._preview_btn.setVisible(False)
         for b in [self._dry_btn, self._clean_btn, self._preview_btn, self._all_btn, self._none_btn]:
             ar.addWidget(b)
         ar.addStretch()

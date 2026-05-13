@@ -721,8 +721,15 @@ class CleanWorker(QThread):
                     pct = int(5 + ((i + 1) / steps) * 90)
                     self.progress.emit(pct, label)
                     freed = estimates.get(tid, 0)
-                    # Still call clean(dry=True) individually for proper CleanResult + error reporting
-                    result = CLEANER.clean(tid, dry=True)
+                    # Still call clean(dry=True) for CleanResult + error reporting
+                    # but check cache first to avoid redundant disk scan
+                    if hasattr(CLEANER, '_cache_get'):
+                        cached = CLEANER._cache_get(tid)
+                        result = cached if cached is not None else CLEANER.clean(tid, dry=True)
+                        if cached is None:
+                            CLEANER._cache_set(tid, result)
+                    else:
+                        result = CLEANER.clean(tid, dry=True)
                     total_freed += result.freed_bytes
                     rollback    += result.rollback
                     self.log.emit(f'\n  ▸ {_tlog(label)}', 'head')
@@ -748,7 +755,24 @@ class CleanWorker(QThread):
                     self.progress.emit(slice_start, f'{label}...')
                     self.log.emit(f'\n  ▸ {_tlog(label)}', 'head')
                     self.progress.emit(slice_mid, f'{label}...')
-                    result = CLEANER.clean(tid, dry=self.dry)
+
+                    # ── Estimate cache (dry-run only) ─────────────────────
+                    # Avoid re-scanning the same dirs within 60s — huge win on
+                    # Windows where WinSxS and large caches are slow to walk.
+                    if self.dry and hasattr(CLEANER, '_cache_get'):
+                        cached = CLEANER._cache_get(tid)
+                        if cached is not None:
+                            result = cached
+                            self.log.emit(_tlog('  ⚡  (cached)'), 'dry')
+                        else:
+                            result = CLEANER.clean(tid, dry=True)
+                            CLEANER._cache_set(tid, result)
+                    else:
+                        result = CLEANER.clean(tid, dry=self.dry)
+                        # Invalidate cache after a real clean so next dry-run rescans
+                        if not self.dry and hasattr(CLEANER, '_cache_invalidate'):
+                            CLEANER._cache_invalidate(tid)
+
                     self.progress.emit(slice_end, f'{label}')
 
                     if result.error:
