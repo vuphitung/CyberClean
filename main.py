@@ -2342,15 +2342,6 @@ class CyberCleanApp(QMainWindow):
                 2000,
             )
 
-    def _reset_close_preference(self):
-        self._settings.remove('autoclean_close_behavior')
-        self._settings.sync()
-        QMessageBox.information(
-            self,
-            _t('close_pref_reset_title', 'Preference reset'),
-            _t('close_pref_reset_body', 'You will be asked again the next time you close the window.'),
-        )
-
     class BoosterWorker(QThread):
         log_signal  = pyqtSignal(str, str)
         done_signal = pyqtSignal(object)
@@ -2529,11 +2520,6 @@ class CyberCleanApp(QMainWindow):
         self._tray_update_act.triggered.connect(
             lambda: (self._show_from_tray(), self._open_update_dialog())
         )
-        self._tray_reset_close_act = QAction(
-            _t('tray_reset_close_pref', 'Reset close-window preference…'), self
-        )
-        self._tray_reset_close_act.triggered.connect(self._reset_close_preference)
-
         quit_act  = QAction('✕  Quit', self)
 
         def _quit():
@@ -2545,8 +2531,6 @@ class CyberCleanApp(QMainWindow):
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(clean_act)
         self.tray_menu.addAction(self._tray_update_act)
-        self.tray_menu.addSeparator()
-        self.tray_menu.addAction(self._tray_reset_close_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(quit_act)
         self.tray.setContextMenu(self.tray_menu)
@@ -2859,10 +2843,6 @@ class CyberCleanApp(QMainWindow):
                 'rollback_hint',
                 'These entries are a record of what was removed — files are not kept for restore.',
             ))
-        if hasattr(self, '_tray_reset_close_act'):
-            self._tray_reset_close_act.setText(
-                _t('tray_reset_close_pref', 'Reset close-window preference…')
-            )
         if hasattr(self, '_tray_update_act'):
             self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
         if hasattr(self, '_upd_lbl') and self._upd_lbl.isVisible():

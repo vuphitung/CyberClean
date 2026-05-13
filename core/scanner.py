@@ -160,6 +160,114 @@ def run(cmd, timeout=10):
 
 
 # ══════════════════════════════════════════════════════════════
+# USER WHITELIST  (persistent false-positive registry)
+# ══════════════════════════════════════════════════════════════
+import json as _json
+
+_WHITELIST_DIR  = Path.home() / '.local' / 'share' / 'cyber-clean'
+_WHITELIST_FILE = _WHITELIST_DIR / 'user_whitelist.json'
+
+
+def _load_user_whitelist() -> dict:
+    try:
+        if _WHITELIST_FILE.exists():
+            return _json.loads(_WHITELIST_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_user_whitelist(data: dict) -> None:
+    try:
+        _WHITELIST_DIR.mkdir(parents=True, exist_ok=True)
+        _WHITELIST_FILE.write_text(
+            _json.dumps(data, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+    except Exception:
+        pass
+
+
+def add_to_user_whitelist(path: str, reason: str = '') -> None:
+    """
+    Mark a path as trusted — scanner gives it -50 points so it's
+    almost never flagged again. Written to user_whitelist.json.
+    """
+    data = _load_user_whitelist()
+    data[path] = {
+        'reason':    reason or 'user marked safe',
+        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+    _save_user_whitelist(data)
+
+
+def remove_from_user_whitelist(path: str) -> bool:
+    """Remove a path from the whitelist. Returns True if it was present."""
+    data = _load_user_whitelist()
+    if path in data:
+        del data[path]
+        _save_user_whitelist(data)
+        return True
+    return False
+
+
+def get_user_whitelist() -> dict:
+    """Return the full whitelist dict {path: {reason, timestamp}}."""
+    return _load_user_whitelist()
+
+
+# ══════════════════════════════════════════════════════════════
+# QUARANTINE  (move malicious file to vault — recoverable)
+# ══════════════════════════════════════════════════════════════
+
+if OS == 'Windows':
+    _VAULT_DIR = Path(os.environ.get('LOCALAPPDATA', 'C:/Users/Public')) / 'CyberClean_Vault'
+else:
+    _VAULT_DIR = Path.home() / '.local' / 'share' / 'cyber-clean' / 'quarantine'
+
+
+def quarantine_file(src_path: str) -> tuple[bool, str]:
+    """
+    Move a file to the quarantine vault and rename it to .vir.
+    Returns (success: bool, message: str).
+
+    Why rename to .vir?
+      - Windows will refuse to execute it (unknown extension → no association)
+      - Double-click by accident won't launch it
+      - File is still recoverable — just rename back and move out
+    """
+    try:
+        src = Path(src_path)
+        if not src.exists():
+            return False, f'File not found: {src_path}'
+        _VAULT_DIR.mkdir(parents=True, exist_ok=True)
+        dest = _VAULT_DIR / (src.name + '.vir')
+        # If a file with that name is already in vault, add a counter
+        counter = 1
+        while dest.exists():
+            dest = _VAULT_DIR / f'{src.name}_{counter}.vir'
+            counter += 1
+        src.rename(dest)
+        # Log the quarantine action
+        log_file = _VAULT_DIR / 'quarantine_log.json'
+        try:
+            log = _json.loads(log_file.read_text(encoding='utf-8')) if log_file.exists() else []
+        except Exception:
+            log = []
+        log.append({
+            'original':  str(src),
+            'vault':     str(dest),
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        })
+        log_file.write_text(_json.dumps(log, ensure_ascii=False, indent=2), encoding='utf-8')
+        return True, f'Quarantined → {dest}'
+    except PermissionError:
+        return False, f'Permission denied — run as Administrator to quarantine {src_path}'
+    except Exception as e:
+        return False, str(e)
+
+
+# ══════════════════════════════════════════════════════════════
 # TRUSTED PROCESS / PATH ALLOWLISTS
 # ══════════════════════════════════════════════════════════════
 
@@ -398,6 +506,14 @@ def _is_trusted_process(name: str, exe: str, pid: int) -> tuple:
     norm = _normalize_proc_name(name)
     if norm in {_normalize_proc_name(t) for t in TRUSTED_PROCESS_NAMES}:
         return True, f'known trusted process ({norm})'
+
+    # ── User whitelist check ─────────────────────────────────
+    # Paths marked safe by the user get automatic trust.
+    _wl = _load_user_whitelist()
+    if exe and exe in _wl:
+        return True, f'user-whitelisted: {_wl[exe].get("reason","")}'
+    if name and name in _wl:
+        return True, f'user-whitelisted: {_wl[name].get("reason","")}'
 
     # Trusted path — installed software
     if exe:
@@ -890,31 +1006,56 @@ class SecurityScanner:
         out = run('ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null', timeout=8)
         found = 0
 
-        # Strict ports — high confidence RAT/C2 (report standalone)
         strict_ports = {4444: 'Metasploit default', 1337: 'common RAT port',
                         31337: 'classic backdoor port', 6667: 'IRC/botnet',
                         6666: 'common RAT port', 54321: 'common RAT port'}
-        # Mining ports — lower confidence (only report with label)
         mining_ports = {3333: 'Monero/XMR pool', 5555: 'ETH pool',
                         14444: 'mining pool', 45560: 'mining pool'}
+
+        def _extract_pid(line: str) -> Optional[int]:
+            """Extract PID from ss -tlnp output: users:(("ncat",pid=11528,fd=3))"""
+            m = re.search(r'pid=(\d+)', line)
+            if m:
+                return int(m.group(1))
+            # Fallback: netstat -tlnp format: 11528/ncat
+            m2 = re.search(r'\b(\d+)/\S+', line)
+            if m2:
+                return int(m2.group(1))
+            return None
 
         for line in out.splitlines():
             for port, label in strict_ports.items():
                 if f':{port} ' in line or f':{port}\t' in line:
+                    pid = _extract_pid(line)
+                    kill = _safe_kill_cmd(pid) if pid else ''
                     self.results.append(ScanResult(
                         severity='high', category='network', path=line.strip(),
-                        detail=f'Suspicious port {port} listening ({label})',
-                        reasons=[f'Port {port} is associated with: {label}'],
+                        detail=f'Suspicious port {port} listening ({label})'
+                               + (f' — PID {pid}' if pid else ''),
+                        reasons=[
+                            f'Port {port} is associated with: {label}',
+                            f'Owning PID: {pid}' if pid else 'PID unknown (run as root for full info)',
+                            'AUTO-FIX: kills owning process' if kill else 'Manual kill required (own-user processes only)',
+                        ],
+                        can_fix=bool(kill),
+                        fix_cmd=kill,
                     ))
                     log_cb(f'  ⚠  Port {port} ({label}): {line.strip()}', 'warn')
+                    if pid:
+                        log_cb(f'     PID {pid} — {"AUTO-FIX available" if kill else "kill manually: kill -9 " + str(pid)}', 'dim')
                     found += 1
 
             for port, label in mining_ports.items():
                 if f':{port} ' in line or f':{port}\t' in line:
+                    pid = _extract_pid(line)
+                    kill = _safe_kill_cmd(pid) if pid else ''
                     self.results.append(ScanResult(
                         severity='medium', category='network', path=line.strip(),
-                        detail=f'Mining pool port {port} listening ({label})',
+                        detail=f'Mining pool port {port} listening ({label})'
+                               + (f' — PID {pid}' if pid else ''),
                         reasons=[f'Port {port} commonly used by {label}'],
+                        can_fix=bool(kill),
+                        fix_cmd=kill,
                     ))
                     log_cb(f'  ~  Mining pool port {port} ({label}): {line.strip()}', 'warn')
                     found += 1
@@ -939,15 +1080,54 @@ class SecurityScanner:
         for line in out.splitlines():
             if 'LISTENING' not in line:
                 continue
+            parts = line.split()
+            # netstat -ano columns: Proto  Local  Foreign  State  PID
+            # e.g. TCP  0.0.0.0:4444  0.0.0.0:0  LISTENING  11528
+            pid_from_netstat = None
+            if parts:
+                try:
+                    pid_from_netstat = int(parts[-1])
+                except ValueError:
+                    pass
+
             for port in strict_ports:
-                if f':{port} ' in line or f':{port}\t' in line:
+                if f':{port} ' in line or f':{port}\t' in line or line.strip().endswith(f':{port}'):
                     label = port_labels.get(port, 'suspicious port')
+
+                    # ── Build fix_cmd: kill the owning process ──
+                    # Step 1: taskkill /F /T kills process tree (catches child procs too)
+                    # Step 2: netsh adds a persistent firewall block so it can't restart
+                    if pid_from_netstat and pid_from_netstat > 4:
+                        kill_cmd = (
+                            f'taskkill /F /T /PID {pid_from_netstat} & '
+                            f'netsh advfirewall firewall add rule '
+                            f'name="CyberClean-Block-Port-{port}" '
+                            f'protocol=TCP dir=in localport={port} action=block'
+                        )
+                        can_fix = True
+                    else:
+                        kill_cmd = (
+                            f'netsh advfirewall firewall add rule '
+                            f'name="CyberClean-Block-Port-{port}" '
+                            f'protocol=TCP dir=in localport={port} action=block'
+                        )
+                        can_fix = True
+
                     self.results.append(ScanResult(
                         severity='high', category='network', path=line.strip(),
-                        detail=f'Suspicious port {port} listening ({label})',
-                        reasons=[f'Port {port}: {label}'],
+                        detail=f'Suspicious port {port} listening ({label})'
+                               + (f' — PID {pid_from_netstat}' if pid_from_netstat else ''),
+                        reasons=[
+                            f'Port {port}: {label}',
+                            f'Owning PID: {pid_from_netstat}' if pid_from_netstat else 'PID unknown',
+                            'AUTO-FIX: kills process + blocks port in Windows Firewall',
+                        ],
+                        can_fix=can_fix,
+                        fix_cmd=kill_cmd,
                     ))
                     log_cb(f'  ⚠  Port {port} ({label}): {line.strip()}', 'warn')
+                    if pid_from_netstat:
+                        log_cb(f'     Owning PID: {pid_from_netstat} — AUTO-FIX available', 'dim')
                     found += 1
 
         if found == 0:
@@ -1126,6 +1306,7 @@ class SecurityScanner:
 
         found = 0
         for hive, key_path in keys:
+            hive_name = 'HKCU' if hive == winreg.HKEY_CURRENT_USER else 'HKLM'
             try:
                 key = winreg.OpenKey(hive, key_path)
                 i = 0
@@ -1141,14 +1322,35 @@ class SecurityScanner:
                         val_lower = val.lower()
                         for kw, reason in suspicious_kw:
                             if kw.lower() in val_lower:
+                                # ── Fix: delete the registry value + quarantine the file ──
+                                # reg delete removes the persistence key so it won't restart
+                                reg_fix = (
+                                    f'reg delete "{hive_name}\\{key_path}" '
+                                    f'/v "{name}" /f'
+                                )
+                                # Also try to kill the process if the exe path is extractable
+                                exe_match = re.search(r'"?([A-Za-z]:\\[^"]+\.exe)"?', val, re.I)
+                                if exe_match:
+                                    exe_path = exe_match.group(1)
+                                    fix_cmd = (
+                                        f'{reg_fix} & '
+                                        f'taskkill /F /T /IM "{Path(exe_path).name}" 2>nul'
+                                    )
+                                else:
+                                    fix_cmd = reg_fix
+
                                 self.results.append(ScanResult(
                                     severity='high', category='malware', path=val,
                                     detail=f'Suspicious autorun: {name}',
-                                    reasons=[reason, f'Value: {val[:100]}'],
+                                    reasons=[reason, f'Value: {val[:100]}',
+                                             f'Registry: {hive_name}\\{key_path}'],
+                                    can_fix=True,
+                                    fix_cmd=fix_cmd,
                                 ))
                                 log_cb(f'  ⚠  Suspicious autorun: {name}', 'warn')
                                 log_cb(f'     Reason: {reason}', 'dim')
                                 log_cb(f'     Value: {val[:80]}', 'dim')
+                                log_cb(f'     AUTO-FIX: removes registry key + kills process', 'dim')
                                 found += 1
                                 break
                     except OSError:
