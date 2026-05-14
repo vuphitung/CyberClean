@@ -23,22 +23,39 @@
 
 ---
 
-<table>
-<tr>
-<td><img src="screenshots/dashboard.png" width="400"/></td>
-<td><img src="screenshots/clean.png" width="400"/></td>
-</tr>
-<tr>
-<td><img src="screenshots/scanner.png" width="400"/></td>
-<td><img src="screenshots/uninstaller.png" width="400"/></td>
-</tr>
-<tr>
-<td><img src="screenshots/history.png" width="400"/></td>
-<td><img src="screenshots/booster.png" width="400"/></td>
-</tr>
-</table>
-
+## Screenshots
 ---
+
+<p align="center">
+  <img src="screenshots/dashboard.png" width="100%">
+</p>
+---
+
+<p align="center">
+  <img src="screenshots/clean.png" width="100%">
+</p>
+---
+
+<p align="center">
+  <img src="screenshots/scanner.png" width="100%">
+</p>
+---
+
+<p align="center">
+  <img src="screenshots/uninstaller.png" width="100%">
+</p>
+---
+
+<p align="center">
+  <img src="screenshots/history.png" width="100%">
+</p>
+---
+
+<p align="center">
+  <img src="screenshots/booster.png" width="100%">
+</p>
+---
+
 
 ## Cài đặt
 
@@ -209,7 +226,7 @@ CyberClean/
 
 ## Ngôn ngữ
 
-English · Tiếng Việt · 中文 · Español · Français · Deutsch · 日本語 · 한국어 · Русский · Português · Italiano
+English · Tiếng Việt 
 
 ---
 
