@@ -20,6 +20,28 @@
 🌐 **Ngôn ngữ / Language:** **English** · [Tiếng Việt](README_vi.md)
 
 </div>
+
+## Installation
+
+### Linux
+
+```bash
+curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
+```
+
+Installs to `/opt/CyberClean` · registers `cyberclean` command · sets up scoped privilege helper.
+
+**Uninstall:**
+```bash
+sudo cyberclean --uninstall
+```
+
+### Windows
+
+**[⬇ Download CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+
+UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClean`.
+
 ---
 
 ## Screenshots
@@ -53,29 +75,6 @@
 <p align="center">
   <img src="screenshots/booster.png" width="100%">
 </p>
----
-
-## Installation
-
-### Linux
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
-```
-
-Installs to `/opt/CyberClean` · registers `cyberclean` command · sets up scoped privilege helper.
-
-**Uninstall:**
-```bash
-sudo cyberclean --uninstall
-```
-
-### Windows
-
-**[⬇ Download CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
-
-UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClean`.
-
 ---
 
 ## Features

@@ -21,6 +21,27 @@
 
 </div>
 
+## Cài đặt
+
+### Linux
+
+```bash
+curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
+```
+
+Cài vào `/opt/CyberClean` · tạo lệnh `cyberclean` · đăng ký app vào launcher · thiết lập helper đặc quyền có phạm vi giới hạn.
+
+**Gỡ cài đặt:**
+```bash
+sudo cyberclean --uninstall
+```
+
+### Windows
+
+**[⬇ Tải CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+
+Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng → CyberClean`.
+
 ---
 
 ## Screenshots
@@ -54,30 +75,6 @@
 <p align="center">
   <img src="screenshots/booster.png" width="100%">
 </p>
----
-
-
-## Cài đặt
-
-### Linux
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
-```
-
-Cài vào `/opt/CyberClean` · tạo lệnh `cyberclean` · đăng ký app vào launcher · thiết lập helper đặc quyền có phạm vi giới hạn.
-
-**Gỡ cài đặt:**
-```bash
-sudo cyberclean --uninstall
-```
-
-### Windows
-
-**[⬇ Tải CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
-
-Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng → CyberClean`.
-
 ---
 
 ## Tính năng
