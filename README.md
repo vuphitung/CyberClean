@@ -45,7 +45,6 @@ UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClea
 ---
 
 ## Screenshots
----
 
 <p align="center">
   <img src="screenshots/dashboard.png" width="100%">

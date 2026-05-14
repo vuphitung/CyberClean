@@ -45,7 +45,6 @@ Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng �
 ---
 
 ## Screenshots
----
 
 <p align="center">
   <img src="screenshots/dashboard.png" width="100%">
