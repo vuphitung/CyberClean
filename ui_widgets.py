@@ -285,7 +285,7 @@ class DiskRing(QWidget):
 
         p.setPen(QPen(QColor(color)))
         p.setFont(QFont('Cascadia Code' if IS_WINDOWS else 'Share Tech Mono', 13, QFont.Weight.Bold))
-        p.drawText(QRectF(0, 0, 88, 88), Qt.AlignmentFlag.AlignCenter, f'{int(self.percent)}%')
+        p.drawText(QRectF(0, 0, 88, 88), Qt.AlignmentFlag.AlignCenter, f'{round(self.percent)}%')
         p.end()
 
 
@@ -659,18 +659,24 @@ class SysInfoWorker(QThread):
         super().__init__()
         self.paused   = False
         self._stopped = False
+        self._force_refresh = False  # set True to skip the sleep and refresh immediately
 
     def stop(self):
         self._stopped = True
 
+    def force_refresh(self):
+        """Trigger an immediate snapshot on next loop tick — call after clean/uninstall."""
+        self._force_refresh = True
+
     def run(self):
         from utils.sysinfo import get_snapshot
         while not self._stopped:
-            if not self.paused:
+            if not self.paused or self._force_refresh:
                 try:
                     self.snapshot.emit(get_snapshot(interval=0.3))
                 except Exception:
                     pass
+                self._force_refresh = False
             self.msleep(4000)
 
 

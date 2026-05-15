@@ -753,9 +753,9 @@ class CyberCleanApp(QMainWindow):
         ph = QHBoxLayout()
         self._lbl_top_proc_sec = _lbl_section(_t('lbl_top_proc', 'TOP PROCESSES'))
         ph.addWidget(self._lbl_top_proc_sec)
-        kill_btn = _btn(f"✕ {_t('btn_kill','KILL')}", 'red', small=True)
-        kill_btn.clicked.connect(self._kill_selected_proc)
-        ph.addStretch(); ph.addWidget(kill_btn)
+        self._kill_btn = _btn(f"✕ {_t('btn_kill','KILL')}", 'red', small=True)
+        self._kill_btn.clicked.connect(self._kill_selected_proc)
+        ph.addStretch(); ph.addWidget(self._kill_btn)
         pfl.addLayout(ph)
         self.proc_table = QTableWidget(0, 4)
         self.proc_table.setHorizontalHeaderLabels([
@@ -1610,21 +1610,48 @@ class CyberCleanApp(QMainWindow):
         rows = set(i.row() for i in self.proc_table.selectedItems())
         if not rows:
             return
-        killed = []
+
+        # Disable button while killing to prevent double-click
+        if hasattr(self, '_kill_btn'):
+            self._kill_btn.setEnabled(False)
+
+        to_kill = []
         for row in rows:
-            pid_item = self.proc_table.item(row, 0)
+            pid_item  = self.proc_table.item(row, 0)
             name_item = self.proc_table.item(row, 1)
-            if not pid_item:
-                continue
-            try:
-                p = psutil.Process(int(pid_item.text()))
-                p.terminate()
-                killed.append(name_item.text() if name_item else str(pid_item.text()))
-            except Exception as e:
-                QMessageBox.warning(self, _t('kill_failed','Kill failed'), str(e))
-        if killed:
-            QMessageBox.information(self, 'Done', f'Terminated: {", ".join(killed)}')
-            QTimer.singleShot(2000, self._refresh_now)
+            if pid_item:
+                to_kill.append((pid_item.text(), name_item.text() if name_item else pid_item.text()))
+
+        def _do_kill():
+            killed = []; errors = []
+            for pid_str, name in to_kill:
+                try:
+                    psutil.Process(int(pid_str)).terminate()
+                    killed.append(name)
+                except Exception as e:
+                    errors.append(f'{name}: {e}')
+            return killed, errors
+
+        def _on_kill_done(result):
+            killed, errors = result
+            if hasattr(self, '_kill_btn'):
+                self._kill_btn.setEnabled(True)
+            if errors:
+                QMessageBox.warning(self, _t('kill_failed', 'Kill failed'), '\n'.join(errors))
+            if killed:
+                QMessageBox.information(
+                    self, _t('lbl_done', 'Done'),
+                    f"{_t('kill_failed','Terminated')}: {', '.join(killed)}"
+                )
+                QTimer.singleShot(1500, self._refresh_now)
+
+        import threading
+        def _thread():
+            result = _do_kill()
+            # Emit back to main thread via QTimer (thread-safe)
+            QTimer.singleShot(0, lambda r=result: _on_kill_done(r))
+
+        threading.Thread(target=_thread, daemon=True).start()
 
     def _toggle(self, tid, state):
         if state: self.selected.add(tid)
@@ -2342,6 +2369,15 @@ class CyberCleanApp(QMainWindow):
                 2000,
             )
 
+    def _reset_close_preference(self):
+        self._settings.remove('autoclean_close_behavior')
+        self._settings.sync()
+        QMessageBox.information(
+            self,
+            _t('close_pref_reset_title', 'Preference reset'),
+            _t('close_pref_reset_body', 'You will be asked again the next time you close the window.'),
+        )
+
     class BoosterWorker(QThread):
         log_signal  = pyqtSignal(str, str)
         done_signal = pyqtSignal(object)
@@ -2520,6 +2556,11 @@ class CyberCleanApp(QMainWindow):
         self._tray_update_act.triggered.connect(
             lambda: (self._show_from_tray(), self._open_update_dialog())
         )
+        self._tray_reset_close_act = QAction(
+            _t('tray_reset_close_pref', 'Reset close-window preference…'), self
+        )
+        self._tray_reset_close_act.triggered.connect(self._reset_close_preference)
+
         quit_act  = QAction('✕  Quit', self)
 
         def _quit():
@@ -2531,6 +2572,8 @@ class CyberCleanApp(QMainWindow):
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(clean_act)
         self.tray_menu.addAction(self._tray_update_act)
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(self._tray_reset_close_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(quit_act)
         self.tray.setContextMenu(self.tray_menu)
@@ -2733,6 +2776,8 @@ class CyberCleanApp(QMainWindow):
             self.oneclick_btn.setText(f"⚡  {_t('btn_optimize','OPTIMIZE NOW')}")
         if hasattr(self, '_lbl_top_proc_sec'):
             self._lbl_top_proc_sec.setText(_t('lbl_top_proc', 'TOP PROCESSES'))
+        if hasattr(self, '_kill_btn'):
+            self._kill_btn.setText(f"✕ {_t('btn_kill','KILL')}")
         if hasattr(self, '_lbl_disk_sec'):
             self._lbl_disk_sec.setText(_t('lbl_disk', 'DISK USAGE'))
         for sid, key, default in [('temp','lbl_temperature','TEMPERATURE'),('swap','lbl_swap','SWAP')]:
@@ -2843,6 +2888,10 @@ class CyberCleanApp(QMainWindow):
                 'rollback_hint',
                 'These entries are a record of what was removed — files are not kept for restore.',
             ))
+        if hasattr(self, '_tray_reset_close_act'):
+            self._tray_reset_close_act.setText(
+                _t('tray_reset_close_pref', 'Reset close-window preference…')
+            )
         if hasattr(self, '_tray_update_act'):
             self._tray_update_act.setText(_t('tray_view_update', '⬆  View update…'))
         if hasattr(self, '_upd_lbl') and self._upd_lbl.isVisible():
