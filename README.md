@@ -38,7 +38,7 @@ sudo cyberclean --uninstall
 
 ### Windows
 
-**[⬇ Download CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Download CyberClean Setup v3.0.1 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClean`.
 

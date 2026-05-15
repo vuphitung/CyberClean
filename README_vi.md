@@ -38,7 +38,7 @@ sudo cyberclean --uninstall
 
 ### Windows
 
-**[⬇ Tải CyberClean Setup v3.0.0 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Tải CyberClean Setup v3.0.1 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng → CyberClean`.
 
@@ -187,6 +187,34 @@ python3 build.py --linux
 
 # Build installer Windows
 python build.py --inno
+
+# Build updater
+1. Bump version — edit version.py only:
+__version__ = "3.0.2"   # ← đổi phiên bản 
+
+2. Build:
+python3 build.py --linux
+
+3. Update version trong install.sh (dòng~68):
+VERSION="3.0.2"   # ← thay đổi theo phiên bản mới nhất
+
+4. tải khóa sha256:
+sha256sum dist/CyberClean-3.0.2-linux-x86_64.tar.gz > dist/CyberClean-3.0.2-linux-x86_64.tar.gz.sha256
+
+5. Create GitHub Release:
+gh release create v3.0.2 \
+  dist/CyberClean-3.0.2-linux-x86_64.tar.gz \
+  dist/CyberClean-3.0.2-linux-x86_64.tar.gz.sha256 \
+  --title "CyberClean v3.0.2 [release title]" \
+  --notes "### Changelog
+- Fix ...
+- Add ...
+
+**Verify Download:**
+\`\`\`bash
+sha256sum -c CyberClean-3.0.2-linux-x86_64.tar.gz.sha256
+\`\`\`"
+
 ```
 
 **Yêu cầu:** Python 3.10+ · PyQt6 · psutil · PyInstaller
