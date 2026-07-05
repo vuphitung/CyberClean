@@ -156,7 +156,7 @@ from ui_widgets import (
 )
 
 # MAIN APP
-# ═════════════════════════════════════════════════════════════
+# ════════════════���════════════════════════════════════════════
 class CyberCleanApp(QMainWindow):
 
     # Icon name per tab — maps to _ICON_FN keys
@@ -221,95 +221,95 @@ class CyberCleanApp(QMainWindow):
                 font-family:{MONO};
             }}
             QScrollBar:vertical {{
-                background:{C['bg']}; width:5px; border:none; margin:0;
+                background:{C['bg']}; width:6px; border:none; margin:0;
             }}
             QScrollBar::handle:vertical {{
-                background:{C['border3']}; border-radius:2px; min-height:24px;
+                background:{C['border3']}; border-radius:3px; min-height:24px;
             }}
-            QScrollBar::handle:vertical:hover {{ background:{C['cyan']}60; }}
+            QScrollBar::handle:vertical:hover {{ background:{C['teal']}70; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QScrollBar:horizontal {{
-                background:{C['bg']}; height:5px; border:none;
+                background:{C['bg']}; height:6px; border:none;
             }}
             QScrollBar::handle:horizontal {{
-                background:{C['border3']}; border-radius:2px;
+                background:{C['border3']}; border-radius:3px;
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
             QTableWidget {{
                 background:{C['bg2']}; border:1px solid {C['border2']};
-                gridline-color:{C['border']}; font-size:11px; border-radius:3px;
+                gridline-color:{C['border']}; font-size:11px; border-radius:4px;
                 selection-background-color:transparent;
             }}
             QTableWidget::item {{
-                padding:6px 10px; border:none; background:transparent;
+                padding:7px 12px; border:none; background:transparent;
                 color:{C['text2']};
             }}
             QTableWidget::item:alternate {{ background:{C['bg3']}; }}
             QTableWidget::item:hover {{
-                background:{C['cyan']}0d; color:{C['text']};
+                background:{C['teal']}10; color:{C['text']};
             }}
             QTableWidget::item:selected {{
-                background:{C['cyan']}18; color:{C['text']};
-                border-left:2px solid {C['cyan']}90;
+                background:{C['teal']}1d; color:{C['text']};
+                border-left:2px solid {C['teal']};
             }}
             QHeaderView::section {{
                 background:{C['bg']}; color:{C['text3']};
                 border:none;
                 border-bottom:1px solid {C['border2']};
                 border-right:1px solid {C['border']};
-                padding:6px 10px; font-size:10px; letter-spacing:2.5px;
+                padding:8px 12px; font-size:10px; letter-spacing:2px;
                 font-weight:700;
             }}
             QHeaderView::section:last {{ border-right:none; }}
             QCheckBox {{ color:{C['text2']}; spacing:8px; font-size:11px; }}
             QCheckBox::indicator {{
-                width:13px; height:13px;
+                width:14px; height:14px;
                 border:1px solid {C['border3']}; background:transparent;
-                border-radius:2px;
+                border-radius:3px;
             }}
-            QCheckBox::indicator:hover {{ border-color:{C['cyan']}60; }}
+            QCheckBox::indicator:hover {{ border-color:{C['teal']}70; }}
             QCheckBox::indicator:checked {{
-                background:{C['cyan']}25; border-color:{C['cyan']};
+                background:{C['teal']}28; border-color:{C['teal']};
             }}
             QProgressBar {{
-                background:{C['bg3']}; border:none; height:2px; border-radius:1px;
+                background:{C['bg3']}; border:none; height:3px; border-radius:2px;
             }}
             QProgressBar::chunk {{
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {C['cyan']}, stop:1 {C['green']});
-                border-radius:1px;
+                    stop:0 {C['teal']}, stop:1 {C['green']});
+                border-radius:2px;
             }}
             QTextEdit {{
-                background:#020810; color:{C['text2']};
-                border:1px solid {C['border2']}; border-radius:3px;
+                background:{C['bg3']}; color:{C['text2']};
+                border:1px solid {C['border2']}; border-radius:4px;
                 font-family:{MONO}; font-size:11px; padding:10px;
-                selection-background-color:{C['cyan']}30;
+                selection-background-color:{C['teal']}30;
             }}
             QLineEdit {{
                 background:{C['bg3']}; color:{C['text']};
-                border:1px solid {C['border2']}; border-radius:3px;
-                padding:6px 12px; font-size:11px; font-family:{MONO};
+                border:1px solid {C['border2']}; border-radius:4px;
+                padding:7px 12px; font-size:11px; font-family:{MONO};
             }}
             QLineEdit:hover {{ border-color:{C['border3']}; }}
-            QLineEdit:focus {{ border-color:{C['cyan']}70; background:{C['bg4']}; }}
+            QLineEdit:focus {{ border-color:{C['teal']}70; background:{C['bg4']}; }}
             QComboBox {{
                 background:{C['bg3']}; color:{C['text2']};
-                border:1px solid {C['border2']}; border-radius:3px;
-                padding:5px 10px; font-size:11px; font-family:{MONO};
+                border:1px solid {C['border2']}; border-radius:4px;
+                padding:6px 10px; font-size:11px; font-family:{MONO};
             }}
             QComboBox:hover {{ border-color:{C['border3']}; }}
             QComboBox::drop-down {{ border:none; width:16px; }}
             QComboBox QAbstractItemView {{
                 background:{C['bg2']}; color:{C['text']};
-                selection-background-color:{C['cyan']}20;
+                selection-background-color:{C['teal']}22;
                 border:1px solid {C['border2']}; outline:none;
             }}
             QMenu {{
                 background:{C['bg2']}; color:{C['text']};
-                border:1px solid {C['border2']}; padding:4px;
+                border:1px solid {C['border2']}; padding:4px; border-radius:4px;
             }}
-            QMenu::item {{ padding:7px 20px; border-radius:2px; }}
-            QMenu::item:selected {{ background:{C['cyan']}18; color:{C['cyan']}; }}
+            QMenu::item {{ padding:8px 20px; border-radius:3px; }}
+            QMenu::item:selected {{ background:{C['teal']}1f; color:{C['teal']}; }}
             QMenu::separator {{ background:{C['border2']}; height:1px; margin:4px 8px; }}
         """)
 
@@ -332,7 +332,7 @@ class CyberCleanApp(QMainWindow):
     # ── HEADER ───────────────────────────────────────────────
     def _build_header(self):
         h = QFrame()
-        h.setFixedHeight(48)
+        h.setFixedHeight(50)
         h.setStyleSheet(f"""
             QFrame {{
                 background:{C['bg']};
@@ -350,7 +350,7 @@ class CyberCleanApp(QMainWindow):
 
         logo_text = QLabel('CYBER')
         logo_text.setStyleSheet(
-            f'color:{C["cyan"]};font-size:14px;font-weight:900;'
+            f'color:{C["teal"]};font-size:14px;font-weight:900;'
             f'letter-spacing:5px;font-family:{MONO};'
         )
         sep_dot = QLabel('·')
@@ -412,7 +412,7 @@ class CyberCleanApp(QMainWindow):
 
         self.clock_lbl = QLabel('--:--:--')
         self.clock_lbl.setStyleSheet(
-            f'color:{C["cyan"]};font-size:11px;letter-spacing:2px;'
+            f'color:{C["teal"]};font-size:11px;letter-spacing:2px;'
             f'font-family:{MONO};padding-left:14px;font-weight:700;'
         )
 
@@ -537,8 +537,8 @@ class CyberCleanApp(QMainWindow):
         pills = []
         if IS_LINUX:
             pills.append(('POLKIT', C['green'] if HAS_POLKIT else C['red']))
-            if HAS_FLATPAK: pills.append(('FLATPAK', C['cyan']))
-            if HAS_DOCKER:  pills.append(('DOCKER',  C['cyan']))
+            if HAS_FLATPAK: pills.append(('FLATPAK', C['teal']))
+            if HAS_DOCKER:  pills.append(('DOCKER',  C['teal']))
         elif IS_WINDOWS:
             pills.append(('ADMIN', C['green'] if is_windows_admin() else C['yellow']))
 
@@ -637,7 +637,7 @@ class CyberCleanApp(QMainWindow):
             f'color:{C["text"]};font-size:12px;font-weight:700;'
             f'letter-spacing:5px;font-family:{MONO};'
         )
-        self._ref_btn = _btn(f"↻  {_t('btn_refresh','REFRESH')}", 'cyan', small=True)
+        self._ref_btn = _btn(f"↻  {_t('btn_refresh','REFRESH')}", 'teal', small=True)
         self._ref_btn.clicked.connect(self._refresh_now)
         hdr.addWidget(self._lbl_sys_overview)
         hdr.addStretch()
@@ -669,7 +669,7 @@ class CyberCleanApp(QMainWindow):
         top.addWidget(hc)
 
         # One-click card
-        oc = _card(accent_color=C['cyan'])
+        oc = _card(accent_color=C['teal'])
         ocl = QVBoxLayout(oc); ocl.setContentsMargins(16, 14, 16, 14); ocl.setSpacing(6)
         self._lbl_oneclick_sec = _lbl_section(_t('lbl_oneclick', 'ONE-CLICK OPTIMIZE'))
         ocl.addWidget(self._lbl_oneclick_sec)
@@ -681,7 +681,7 @@ class CyberCleanApp(QMainWindow):
         self._lbl_oc_desc.setStyleSheet(f'color:{C["text3"]};font-size:11px;font-family:{MONO};')
         self._lbl_oc_desc.setWordWrap(True)
         oc_row = QHBoxLayout()
-        self.oneclick_btn = _btn(f"⚡  {_t('btn_optimize','OPTIMIZE NOW')}", 'cyan')
+        self.oneclick_btn = _btn(f"⚡  {_t('btn_optimize','OPTIMIZE NOW')}", 'teal')
         self.oneclick_btn.clicked.connect(self._one_click_fix)
         self.oneclick_log = QLabel('')
         self.oneclick_log.setStyleSheet(
@@ -724,7 +724,7 @@ class CyberCleanApp(QMainWindow):
         ch_row = QHBoxLayout(); ch_row.setSpacing(10)
         for label, sid, col in [
             (_t('lbl_cpu_chart', 'CPU %'), 'cpu', C['red']),
-            (_t('lbl_ram_chart', 'RAM %'), 'ram', C['cyan'])
+            (_t('lbl_ram_chart', 'RAM %'), 'ram', C['teal'])
         ]:
             cf = _card()
             cf.setMinimumHeight(90)
@@ -817,7 +817,7 @@ class CyberCleanApp(QMainWindow):
 
         # Action bar FIRST (moved to top for discoverability)
         ar = QHBoxLayout(); ar.setSpacing(8)
-        self._dry_btn   = _btn(f"⬡  {_t('btn_dryrun','DRY-RUN')}", 'cyan')
+        self._dry_btn   = _btn(f"⬡  {_t('btn_dryrun','DRY-RUN')}", 'teal')
         self._clean_btn = _btn(f"⚡  {_t('btn_clean_now','CLEAN NOW')}", 'red')
         self._all_btn   = _btn(f"☑  {_t('btn_all','ALL')}",  small=True)
         self._none_btn  = _btn(f"☐  {_t('btn_none','NONE')}", small=True)
@@ -849,7 +849,7 @@ class CyberCleanApp(QMainWindow):
         prog_lbl_row = QHBoxLayout()
         self.clean_prog_lbl = QLabel('')
         self.clean_prog_lbl.setStyleSheet(
-            f'color:{C["cyan"]};font-size:11px;font-family:{MONO};font-weight:600;'
+            f'color:{C["teal"]};font-size:11px;font-family:{MONO};font-weight:600;'
             f'letter-spacing:1px;'
         )
         self._clean_prog_pct = QLabel('0%')
@@ -874,8 +874,8 @@ class CyberCleanApp(QMainWindow):
             QProgressBar::chunk {{
                 background: qlineargradient(
                     x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {C["cyan"]}99,
-                    stop:0.6 {C["cyan"]},
+                    stop:0 {C["teal"]}99,
+                    stop:0.6 {C["teal"]},
                     stop:1.0 #ffffff
                 );
                 border-radius: 2px;
@@ -959,7 +959,7 @@ class CyberCleanApp(QMainWindow):
             f'QFrame#delta_frame{{'
             f'background:{C["bg2"]};'
             f'border:1px solid {C["border2"]};'
-            f'border-left:3px solid {C["cyan"]}60;'
+            f'border-left:3px solid {C["teal"]}60;'
             f'border-radius:3px;'
             f'}}'
         )
@@ -1026,11 +1026,11 @@ class CyberCleanApp(QMainWindow):
         badge = QFrame()
         badge.setStyleSheet(
             f'QFrame{{background:{C["cyan_dim"]};'
-            f'border:1px solid {C["cyan"]}25;border-radius:3px;}}'
+            f'border:1px solid {C["teal"]}25;border-radius:3px;}}'
         )
         bl = QHBoxLayout(badge); bl.setContentsMargins(12, 7, 12, 7)
         self._scan_readonly_lbl = QLabel(
-            f'<span style="color:{C["cyan"]};font-family:{MONO};font-size:11px;">'
+            f'<span style="color:{C["teal"]};font-family:{MONO};font-size:11px;">'
             f'{_t("scanner_readonly_badge","⬡  Read-only scan — nothing deleted automatically")}'
             f'</span>'
         )
@@ -1041,15 +1041,15 @@ class CyberCleanApp(QMainWindow):
 
         # Action row
         br = QHBoxLayout(); br.setSpacing(10)
-        self.scan_btn = _btn(f"⬡  {_t('btn_run_scan','RUN DEEP SCAN')}", 'cyan')
+        self.scan_btn = _btn(f"⬡  {_t('btn_run_scan','RUN DEEP SCAN')}", 'teal')
         self.scan_btn.setMinimumHeight(40)
         self.scan_btn.setStyleSheet(
-            f'QPushButton{{background:{C["cyan"]}20;color:{C["cyan"]};'
-            f'border:1px solid {C["cyan"]}70;'
+            f'QPushButton{{background:{C["teal"]}20;color:{C["teal"]};'
+            f'border:1px solid {C["teal"]}70;'
             f'font-size:12px;font-weight:700;letter-spacing:3px;font-family:{MONO};'
             f'padding:10px 28px;border-radius:3px;}}'
-            f'QPushButton:hover{{background:{C["cyan"]}35;border-color:{C["cyan"]};border-width:2px;}}'
-            f'QPushButton:pressed{{background:{C["cyan"]}50;}}'
+            f'QPushButton:hover{{background:{C["teal"]}35;border-color:{C["teal"]};border-width:2px;}}'
+            f'QPushButton:pressed{{background:{C["teal"]}50;}}'
         )
         self.scan_btn.clicked.connect(self._run_scanner)
         self.fix_btn = _btn(f"⚡  {_t('btn_autofix','AUTO-FIX SELECTED')}", 'yellow', small=True)
@@ -1133,7 +1133,7 @@ class CyberCleanApp(QMainWindow):
             f'color:{C["text"]};font-size:12px;font-weight:700;'
             f'letter-spacing:5px;font-family:{MONO};'
         )
-        self._uninst_ref_btn = _btn(f"↻ {_t('btn_refresh','REFRESH')}", 'cyan', small=True)
+        self._uninst_ref_btn = _btn(f"↻ {_t('btn_refresh','REFRESH')}", 'teal', small=True)
         self._uninst_ref_btn.clicked.connect(self._load_uninstall)
         hdr_row.addWidget(page_t)
         hdr_row.addStretch()
@@ -1331,7 +1331,7 @@ class CyberCleanApp(QMainWindow):
             return f
 
         lay.addWidget(_boost_card(
-            f"⬡  {_t('booster_free_ram','FREE RAM')}", C['cyan'],
+            f"⬡  {_t('booster_free_ram','FREE RAM')}", C['teal'],
             _t('ram_desc','Drop page cache, reclaim unused memory. Instant RAM boost without rebooting.'),
             f"▶  {_t('btn_free_now','FREE NOW')}", 'cyan', self._boost_free_ram
         ))
@@ -1385,7 +1385,7 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(f_cpu)
 
         lay.addWidget(_boost_card(
-            f"◈  {_t('booster_disk','DISK CACHE CLEAR')}", C['cyan'],
+            f"◈  {_t('booster_disk','DISK CACHE CLEAR')}", C['teal'],
             _t('disk_desc','Clear GPU/shader cache, temp files. Frees VRAM, fixes video stutter & WebGL glitches.'),
             f"◈  {_t('btn_clear_cache','CLEAR CACHE')}", 'cyan', self._clear_gpu_cache
         ))
@@ -1540,7 +1540,7 @@ class CyberCleanApp(QMainWindow):
             self.disk_table.insertRow(row)
             self.disk_table.setRowHeight(row, 32)
             pct     = disk.percent
-            col_pct = C['red'] if pct > 90 else C['yellow'] if pct > 75 else C['cyan']
+            col_pct = C['red'] if pct > 90 else C['yellow'] if pct > 75 else C['teal']
 
             full_path = disk.path
             if len(full_path) > 14 and full_path.startswith('/'):
@@ -1706,7 +1706,7 @@ class CyberCleanApp(QMainWindow):
         total_lbl.setStyleSheet(f'color:{C["green"]};font-size:11px;font-family:{MONO};')
         vl.addWidget(total_lbl)
         btn_row = QHBoxLayout(); btn_row.addStretch()
-        cb = _btn(_t('btn_close', 'CLOSE'), 'cyan', small=True)
+        cb = _btn(_t('btn_close', 'CLOSE'), 'teal', small=True)
         cb.clicked.connect(dlg.accept)
         btn_row.addWidget(cb)
         vl.addLayout(btn_row)
@@ -1737,7 +1737,7 @@ class CyberCleanApp(QMainWindow):
                             )
                         else:
                             parts.append(
-                                f'<span style="color:{C["cyan"]}"><br>&nbsp;&nbsp;'
+                                f'<span style="color:{C["teal"]}"><br>&nbsp;&nbsp;'
                                 f'▸ {label}&nbsp;&nbsp;({len(files)} files, '
                                 f'{fmt_size(res.freed_bytes)})</span>'
                             )
@@ -1942,7 +1942,7 @@ class CyberCleanApp(QMainWindow):
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText(f"⬡  {_t('btn_run_scan','RUN DEEP SCAN')}")
         self._scan_results = results
-        sev_col = {'critical': C['red'], 'high': C['yellow'], 'medium': C['cyan'], 'info': C['text3']}
+        sev_col = {'critical': C['red'], 'high': C['yellow'], 'medium': C['teal'], 'info': C['text3']}
 
         # Populate findings table — include score in severity cell tooltip
         for r in results:
@@ -2106,7 +2106,7 @@ class CyberCleanApp(QMainWindow):
             )
 
     def _on_opt_log(self, msg, level):
-        cols = {'ok': C['green'], 'warn': C['yellow'], 'err': C['red'], 'head': C['cyan'], 'info': C['text3']}
+        cols = {'ok': C['green'], 'warn': C['yellow'], 'err': C['red'], 'head': C['teal'], 'info': C['text3']}
         col = cols.get(level, C['text'])
         self.opt_terminal.append(f'<span style="color:{col};font-family:monospace;">{msg}</span>')
         self.opt_terminal.moveCursor(QTextCursor.MoveOperation.End)
@@ -2121,19 +2121,19 @@ class CyberCleanApp(QMainWindow):
             self._uninst_ref_btn.setText('⟳ ...')
         if hasattr(self, '_lbl_uninst_hint'):
             self._lbl_uninst_hint.setText(
-                f'<span style="color:{C["cyan"]}">⟳  Scanning installed apps...</span>'
+                f'<span style="color:{C["teal"]}">⟳  Scanning installed apps...</span>'
             )
         self.uninstall_table.setRowCount(0)
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["cyan"]}">  ⟳  Reading app registry — please wait...</span>'
+            f'<span style="color:{C["teal"]}">  ⟳  Reading app registry — please wait...</span>'
         )
 
         self._uninstall_worker = _UninstallWorker()
         # Wire progress signal so hint label stays live during long winget scans
         self._uninstall_worker.progress.connect(
             lambda msg: self._lbl_uninst_hint.setText(
-                f'<span style="color:{C["cyan"]}">{msg}</span>'
+                f'<span style="color:{C["teal"]}">{msg}</span>'
             ) if hasattr(self, '_lbl_uninst_hint') else None
         )
         self._uninstall_worker.finished.connect(self._on_uninstall_loaded)
@@ -2162,9 +2162,9 @@ class CyberCleanApp(QMainWindow):
             self.uninstall_table.insertRow(row)
             sz = f'{app.size_mb:.1f} MB' if app.size_mb > 0 else '—'
             src_col = {
-                'pacman': C['cyan'], 'apt': C['yellow'], 'dnf': C['green'],
-                'zypper': C['green'], 'xbps': C['cyan'],
-                'flatpak': C['purple'], 'winget': C['cyan'],
+                'pacman': C['teal'], 'apt': C['yellow'], 'dnf': C['green'],
+                'zypper': C['green'], 'xbps': C['teal'],
+                'flatpak': C['purple'], 'winget': C['teal'],
                 'registry': C['text3'], 'wmic': C['text3'],
             }.get(app.source, C['text'])
             src_lbl = 'winget' if app.source == 'winget' else \
@@ -2236,7 +2236,7 @@ class CyberCleanApp(QMainWindow):
         # ── Lock UI so user sees progress, not a frozen window ──────
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["cyan"]}">  ▸  Starting uninstall ({len(apps)} app(s))...</span>'
+            f'<span style="color:{C["teal"]}">  ▸  Starting uninstall ({len(apps)} app(s))...</span>'
         )
         # Disable uninstall + refresh buttons during operation
         if hasattr(self, '_uninst_btn'):
@@ -2336,7 +2336,7 @@ class CyberCleanApp(QMainWindow):
                     e.get('note') or e.get('path', '')
                 ]):
                     item = QTableWidgetItem(val)
-                    if i == 1: item.setForeground(QColor(C['cyan']))
+                    if i == 1: item.setForeground(QColor(C['teal']))
                     if i == 2: item.setForeground(QColor(C['yellow']))
                     self.rollback_table.setItem(row, i, item)
             except Exception:
@@ -2403,7 +2403,7 @@ class CyberCleanApp(QMainWindow):
     def _blog(self, msg, col='text'):
         colors = {
             'ok': C['green'], 'err': C['red'], 'warn': C['yellow'],
-            'head': C['cyan'], 'text': C['text']
+            'head': C['teal'], 'text': C['text']
         }
         self._browser_log.append(f'<span style="color:{colors.get(col, C["text"])}">{msg}</span>')
 
@@ -2536,7 +2536,7 @@ class CyberCleanApp(QMainWindow):
         if _icon_file.exists():
             self.tray.setIcon(QIcon(str(_icon_file)))
         else:
-            px = QPixmap(16, 16); px.fill(QColor(C['cyan']))
+            px = QPixmap(16, 16); px.fill(QColor(C['teal']))
             self.tray.setIcon(QIcon(px))
         self.tray.setToolTip(f'CyberClean v{__version__}')
 
@@ -2545,7 +2545,7 @@ class CyberCleanApp(QMainWindow):
             f'QMenu{{background:{C["bg2"]};color:{C["text"]};border:1px solid {C["border2"]};'
             f'font-family:monospace;font-size:11px;padding:4px;}}'
             f'QMenu::item{{padding:7px 20px;border-radius:2px;}}'
-            f'QMenu::item:selected{{background:{C["cyan"]}20;color:{C["cyan"]};}}'
+            f'QMenu::item:selected{{background:{C["teal"]}20;color:{C["teal"]};}}'
         )
         show_act  = QAction('◈  Show CyberClean', self)
         show_act.triggered.connect(self._show_from_tray)
@@ -2630,7 +2630,7 @@ class CyberCleanApp(QMainWindow):
             f"QCheckBox{{color:{C['text3']};font-family:{MONO};font-size:11px;}}"
             f"QCheckBox::indicator{{width:13px;height:13px;border:1px solid {C['border3']};"
             f"border-radius:2px;background:{C['bg3']};}}"
-            f"QCheckBox::indicator:checked{{background:{C['cyan']};border-color:{C['cyan']};}}"
+            f"QCheckBox::indicator:checked{{background:{C['teal']};border-color:{C['teal']};}}"
         )
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(22, 20, 22, 18)
@@ -2639,11 +2639,11 @@ class CyberCleanApp(QMainWindow):
         # Icon + title row
         title_row = QHBoxLayout()
         icon_lbl = QLabel('◈')
-        icon_lbl.setStyleSheet(f'color:{C["cyan"]};font-size:22px;font-family:{MONO};')
+        icon_lbl.setStyleSheet(f'color:{C["teal"]};font-size:22px;font-family:{MONO};')
         title_row.addWidget(icon_lbl)
         title_lbl = QLabel(_t('confirm_close_title', 'Background Mode').upper())
         title_lbl.setStyleSheet(
-            f'color:{C["cyan"]};font-size:13px;letter-spacing:2px;font-family:{MONO};font-weight:bold;'
+            f'color:{C["teal"]};font-size:13px;letter-spacing:2px;font-family:{MONO};font-weight:bold;'
         )
         title_row.addWidget(title_lbl)
         title_row.addStretch()
@@ -2681,7 +2681,7 @@ class CyberCleanApp(QMainWindow):
         )
         btn_tray = QPushButton(_t('close_btn_tray', 'HIDE TO TRAY'))
         btn_tray.setStyleSheet(
-            f'background:{C["cyan"]}22;color:{C["cyan"]};border:1px solid {C["cyan"]};'
+            f'background:{C["teal"]}22;color:{C["teal"]};border:1px solid {C["teal"]};'
             f'padding:7px 22px;font-family:{MONO};font-size:11px;font-weight:bold;border-radius:3px;'
         )
         btn_row.addWidget(btn_quit)
@@ -2728,7 +2728,7 @@ class CyberCleanApp(QMainWindow):
 
     def _retranslate_ui(self):
         """Cập nhật TẤT CẢ text theo ngôn ngữ hiện tại — không cần restart."""
-        # ── Sidebar nav buttons ──────────────────────────────
+        # ── Sidebar nav buttons ─────────────────────────���────
         for (pid, icon_name, label), btn in zip(self.NAV_ITEMS, self.nav_btns.values()):
             btn.set_label(label)
         # Sidebar static labels (NAVIGATION / ACTIVE)
@@ -2825,7 +2825,7 @@ class CyberCleanApp(QMainWindow):
         # ── Scanner tab ───────────────────────────────────────
         if hasattr(self, '_scan_readonly_lbl'):
             self._scan_readonly_lbl.setText(
-                f'<span style="color:{C["cyan"]};font-family:{MONO};font-size:11px;">'
+                f'<span style="color:{C["teal"]};font-family:{MONO};font-size:11px;">'
                 f'{_t("scanner_readonly_badge","⬡  Read-only scan — nothing deleted automatically")}'
                 f'</span>'
             )

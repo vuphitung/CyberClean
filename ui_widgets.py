@@ -58,35 +58,49 @@ IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX   = platform.system() == 'Linux'
 
 # ═════════════════════════════════════════════════════════════
-# DESIGN TOKENS
+# DESIGN TOKENS — Modern, Sophisticated Dark Theme
 # ═════════════════════════════════════════════════════════════
 C = {
-    'bg':       '#050a0f',
-    'bg2':      '#09121a',
-    'bg3':      '#0d1a26',
-    'bg4':      '#112032',
-    'cyan':     '#00e5ff',
-    'cyan2':    '#00bcd4',
-    'cyan_dim': '#004d5c',
-    'red':      '#ff3d5a',
-    'red_dim':  '#3d0010',
-    'yellow':   '#ffd740',
-    'yel_dim':  '#3d2d00',
-    'green':    '#00e676',
-    'grn_dim':  '#00280f',
-    'purple':   '#d050ff',
-    'text':     '#def0f8',
-    'text2':    '#7eb8cc',
-    'text3':    '#3d6678',
-    'dim':      '#2a4a5a',
-    'border':   '#0a1e2d',
-    'border2':  '#0f2a3d',
-    'border3':  '#1a3a52',
-    'accent':   '#00e5ff',
+    # Backgrounds: Deep, rich neutrals with subtle gradients
+    'bg':       '#0a0e13',      # Primary background — very deep blue-black
+    'bg2':      '#0f1419',      # Secondary cards — slightly lighter
+    'bg3':      '#151b24',      # Tertiary — for alt rows, panels
+    'bg4':      '#1a2332',      # Hover/active state background
+    'bg5':      '#202a3a',      # Deepest secondary state
+    
+    # Primary accent: Teal/Emerald (modern, sophisticated)
+    'teal':     '#00d4cc',      # Main accent — vibrant teal
+    'teal2':    '#00bbb5',      # Secondary teal
+    'teal_dim': '#0a4a48',      # Dimmed version for hover
+    'teal_soft':'#00d4cc30',    # Soft overlay
+    
+    # Semantic colors (keep functional)
+    'red':      '#ff4757',      # Error/danger — slightly softer
+    'red_dim':  '#4d1423',      # Dimmed red
+    'yellow':   '#ffc947',      # Warning — warmer tone
+    'yel_dim':  '#4d3a15',      # Dimmed yellow
+    'green':    '#00d48a',      # Success — fresh green
+    'grn_dim':  '#0a3d28',      # Dimmed green
+    'orange':   '#ff8c42',      # Info/secondary action
+    
+    # Typography
+    'text':     '#e3f2fd',      # Primary text — cool white
+    'text2':    '#9ab8d1',      # Secondary text — muted
+    'text3':    '#5a7a93',      # Tertiary — labels, hints
+    
+    # Utilities
+    'dim':      '#3a5a73',      # Dimmed/disabled
+    'border':   '#1a2534',      # Subtle borders
+    'border2':  '#202d3d',      # Medium borders
+    'border3':  '#2a3d52',      # Stronger borders
+    
+    # Accent alias
+    'accent':   '#00d4cc',      # Primary action color
 }
 
-MONO    = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Share Tech Mono',monospace"
-DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2','Share Tech Mono',monospace"
+# Typography: Professional, minimal
+MONO    = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Courier New',monospace"
+DISPLAY = "'Segoe UI','Inter','Helvetica Neue','Arial', sans-serif"
 
 
 # ═════════════════════════════════════════════════════════════
@@ -188,8 +202,9 @@ _ICON_FN = {
 
 
 def _nav_icon(name: str, active=False, size=18) -> QIcon:
+    """Navigation icons with refined color palette."""
     fn    = _ICON_FN.get(name, _icon_dashboard)
-    color = C['cyan'] if active else C['text3']
+    color = C['teal'] if active else C['text3']
     return _make_icon(fn, size=size, color=color)
 
 
@@ -197,7 +212,7 @@ def _nav_icon(name: str, active=False, size=18) -> QIcon:
 # SPARKLINE CHART
 # ═════════════════════════════════════════════════════════════
 class SparklineChart(QWidget):
-    def __init__(self, color='#00e5ff', max_points=50, parent=None):
+    def __init__(self, color='#00d4cc', max_points=50, parent=None):
         super().__init__(parent)
         self.color   = QColor(color)
         self.max_pts = max_points
@@ -269,7 +284,7 @@ class DiskRing(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect  = QRectF(9, 9, 70, 70)
-        color = C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan']
+        color = C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['teal']
 
         bg_pen = QPen(QColor(C['bg3'])); bg_pen.setWidth(8)
         bg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -309,44 +324,68 @@ class HexLogoWidget(QWidget):
                             cy + r * math.sin(math.radians(60*i - 30)))
                     for i in range(6)]
 
-        outer_col = QColor(C['cyan']); outer_col.setAlphaF(0.9)
-        p.setPen(QPen(outer_col, 1.2)); p.setBrush(Qt.BrushStyle.NoBrush)
+        # Outer hex outline with teal
+        outer_col = QColor(C['teal']); outer_col.setAlphaF(0.95)
+        p.setPen(QPen(outer_col, 1.3)); p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPolygon(QPolygonF(hex_pts(cx, cy, s)))
 
-        inner_col = QColor(C['cyan']); inner_col.setAlphaF(0.07)
-        border_col = QColor(C['cyan']); border_col.setAlphaF(0.25)
-        p.setBrush(QBrush(inner_col)); p.setPen(QPen(border_col, 0.7))
+        # Inner hex fill (soft glow)
+        inner_col = QColor(C['teal']); inner_col.setAlphaF(0.08)
+        border_col = QColor(C['teal']); border_col.setAlphaF(0.3)
+        p.setBrush(QBrush(inner_col)); p.setPen(QPen(border_col, 0.8))
         p.drawPolygon(QPolygonF(hex_pts(cx, cy, s * 0.65)))
 
-        p.setPen(QPen(QColor(C['cyan'])))
+        # Text with teal
+        p.setPen(QPen(QColor(C['teal'])))
         p.setFont(QFont('Share Tech Mono', max(6, int(self.s * 0.28)), QFont.Weight.Bold))
         p.drawText(QRectF(0, 0, self.s, self.s), Qt.AlignmentFlag.AlignCenter, 'CL')
         p.end()
 
 
-# ═════════════════════════════════════════════════════════════
+# ══════════════════════════════════════��══════════════════════
 # UI HELPERS
 # ═════════════════════════════════════════════════════════════
 
-def _btn(text, color='cyan', small=False, icon_only=False):
+def _btn(text, color='teal', small=False, icon_only=False):
+    """Modern button with smooth interactions and better visual hierarchy."""
     col     = C[color]
-    col_dim = C.get(color + '_dim', C['bg3'])
-    pad     = '5px 12px' if small else '8px 22px'
+    col_dim = C.get(color + '_dim', C['bg4'])
+    pad     = '6px 14px' if small else '10px 24px'
     sz      = '10px'     if small else '11px'
+    rad     = '4px'
+    
     btn = QPushButton(text)
     btn.setStyleSheet(f"""
         QPushButton {{
             color:{col};
-            border:1px solid {col}40;
+            border:1px solid {col}50;
             background:{col_dim};
             font-family:{MONO}; font-size:{sz};
-            letter-spacing:1.5px; padding:{pad};
-            border-radius:2px; font-weight:600;
+            letter-spacing:1.2px; padding:{pad};
+            border-radius:{rad}; font-weight:600;
+            transition: all 200ms ease;
         }}
-        QPushButton:hover   {{ background:{col}20; border-color:{col}80; color:{col}; }}
-        QPushButton:pressed {{ background:{col}35; border-color:{col}; }}
-        QPushButton:checked {{ background:{col}25; border-color:{col}; color:{col}; }}
-        QPushButton:disabled {{ color:{C['dim']}; border-color:{C['dim']}30; background:transparent; }}
+        QPushButton:hover {{
+            background:{col}25;
+            border-color:{col}80;
+            color:{col};
+            outline:none;
+        }}
+        QPushButton:pressed {{
+            background:{col}40;
+            border-color:{col};
+        }}
+        QPushButton:checked {{
+            background:{col}28;
+            border-color:{col};
+            color:{col};
+        }}
+        QPushButton:disabled {{
+            color:{C['dim']};
+            border-color:{C['dim']}30;
+            background:transparent;
+            opacity:0.5;
+        }}
     """)
     return btn
 
@@ -399,16 +438,18 @@ def _divider():
 # STAT CARD
 # ═════════════════════════════════════════════════════════════
 class StatCard(QFrame):
-    def __init__(self, label, init_val, color='cyan', parent=None):
+    def __init__(self, label, init_val, color='teal', parent=None):
         super().__init__(parent)
         self.color = color
         col = C[color]
+        # Modern card styling with subtle borders and clean spacing
         self.setStyleSheet(
-            f'QFrame{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:3px;}}'
+            f'QFrame{{background:{C["bg2"]};border:1px solid {C["border2"]};'
+            f'border-radius:4px;padding:2px;}}'
         )
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setSpacing(6)
 
         self.lbl_name = QLabel(label)
         self.lbl_name.setStyleSheet(
@@ -472,15 +513,20 @@ class NavButton(QWidget):
         self._icon_lbl.setPixmap(ico.pixmap(18, 18))
 
     def set_active(self, active: bool):
+        """Set navigation button active state with smooth styling."""
         self._active = active
         if active:
-            self._bar.setStyleSheet(f'background:{C["cyan"]};border:none;border-radius:1px;')
+            # Active state: vibrant teal indicator bar and text
+            self._bar.setStyleSheet(
+                f'background:{C["teal"]};border:none;border-radius:1px;'
+            )
             self._text_lbl.setStyleSheet(
-                f'color:{C["cyan"]};font-family:{MONO};font-size:10px;'
+                f'color:{C["teal"]};font-family:{MONO};font-size:10px;'
                 f'letter-spacing:1.5px;font-weight:700;background:transparent;border:none;'
             )
-            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}0e;}}')
+            self.setStyleSheet(f'QWidget{{background:{C["teal"]}0b;}}')
         else:
+            # Inactive state: minimal styling
             self._bar.setStyleSheet('background:transparent;border:none;')
             self._text_lbl.setStyleSheet(
                 f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
@@ -493,9 +539,19 @@ class NavButton(QWidget):
         self._label_str = text; self._text_lbl.setText(text)
 
     def enterEvent(self, _):
+        """Hover effect: subtle background highlight."""
         if not self._active:
             self._text_lbl.setStyleSheet(
                 f'color:{C["text2"]};font-family:{MONO};font-size:10px;'
+                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+            )
+            self.setStyleSheet(f'QWidget{{background:{C["teal"]}0a;}}')
+
+    def leaveEvent(self, _):
+        """Leave hover: reset to normal state."""
+        if not self._active:
+            self._text_lbl.setStyleSheet(
+                f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
                 f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
             )
             self.setStyleSheet(f'QWidget{{background:{C["cyan"]}08;}}')
@@ -1123,7 +1179,7 @@ class DiskDeltaWidget(QWidget):
         col_free    = QColor('#081820')          # near-black
         col_freed   = QColor(C['green'])         # bright green
         col_freed_d = QColor('#005522')          # freed dim
-        col_cyan    = QColor(C['cyan'])
+        col_cyan    = QColor(C['teal'])
         col_text    = QColor(C['text'])
         col_text2   = QColor(C['text2'])
         col_text3   = QColor(C['text3'])
@@ -1178,7 +1234,7 @@ class DiskDeltaWidget(QWidget):
                 p.fillRect(sx, bar_y, self._SCAN_W * 4, bh, QBrush(sg))
 
         # ── bar top highlight line ────────────────────────────────────
-        p.setPen(QPen(QColor(C['cyan'] + '30'), 1))
+        p.setPen(QPen(QColor(C['teal'] + '30'), 1))
         p.drawLine(bar_x, bar_y, bar_x + bar_w, bar_y)
 
         # ── tick marks at 25% intervals ───────────────────────────────
