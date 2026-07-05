@@ -107,7 +107,7 @@ DISPLAY = "'Segoe UI','Inter','Helvetica Neue','Arial', sans-serif"
 # PURE-CODE NAV ICONS — drawn with QPainter, zero file deps
 # ═════════════════════════════════════════════════════════════
 
-def _make_icon(draw_fn, size=20, color='#00e5ff') -> QIcon:
+def _make_icon(draw_fn, size=20, color='#00d4cc') -> QIcon:
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
@@ -409,6 +409,7 @@ def _lbl_val(text, color='cyan', size=20):
 
 
 def _card(border_color=None, accent_color=None):
+    """Modern card with clean borders and optional accent stripe."""
     f  = QFrame()
     bc = border_color or C['border2']
     if accent_color:
@@ -416,11 +417,11 @@ def _card(border_color=None, accent_color=None):
             f'QFrame{{background:{C["bg2"]};'
             f'border-top:1px solid {bc};border-right:1px solid {bc};'
             f'border-bottom:1px solid {bc};border-left:3px solid {accent_color};'
-            f'border-radius:3px;}}'
+            f'border-radius:4px;}}'
         )
     else:
         f.setStyleSheet(
-            f'QFrame{{background:{C["bg2"]};border:1px solid {bc};border-radius:3px;}}'
+            f'QFrame{{background:{C["bg2"]};border:1px solid {bc};border-radius:4px;}}'
         )
     return f
 
@@ -589,13 +590,13 @@ class CyberTerminal(QWidget):
 
     # Level → (hex_color, prefix_icon)
     _LEVEL = {
-        'ok':   ('#00e676', '  ✓  '),
-        'err':  ('#ff3d5a', '  ✗  '),
-        'dry':  ('#ffd740', '  ~  '),
-        'head': ('#00e5ff', ''),
-        'info': ('#3d6678', ''),
-        'warn': ('#ffd740', '  ⚠  '),
-        'text': ('#7eb8cc', ''),
+        'ok':   ('#00d48a', '  ✓  '),     # Success — fresh green
+        'err':  ('#ff4757', '  ✗  '),     # Error — softer red
+        'dry':  ('#ffc947', '  ~  '),     # Warning — warmer yellow
+        'head': ('#00d4cc', ''),          # Header — teal
+        'info': ('#5a7a93', ''),          # Info — subtle
+        'warn': ('#ffc947', '  ⚠  '),     # Warning — warmer yellow
+        'text': ('#9ab8d1', ''),          # Text — secondary
     }
 
     def __init__(self, parent=None):
@@ -615,7 +616,7 @@ class CyberTerminal(QWidget):
             f'border-left:1px solid {C["border2"]};'
             f'border-right:1px solid {C["border2"]};'
             f'border-bottom:1px solid {C["border3"]};'
-            f'border-top-left-radius:3px;border-top-right-radius:3px;}}'
+            f'border-top-left-radius:4px;border-top-right-radius:4px;}}'
         )
         hdr_lay = QHBoxLayout(hdr)
         hdr_lay.setContentsMargins(10, 0, 10, 0); hdr_lay.setSpacing(6)
