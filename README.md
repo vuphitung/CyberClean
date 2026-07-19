@@ -198,55 +198,6 @@ python build.py --inno
 
 **Requirements:** Python 3.10+ · PyQt6 · psutil · cryptography · PyInstaller
 
-### Cutting a release (maintainers)
-
-Since v3.0.2, release artifacts are signed with Ed25519 — a SHA-256 sidecar
-alone was never enough to prove a release genuinely came from this repo,
-only that the download wasn't corrupted in transit. The public key is
-baked into `utils/updater.py`; the private key lives only in this repo's
-`CYBERCLEAN_SIGNING_KEY` Actions secret and is never exposed by anything
-in this file.
-
-```bash
-# 1. Bump version — edit version.py only, nothing else reads/needs manual edits:
-__version__ = "3.0.x"
-
-# 2. Build (inside the venv):
-python3 build.py --linux         # and/or: python build.py --inno   (Windows)
-
-# 3. Sign the artifact — produces .sig (Ed25519, the real trust anchor)
-#    and .sha256 (kept only for users still on pre-3.0.2 apps updating in place):
-export CYBERCLEAN_SIGNING_KEY="<private key — see gen_release_key.py, never committed>"
-python3 sign_release.py dist/CyberClean-3.0.x-linux-x86_64.tar.gz
-
-# 4. Publish — upload the artifact AND both sidecar files:
-gh release create v3.0.x \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sig \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sha256 \
-  --title "CyberClean v3.0.x" \
-  --notes "### Changelog
-- Fix ...
-- Add ..."
-```
-
-`install.sh` fetches the version from GitHub's Releases API at install
-time, so it doesn't need editing on every release. It does keep one
-hardcoded fallback constant (used only if the API call fails) — bump
-that too if you want the emergency path to stay reasonably current,
-though it's not required for normal installs to work.
-
-**Verifying a download yourself:**
-```bash
-sha256sum -c CyberClean-3.0.x-linux-x86_64.tar.gz.sha256
-```
-This only confirms the download wasn't corrupted — it does not prove
-authenticity on its own. The in-app updater additionally checks the
-`.sig` file against the public key baked into the app before installing
-anything.
-
----
-
 ## Project Structure
 
 ```

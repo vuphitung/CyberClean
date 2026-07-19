@@ -382,7 +382,8 @@ class GpuMonitorThread(QThread):
                     ["powershell", "-NoProfile", "-Command",
                      "(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine"
                      " | Measure-Object -Property UtilizationPercentage -Sum).Sum"],
-                    capture_output=True, text=True, timeout=3)
+                    capture_output=True, text=True, timeout=3,
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW — tránh nháy cửa sổ PowerShell mỗi 4s
                 if r.returncode == 0:
                     return int(float(r.stdout.strip() or 0))
             except: pass

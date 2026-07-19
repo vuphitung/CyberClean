@@ -200,7 +200,7 @@ python build.py --inno
 
 ### Ra release (dành cho maintainer)
 
-Từ v3.0.2, release được ký bằng Ed25519 — chỉ có SHA-256 sidecar thôi
+Từ v3.0.3, release được ký bằng Ed25519 — chỉ có SHA-256 sidecar thôi
 không đủ chứng minh release thật sự đến từ repo này, nó chỉ chứng minh
 file tải về không lỗi đường truyền. Public key nằm sẵn trong
 `utils/updater.py`; private key chỉ nằm trong GitHub Actions secret
