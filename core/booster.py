@@ -174,10 +174,41 @@ def _is_windows_11() -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# GAME PROCESS DETECTION
+# GAME PROCESS DETECTION — v3.0 (generic, behavior-based)
 # ══════════════════════════════════════════════════════════════
 # Detect if a real game is running before applying aggressive CPU jail.
 # Prevents browsers from being crippled when user is just browsing.
+#
+# REDESIGN RATIONALE (fixes v2.x false-positive/false-negative bugs):
+#
+#   BUG 1 (false positive): "bwrap"/"wine"/"proton" were in the
+#   no-CPU-check name list. ANY Flatpak app (Discord, Spotify, GIMP...)
+#   spawns via bwrap too — so the watcher kept reporting "game detected"
+#   forever, even with zero games running.
+#
+#   BUG 2 (false negative): psutil's children(recursive=True) walks
+#   /proc ppid relationships from the HOST pid namespace. Sandboxes
+#   that unshare the PID namespace (bwrap --unshare-pid, which Flatpak
+#   uses, including Sober/Roblox) can reparent the inner process so it
+#   does NOT show up as a "child" of bwrap from the host's point of
+#   view. Result: nice(-10) was applied to the empty wrapper shell,
+#   never to the actual GPU-heavy RobloxPlayer process — no FPS gain.
+#
+#   FIX: two-tier detection.
+#     Tier A — WRAPPER processes (bwrap, wine, proton, sober, ...) are
+#       only a *signal*, never a verdict by themselves. We use them to
+#       find the right corner of the process tree to search, but we
+#       still require CPU evidence before calling anything "the game".
+#     Tier B — Inside that corner (or system-wide as fallback) we pick
+#       the heaviest process whose name isn't a known infra/IDE/tool
+#       name. This works for ANY game, including ones we've never
+#       heard of, on both Windows and Linux — no hardcoded title list
+#       needed for the common case.
+#
+#   The hardcoded title list (_KNOWN_GAME_PROCS) is kept as a fast-path
+#   for well-known engines/launchers, but it no longer includes generic
+#   sandbox/wrapper binaries — those are handled by _WRAPPER_PROCS with
+#   a CPU gate instead.
 
 # Known game launchers — their child processes are likely games
 _GAME_LAUNCHERS = {
@@ -186,7 +217,9 @@ _GAME_LAUNCHERS = {
     "riotclientservices",
 }
 
-# Process names that are themselves games (not launchers)
+# Process names that are themselves games (not launchers) — fast path,
+# safe to trust by name alone because nothing else realistically uses
+# these exact binary names.
 _KNOWN_GAME_PROCS = {
     # Common engines / overlays
     "unrealcefsubprocess", "cef-subprocess", "gameoverlayui",
@@ -196,9 +229,36 @@ _KNOWN_GAME_PROCS = {
     "minecraft", "terraria", "stardewvalley", "factorio",
     "rdr2", "witcher3", "witcher2", "witcher",
     "overwatch", "overwatch2", "diablo4",
-    # Roblox — must be here so GPU-reset guard skips if already running
+    # Roblox Windows
     "robloxplayerbeta", "roblox", "robloxplayerlauncher", "robloxcrashhandler",
 }
+
+# Generic sandbox / wrapper / compatibility-layer processes. These run
+# games but ALSO run countless non-game apps (any Flatpak, any Wine
+# tool, etc.) — so name match alone is meaningless. They are only used
+# as a STARTING POINT to search for a heavy descendant; the wrapper
+# PID itself is never treated as "the game".
+_WRAPPER_PROCS = {
+    "bwrap",          # bubblewrap sandbox — used by ALL Flatpak apps
+    "wine", "wine64", "wineserver",
+    "proton",
+    "steam-runtime",
+    "gamescope",      # Valve gaming compositor
+    "lutris",
+    # Known game-specific launchers that are themselves thin wrappers
+    # around a real game binary — same treatment as bwrap/wine.
+    "sober", "sober_services",   # Roblox-on-Linux launcher
+    "grapejuice", "vinegar",     # legacy Roblox Wine wrappers
+}
+
+# Minimum CPU usage (%) for a process found *under* a wrapper to be
+# considered "the actual game" rather than an idle helper/IPC thread.
+_WRAPPER_CHILD_CPU_THRESHOLD = 8.0
+# Delay (seconds) between first CPU reading and the confirmation re-check
+# in _find_heavy_descendant. Filters out one-off spikes (a launcher
+# rendering its UI once) from sustained game/render activity. Kept short
+# so game detection still feels instant to the user.
+_WRAPPER_CPU_RECHECK_DELAY = 0.3
 
 # FIX v2.5: Heavy non-game processes — would trigger false "game detected"
 # if we used a bare CPU>30% heuristic. Never treat these as games.
@@ -217,9 +277,44 @@ _KNOWN_HEAVY_NON_GAMES = {
     # Antivirus / security scanners
     "mpcmdrun", "msmpeng", "mbam", "avgnt", "avgsvc",
     # AI / ML training
-    "python", "python3",   # already in _NON_GAME but extra safety
+    "python", "python3",   # already in _NEVER_GAME but extra safety
     "jupyter", "ipython",
 }
+
+# Single source of truth for "never a game" process names, used by
+# EVERY detection tier (Tier 1/3 main loop AND Tier 2 wrapper-descendant
+# search). A previous version kept two separate blocklists (_NON_GAME
+# for the main loop, _WRAPPER_CHILD_SKIP for wrapper descendants) that
+# went out of sync — _WRAPPER_CHILD_SKIP didn't include "chrome" or
+# "hyprland", so when cgroup-based descendant search found the desktop
+# compositor or browser sharing a cgroup with a wrapper, nothing blocked
+# them, and they got reported as "game detected". Merging into one set
+# closes that gap for good — any name added here is excluded everywhere.
+_NEVER_GAME = {
+    # Browsers
+    "chrome", "chromium", "msedge", "firefox", "brave", "opera", "vivaldi",
+    # Chat / collab
+    "discord", "slack", "teams", "zoom",
+    # IDEs
+    "code", "idea", "pycharm",
+    # Windows system processes
+    "explorer", "svchost", "dwm", "csrss", "winlogon", "lsass",
+    "plugplay.exe", "services.exe", "winedevice.exe",
+    "explorer.exe", "rpcss.exe", "svchost.exe",
+    # Interpreters / this app
+    "python", "python3", "cyberclean", "steamwebhelper",
+    # Streaming
+    "obs", "obs32", "obs64",
+    # Desktop compositors / window managers — ALWAYS busy rendering the
+    # whole screen, must never be mistaken for "the game" just because
+    # they share a cgroup/session with a sandboxed app.
+    "hyprland", "sway", "kwin_wayland", "kwin_x11", "kwin",
+    "gnome-shell", "weston", "mutter", "xfwm4", "i3",
+    # Sandbox/IPC plumbing seen as children of bwrap/wine/flatpak
+    "bwrap", "xdg-dbus-proxy", "dbus-daemon", "dbus-broker",
+    "pressure-vessel-wrap", "pressure-vessel-launcher",
+    "bash", "sh", "env", "flatpak-portal", "wineserver",
+} | _KNOWN_HEAVY_NON_GAMES
 
 _GAME_CPU_THRESHOLD = 15.0   # % CPU — games usually use >15% when active
 
@@ -290,37 +385,187 @@ def _get_steam_game_names() -> set:
     return _STEAM_GAME_NAMES
 
 
+def _process_pidns_inode(pid: int) -> Optional[int]:
+    """
+    Return the inode number identifying a process's PID namespace, or None.
+    Two processes are in the exact same PID namespace if and only if this
+    inode matches — this is the kernel's own authoritative answer, not a
+    heuristic over string paths.
+
+    Why this replaces both the earlier SID and cgroup approaches:
+    - SID grouping matched the whole desktop login session (Hyprland,
+      chrome, everything) — far too broad.
+    - cgroup-path grouping was meant to be narrower, but on real systems
+      the "does this look like an app-specific scope" check
+      (substring match for "app-"/".scope") is not reliable: window
+      managers, launchers (rofi), file managers (nautilus) and the
+      actual sandboxed process can all legitimately end up under
+      scopes that pass that same shallow check, so they kept leaking
+      through as false positives.
+    - PID namespace membership has no such ambiguity: bwrap is one of
+      the few things on a normal desktop that actually calls unshare()
+      on the PID namespace. A regular app launched by rofi/the DE
+      shares the SAME pid namespace as everything else on the desktop
+      (the host's), so it can never collide with the sandbox's
+      namespace by accident. This is the property we actually care
+      about, checked directly instead of inferred from naming
+      conventions that vary across distros/compositors.
+    """
+    if not IS_LINUX:
+        return None
+    try:
+        return os.stat(f"/proc/{pid}/ns/pid").st_ino
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return None
+
+
+def _find_heavy_descendant(wrapper_pid: int, cpu_lookup: dict) -> Optional["psutil.Process"]:
+    """
+    Given a wrapper/sandbox PID (bwrap, wine, proton, sober, ...), find the
+    actual heavy process running "inside" it — the one that should receive
+    the priority boost. This is what _KNOWN_GAME_PROCS + children() failed
+    to do for namespaced sandboxes (see module docstring, BUG 2).
+
+    Strategy, in order:
+      1. True descendants via psutil (works for normal cases — Wine without
+         extra namespace tricks, Proton, etc.)
+      2. Same PID-namespace inode as the wrapper (see _process_pidns_inode
+         docstring) — survives bwrap's --unshare-pid reparenting WITHOUT
+         the false positives that session-id and cgroup-path heuristics
+         both produced in earlier versions (they matched ordinary desktop
+         apps like Hyprland/chrome/rofi/nautilus that happen to share a
+         session or a similarly-shaped cgroup scope, but never share an
+         actual kernel PID namespace with the sandbox).
+      3. If nothing qualifies, return None (caller falls back to not
+         reporting anything for this wrapper — silence is safer than a
+         wrong guess).
+
+    A candidate only counts if its CPU usage clears _WRAPPER_CHILD_CPU_
+    THRESHOLD on TWO samples taken _WRAPPER_CPU_RECHECK_DELAY apart, not
+    just one instant reading — this filters out a process that merely
+    spiked once while loading (e.g. a launcher rendering its UI) from one
+    that is genuinely doing sustained game/render work.
+    """
+    if not HAS_PSUTIL:
+        return None
+
+    candidates = []
+
+    # 1. Direct/recursive children (works when no PID-namespace tricks)
+    try:
+        wrapper = psutil.Process(wrapper_pid)
+        candidates.extend(wrapper.children(recursive=True))
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+    # 2. Same PID-namespace inode — the kernel-authoritative way to find
+    #    processes that are actually inside the same sandbox invocation,
+    #    immune to the false positives string-based grouping produced.
+    wrapper_ns = _process_pidns_inode(wrapper_pid)
+    host_ns = _process_pidns_inode(os.getpid())  # our own (host) namespace
+    if wrapper_ns is not None and wrapper_ns != host_ns:
+        # Wrapper actually unshared its PID namespace — search for other
+        # processes sharing that SAME non-host namespace.
+        try:
+            for p in psutil.process_iter(["pid"]):
+                if p.pid == wrapper_pid:
+                    continue
+                if _process_pidns_inode(p.pid) == wrapper_ns:
+                    candidates.append(p)
+        except Exception:
+            pass
+    # If wrapper_ns == host_ns (or unreadable), the wrapper did NOT create
+    # an isolated namespace — there is nothing extra to search for beyond
+    # its real children(), already covered by step 1. We deliberately do
+    # NOT fall back to cgroup/session matching here anymore.
+
+    best, best_cpu = None, 0.0
+    seen_pids = set()
+    for p in candidates:
+        try:
+            if p.pid in seen_pids:
+                continue
+            seen_pids.add(p.pid)
+            nm = (p.name() or "").lower().replace(".exe", "")
+            if nm in _NEVER_GAME:
+                continue
+            cpu = cpu_lookup.get(p.pid)
+            if cpu is None:
+                cpu = p.cpu_percent(interval=0)
+            if cpu > best_cpu:
+                best, best_cpu = p, cpu
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if best is not None and best_cpu >= _WRAPPER_CHILD_CPU_THRESHOLD:
+        # Require SUSTAINED cpu usage — re-check after a short delay so a
+        # one-off spike (launcher UI render, brief decompression, etc.)
+        # cannot pass as "the game". Real game/render loops stay busy.
+        try:
+            recheck_cpu = best.cpu_percent(interval=_WRAPPER_CPU_RECHECK_DELAY)
+            if recheck_cpu >= _WRAPPER_CHILD_CPU_THRESHOLD:
+                return best
+            return None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
+    # 3. Last resort: the wrapper itself, if IT is the one burning CPU
+    #    (e.g. a simple Wine game with no extra subprocess, or a bwrap
+    #    sandbox that didn't unshare PID namespace). We only get here if
+    #    no descendant/cgroup-mate qualified, so this can't double-count.
+    try:
+        wrapper_cpu = cpu_lookup.get(wrapper_pid)
+        if wrapper_cpu is None:
+            wrapper_cpu = psutil.Process(wrapper_pid).cpu_percent(interval=0)
+        if wrapper_cpu >= _WRAPPER_CHILD_CPU_THRESHOLD:
+            return psutil.Process(wrapper_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+    return None
+
+
 def _detect_running_games(cpu_samples: Optional[dict] = None) -> tuple:
     """
     Return (games_list, cpu_samples_dict).
-    games_list = list of (pid, name) for game processes currently running.
+    games_list = list of (pid, name) for the processes that should
+                 actually receive the game-priority boost.
     cpu_samples_dict = {pid: cpu_pct} — reusable by kill_bloat to skip warm-up.
 
-    FIX v2.5:
-    - Removed Threshold 3 (>30% CPU, no launcher) — caused false positives with
-      ffmpeg/cargo/webpack/antivirus being treated as games.
-    - Added _KNOWN_HEAVY_NON_GAMES skip list.
-    - Added Steam library integration via _get_steam_game_names().
-    - Returns cpu_samples so kill_bloat can reuse without sleeping again.
+    v3.0 — generic, behavior-based, namespace-aware (see module docstring
+    above _GAME_LAUNCHERS for the full rationale). Works for unknown/indie
+    games and for sandboxed launchers (Sober/Roblox, any Flatpak-wrapped
+    game) without needing their exact binary name in a hardcoded list.
 
-    Strategy (2 matches only):
-    1. Process name in _KNOWN_GAME_PROCS or Steam library
-    2. Child of known launcher + CPU > 15%
+    Strategy (3 tiers, in order — first match wins per process):
+      1. Exact known game name (_KNOWN_GAME_PROCS) or Steam library name.
+         Trusted by name alone — no CPU gate needed, these names aren't
+         realistically used by anything else.
+      2. Wrapper/sandbox process (_WRAPPER_PROCS: bwrap, wine, proton,
+         sober, ...) — NOT trusted by name alone (false-positive source
+         in older versions). We locate the heavy descendant running
+         inside it via _find_heavy_descendant(); only THAT process is
+         reported as the game. If no heavy descendant clears the CPU
+         gate, the wrapper itself is not reported at all (fixes the
+         "game detected" spam with no game running).
+      3. Child of a known launcher (Steam, Epic, ...) with CPU above
+         threshold — catches games launched via Steam without Proton.
     """
     if not HAS_PSUTIL:
         return [], {}
 
-    # Merge Steam game names into known set
     all_game_names = _KNOWN_GAME_PROCS | _get_steam_game_names()
 
     games = []
-    # Build launcher PID set first
+    wrapper_pids = []
     launcher_pids = set()
     for p in psutil.process_iter(["pid", "name"]):
         try:
             nm = (p.info["name"] or "").lower().replace(".exe", "")
             if nm in _GAME_LAUNCHERS:
                 launcher_pids.add(p.pid)
+            if nm in _WRAPPER_PROCS:
+                wrapper_pids.append(p.pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
@@ -328,7 +573,6 @@ def _detect_running_games(cpu_samples: Optional[dict] = None) -> tuple:
     new_samples: dict = {}
     all_procs = []
     if cpu_samples is None:
-        # Need to do warm-up ourselves
         for p in psutil.process_iter(["pid", "name", "ppid"]):
             try:
                 p.cpu_percent(interval=0)
@@ -337,47 +581,56 @@ def _detect_running_games(cpu_samples: Optional[dict] = None) -> tuple:
                 pass
         import time as _t; _t.sleep(0.5)
     else:
-        # Reuse provided samples — skip sleep entirely
         for p in psutil.process_iter(["pid", "name", "ppid"]):
             try:
                 all_procs.append(p)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-    _NON_GAME = {
-        "chrome", "chromium", "msedge", "firefox", "brave", "opera", "vivaldi",
-        "discord", "slack", "teams", "zoom", "code", "idea", "pycharm",
-        "explorer", "svchost", "dwm", "csrss", "winlogon", "lsass",
-        "python", "python3", "cyberclean", "steamwebhelper",
-        "obs", "obs32", "obs64",
-    } | _KNOWN_HEAVY_NON_GAMES
+    cpu_lookup: dict = {}
+    matched_pids = set()
 
     for p in all_procs:
         try:
             with p.oneshot():
-                nm   = (p.name() or "").lower().replace(".exe", "")
-                if nm in _NON_GAME:
-                    continue
-                # Get CPU: from cache or fresh read
+                nm = (p.name() or "").lower().replace(".exe", "")
                 if cpu_samples and p.pid in cpu_samples:
                     cpu = cpu_samples[p.pid]
                 else:
                     cpu = p.cpu_percent(interval=0)
                 new_samples[p.pid] = cpu
-                ppid = p.ppid()
+                cpu_lookup[p.pid] = cpu
 
-                # Match 1: known game name (hardcoded + Steam library)
-                if nm in all_game_names:
-                    games.append((p.pid, p.name()))
+                if nm in _NEVER_GAME:
                     continue
 
-                # Match 2: child of a launcher using significant CPU
-                # FIX: No Match 3 — removed >30% bare heuristic (false positives)
+                # Tier 1: exact known game name — trusted, no CPU gate
+                if nm in all_game_names:
+                    games.append((p.pid, p.name()))
+                    matched_pids.add(p.pid)
+                    continue
+
+                # Tier 3: child of a launcher using significant CPU
+                ppid = p.ppid()
                 if ppid in launcher_pids and cpu > _GAME_CPU_THRESHOLD:
                     games.append((p.pid, p.name()))
+                    matched_pids.add(p.pid)
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+    # Tier 2: wrapper/sandbox processes — NEVER trusted by name alone.
+    # Only report the heavy descendant actually doing work, if any.
+    for wpid in wrapper_pids:
+        if wpid in matched_pids:
+            continue
+        heavy = _find_heavy_descendant(wpid, cpu_lookup)
+        if heavy is not None and heavy.pid not in matched_pids:
+            try:
+                games.append((heavy.pid, heavy.name()))
+                matched_pids.add(heavy.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
     return games, new_samples
 
@@ -1429,7 +1682,6 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
         # Reuse warm-up from game detection — skip sleep entirely
         log("  . Using cached CPU samples (skip warm-up)...", "text")
         _cpu_data = cpu_cache
-        all_pids_to_scan = list(_cpu_data.keys())
     else:
         # Need to do our own warm-up
         log("  . Sampling CPU (warm-up)...", "text")
@@ -1442,7 +1694,6 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
                 pass
         import time as _t; _t.sleep(0.6)
         _cpu_data = {}
-        all_pids_to_scan = None   # scan all
 
     acted = 0
     for p in psutil.process_iter():
@@ -1484,11 +1735,6 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
                     _cmdline_str = ""
                 if _cmdline_str and any(flag in _cmdline_str for flag in _RENDERER_FLAGS):
                     continue  # never touch GPU/renderer/camera workers
-                if cpu_cache is None and all_pids_to_scan is None:
-                    pass  # no filter
-                elif cpu_cache is None:
-                    pass  # no filter needed
-                # else: all_pids_to_scan is set — but we still scan all and use cached cpu
 
                 if IS_LINUX:
                     try:
@@ -2416,20 +2662,49 @@ def _restore_game_core_affinity(saved: dict, log):
 
 
 # ══════════════════════════════════════════════════════════════
-# TRANSPARENT HUGE PAGES FOR GAME PROCESS
+# TRANSPARENT HUGE PAGES — GLOBAL MODE ONLY
 # ══════════════════════════════════════════════════════════════
-# THP: kernel maps game memory in 2MB pages instead of 4KB.
-# Reduces TLB misses → faster memory access in cache-heavy games.
-# "madvise" mode: only for processes that opt in via madvise(MADV_HUGEPAGE).
-# We force it per-process via /proc/<pid>/smaps_rollup (read) +
-# madvise syscall via ctypes. Safe — kernel handles it transparently.
-# Global setting via /sys/kernel/mm/transparent_hugepage/enabled.
+# THP: kernel maps memory in 2MB pages instead of 4KB for qualifying
+# allocations. Reduces TLB misses → faster memory access for large,
+# contiguous allocations (common in game engines, asset streaming).
+#
+# REDESIGN NOTE (v3.1): an earlier version of this function additionally
+# tried to call libc.madvise(start, length, MADV_HUGEPAGE) directly on
+# memory address ranges read from /proc/<game_pid>/maps — i.e. using the
+# GAME's virtual addresses while calling madvise() from CYBERCLEAN's own
+# process. This does not work: madvise() always operates on the calling
+# process's own address space; it has no parameter to target another
+# process's memory by PID. There is a real Linux syscall for that
+# (process_madvise(), kernel ≥5.10, requires a pidfd + PTRACE_MODE_ATTACH
+# permission) but this code was not using it — it was calling the
+# ordinary single-process madvise() with foreign addresses, which the
+# kernel validates and (correctly) ignores or no-ops on, since those
+# addresses are not mapped in CyberClean's own address space. The
+# function still logged "applied to N memory regions" because it never
+# checked the syscall's return value — that log message was never an
+# accurate description of what happened.
+#
+# Rather than reach for process_madvise() (meaningfully riskier: it
+# requires elevated ptrace-equivalent permission on an arbitrary running
+# process — exactly the kind of cross-process memory interference that
+# is reasonable for anti-cheat software to flag, and reasonable for us
+# to avoid touching at all), this version keeps ONLY the safe, standard
+# part: setting the kernel's global THP policy to "madvise" via sysfs.
+# In that mode, the kernel transparently grants huge pages to any
+# process whose OWN allocator already calls madvise(MADV_HUGEPAGE) on
+# itself (most modern game engines, JIT runtimes, and malloc
+# implementations do this internally when it's enabled system-wide).
+# We get the real-world benefit without writing into any other
+# process's memory ourselves.
 
 def _set_thp_game(game_pids: list, log, saved: dict):
     """
-    Enable Transparent Huge Pages for game processes.
-    Sets global THP to 'madvise' (only for opted-in processes)
-    and calls madvise(MADV_HUGEPAGE) on game memory ranges.
+    Set the kernel's global Transparent Huge Page policy to 'madvise'.
+    This does not touch any other process's memory directly — it only
+    changes a kernel-wide setting that lets processes opt into huge
+    pages for their own allocations. game_pids is accepted for logging/
+    API-compatibility with callers but is not used to reach into other
+    processes anymore (see module note above for why that was removed).
     """
     if not IS_LINUX:
         return
@@ -2454,50 +2729,6 @@ def _set_thp_game(game_pids: list, log, saved: dict):
                         log("  + THP: madvise set via helper", "ok")
         except Exception:
             pass
-
-    # Apply MADV_HUGEPAGE to game process memory ranges via madvise syscall
-    MADV_HUGEPAGE = 14
-    applied = 0
-    import ctypes as _ct
-    try:
-        libc = _ct.CDLL("libc.so.6", use_errno=True)
-        for pid in game_pids:
-            maps_file = Path(f"/proc/{pid}/maps")
-            if not maps_file.exists():
-                continue
-            try:
-                for line in maps_file.read_text().splitlines():
-                    parts = line.split()
-                    if not parts:
-                        continue
-                    addr_range = parts[0]
-                    perms = parts[1] if len(parts) > 1 else ""
-                    # Only apply to read+write+private anonymous mappings (heap/stack)
-                    if "w" not in perms or "p" not in perms:
-                        continue
-                    # Skip file-backed mappings
-                    if len(parts) >= 6 and parts[5] not in ("", "[heap]", "[stack]",
-                                                              "[anon]"):
-                        continue
-                    try:
-                        start_s, end_s = addr_range.split("-")
-                        start = int(start_s, 16)
-                        end   = int(end_s, 16)
-                        length = end - start
-                        if length < 2 * 1024 * 1024:   # skip tiny mappings < 2MB
-                            continue
-                        libc.madvise(_ct.c_void_p(start), _ct.c_size_t(length),
-                                     _ct.c_int(MADV_HUGEPAGE))
-                        applied += 1
-                    except (ValueError, OSError):
-                        pass
-            except (OSError, PermissionError):
-                pass
-    except OSError:
-        pass   # libc not available — THP global flag still set
-
-    if applied > 0:
-        log(f"  + THP: MADV_HUGEPAGE applied to {applied} memory regions — faster memory access", "ok")
 
     saved["thp_orig"] = orig_thp
 

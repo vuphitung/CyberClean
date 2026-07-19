@@ -88,13 +88,46 @@ PRESERVED from old v2.3:
   - fix_cmd / can_fix on ScanResult
 ═══════════════════════════════════════════════════════════════
 """
-import os, sys, subprocess, platform, stat, re, time
+import os, sys, subprocess, platform, stat, re, time, shlex
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional, Dict
 
 OS     = platform.system()
 HELPER = '/usr/local/bin/cyber-clean-helper'
+
+try:
+    from core.os_detect import PKG_MANAGER
+except Exception:
+    try:
+        from .os_detect import PKG_MANAGER
+    except Exception:
+        PKG_MANAGER = ''
+
+# ══════════════════════════════════════════════════════════════
+# SECURITY NOTE — Auto-Fix command construction
+# ══════════════════════════════════════════════════════════════
+# Every fix_cmd below that touches an attacker-influenced string (a file
+# path found on disk, a registry value name) MUST go through one of:
+#   (a) run_fix_action() — structured action/target executed via execve()
+#       list-args or stdin, NEVER through a shell. This is the only path
+#       used for fix-suid / fix-writable, because SUID-bit files and
+#       world-writable files are exactly the kind of artifact an attacker
+#       plants, so their *names* are untrusted input.
+#   (b) shlex.quote() if a shell string genuinely cannot be avoided
+#       (kept only for the PID-kill and Windows netsh/taskkill paths,
+#       where the interpolated value is a validated integer — never
+#       free-form text).
+#
+# Previous versions interpolated raw filenames into a shell string wrapped
+# in naive double-quotes (f'"{target}"'), which does not neutralize ", $,
+# `, ;, &, | inside the quoted region. A file named e.g. '/tmp/x"; rm -rf
+# ~ #' would break out of the quoting and execute arbitrary commands with
+# the privileges of the sudo NOPASSWD helper (i.e. root). This block and
+# the helper-side 'fix-suid-batch' / 'fix-writable-batch' actions exist
+# specifically to close that hole. Do not reintroduce f-string shell
+# construction with untrusted path/name data — use run_fix_action().
+# ══════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════
 # PID SAFETY GUARD  (unchanged from v2.3)
@@ -117,13 +150,163 @@ def _safe_kill_cmd(pid: int) -> str:
                         break
             except (OSError, ValueError):
                 return ''
+    # pid is an int here (caller controls the type) — safe to interpolate.
     return f'sudo -n {HELPER} kill-pid {pid}'
 
 
 def _h(action: str, target: str = '') -> str:
+    """
+    Build a shell-safe helper invocation string.
+
+    Retained for legacy callers (Windows network/registry findings still
+    render a display string for the log), but now uses shlex.quote() so
+    any future caller is automatically protected. New Linux file-targeted
+    fixes (fix-suid, fix-writable) no longer use this function at all —
+    see run_fix_action() / FIX_ACTION_BATCHABLE below.
+    """
     if target:
-        return f'sudo -n {HELPER} {action} "{target}"'
+        return f'sudo -n {HELPER} {action} {shlex.quote(target)}'
     return f'sudo -n {HELPER} {action}'
+
+
+# ══════════════════════════════════════════════════════════════
+# STRUCTURED FIX ACTIONS — injection-proof Auto-Fix execution
+# ══════════════════════════════════════════════════════════════
+# Actions that operate on attacker-influenced path data are executed
+# exclusively through this path: target strings are sent over stdin to
+# the privileged helper (one process per batch), never interpolated into
+# a shell command line. execve() argv has no shell metacharacter
+# interpretation, and stdin content is read byte-for-byte — there is no
+# parser in the middle for a crafted filename to escape from.
+#
+# The helper additionally re-validates each path still matches the
+# expected condition (still has the SUID bit / still world-writable)
+# immediately before acting, closing the TOCTOU window between scan time
+# and fix time (e.g. a symlink swap or file replacement after the scan
+# completed but before the user clicked Auto-Fix).
+FIX_ACTION_BATCHABLE = {'fix-suid', 'fix-writable', 'remove-file'}
+
+
+def fix_autorun_entry(fix_target: str) -> tuple:
+    """
+    Remove a malicious Windows autorun registry value and best-effort kill
+    its process — entirely through native APIs (winreg, psutil), with NO
+    shell (cmd.exe) involved at any point.
+
+    fix_target is the NUL-separated string produced in _scan_autorun_windows:
+        hive_name \\0 key_path \\0 value_name \\0 exe_name
+
+    Returns (message: str, returncode: int) — 0 on success (registry value
+    removed; process-kill failures are reported but don't flip the
+    returncode, since the persistence vector being removed is the goal).
+    """
+    if OS != 'Windows':
+        return 'Not Windows', 1
+    try:
+        import winreg
+    except ImportError:
+        return 'winreg not available', 1
+
+    parts = fix_target.split('\x00')
+    if len(parts) != 4:
+        return 'Malformed fix target', 1
+    hive_name, key_path, value_name, exe_name = parts
+    hive = winreg.HKEY_CURRENT_USER if hive_name == 'HKCU' else winreg.HKEY_LOCAL_MACHINE
+
+    messages = []
+    try:
+        key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE)
+        try:
+            winreg.DeleteValue(key, value_name)
+            messages.append(f'Removed {hive_name}\\{key_path}\\{value_name}')
+        finally:
+            winreg.CloseKey(key)
+    except FileNotFoundError:
+        messages.append('Registry value already gone')
+    except PermissionError:
+        return 'Need Administrator privileges to modify this key', 1
+    except OSError as e:
+        return f'Registry delete failed: {e}', 1
+
+    if exe_name:
+        try:
+            import psutil
+            killed = 0
+            for p in psutil.process_iter(['name']):
+                try:
+                    if (p.info.get('name') or '').lower() == exe_name.lower():
+                        p.kill()
+                        killed += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            if killed:
+                messages.append(f'Killed {killed} running instance(s) of {exe_name}')
+        except ImportError:
+            pass  # registry value is already removed — process kill is best-effort
+
+    return '; '.join(messages), 0
+
+
+def remove_file_windows(fix_target: str) -> tuple:
+    """
+    Delete a single file on Windows using os.remove() directly — no
+    cmd.exe, no 'del /f /q "{path}"' shell string. This closes the same
+    injection class that fix_autorun_entry() closed for the registry
+    path: fix_target here is a filename the Security Scanner found on
+    disk (e.g. a malicious script), which means an attacker who planted
+    that file fully controls its name. A path containing '&', '|', '"'
+    etc. must never be interpolated into a shell command line.
+
+    Only removes regular files, never directories or symlinks (a
+    malicious "file" swapped for a symlink to something important must
+    not be followed).
+    """
+    if OS != 'Windows':
+        return 'Not Windows', 1
+    p = Path(fix_target)
+    try:
+        if not p.is_file() or p.is_symlink():
+            return 'No longer a regular file (skipped)', 0
+        os.remove(p)
+        return f'Removed {p}', 0
+    except FileNotFoundError:
+        return 'Already gone', 0
+    except PermissionError:
+        return 'Permission denied', 1
+    except OSError as e:
+        return f'Delete failed: {e}', 1
+
+
+def run_fix_action(action: str, targets: List[str], timeout: int = 30) -> tuple:
+    """
+    Execute a batched, injection-proof fix action via the privileged helper.
+
+    Returns (output: str, returncode: int). returncode == 0 means the
+    helper accepted and processed the batch (individual per-file failures
+    inside the batch are still possible and silently skipped by design —
+    Auto-Fix is best-effort and must never crash on one bad entry).
+    """
+    if action not in FIX_ACTION_BATCHABLE:
+        return f'Unknown batch action: {action}', 1
+    if not targets:
+        return 'Nothing to fix', 0
+
+    stdin_data = '\n'.join(targets)
+    try:
+        # NOTE: list-form argv, NOT shell=True. Even if a target contained
+        # a literal newline (extremely unusual but not impossible on
+        # Linux), it travels inside stdin_data and is parsed line-by-line
+        # by the helper — it is never concatenated into argv or a shell
+        # string, so there is no command boundary for it to corrupt.
+        r = subprocess.run(
+            ['sudo', '-n', HELPER, action],
+            input=stdin_data, capture_output=True, text=True, timeout=timeout
+        )
+        if r.returncode == 0:
+            return r.stdout.strip(), 0
+        return (r.stderr or r.stdout or 'helper failed').strip(), r.returncode
+    except Exception as e:
+        return str(e), 1
 
 
 # ══════════════════════════════════════════════════════════════
@@ -132,12 +315,14 @@ def _h(action: str, target: str = '') -> str:
 @dataclass
 class ScanResult:
     severity:  str          # 'critical' | 'high' | 'medium' | 'info'
-    category:  str          # 'malware' | 'suspicious' | 'suid' | 'writable' | 'cron' | 'network' | 'config'
+    category:  str          # 'malware' | 'suspicious' | 'suid' | 'writable' | 'cron' | 'network' | 'config' | 'persistence'
     path:      str
     detail:    str
     reasons:   List[str] = field(default_factory=list)   # NEW: why it was flagged
     can_fix:   bool = False
-    fix_cmd:   str  = ''
+    fix_cmd:   str  = ''     # display-only / legacy fixes with no untrusted data (PID, port, registry API)
+    fix_action: str = ''     # NEW: structured batch action name, e.g. 'fix-suid' — set together with fix_target
+    fix_target: str = ''     # NEW: raw untrusted path/name, sent to helper via stdin — never shell-interpolated
 
 @dataclass
 class ScanReport:
@@ -337,7 +522,21 @@ TRUSTED_PROCESS_NAMES = {
     'htop', 'btop', 'top', 'glances',
     'tmux', 'screen', 'zellij',
     'cat', 'ls', 'find', 'grep', 'awk', 'sed', 'sort',
-    # ── CyberClean itself ───────────────────────────────────
+    # ── System performance optimizers (benign) ─────────────────
+    # FIX #6: ananicy-cpp, gamemode, irqbalance, thermald thường bị flag
+    # false positive vì chạy với elevated privileges và modify /proc.
+    # Đây là system tools hợp lệ phổ biến trên Arch/Fedora/Ubuntu.
+    'ananicy', 'ananicy-cpp',
+    'gamemode', 'gamemoded',
+    'irqbalance',
+    'thermald',
+    'power-profiles-daemon', 'ppd',
+    'tuned', 'tuned-adm',
+    'cpupower', 'cpufreqd',
+    'tlp', 'tlp-stat',
+    'auto-cpufreq',
+    'fstrim',
+    # ── CyberClean itself ───────────────────────────────────────
     'cyberclean', 'cyberclean.exe', 'CyberClean',
 }
 
@@ -451,6 +650,88 @@ def _is_expected_suid_path(path: str) -> bool:
     return any(m in pl for m in markers)
 
 
+# ══════════════════════════════════════════════════════════════
+# TIER 1 HARDENING — PACKAGE-OWNERSHIP VERIFICATION
+# ══════════════════════════════════════════════════════════════
+# _is_trusted_process() currently grants full trust to any binary whose
+# *path* starts with a known-good prefix (/usr/, /opt/, /bin/, ...). That
+# is a real bypass: TRUSTED_PATH_PREFIXES is public (this file is on
+# GitHub), so an attacker who has write access to /opt/ or
+# /usr/local/bin/ (e.g. via an earlier, smaller foothold, or a careless
+# `sudo make install`) can drop a payload there and inherit -30 trust
+# purely from the directory name — no package actually has to own the
+# file. This section adds a second, stronger check: does the *system
+# package manager* actually claim ownership of this exact path? A file
+# sitting in /usr/bin/ that no package installed is far more suspicious
+# than the raw prefix check currently allows for.
+#
+# Design notes:
+#   - Best-effort, cached per-process-lifetime (a package DB query per
+#     process scanned would be too slow). Cache is keyed by exact path.
+#   - Failure-open: if no package manager is available, or the query
+#     itself errors out, we fall back to the existing prefix-only trust
+#     (do NOT downgrade trust just because we couldn't check — that would
+#     turn a missing pacman/dpkg binary into a mass false-positive storm).
+#   - This is additive. TRUSTED_PATH_PREFIXES and the existing prefix
+#     check in _is_trusted_process() are UNCHANGED and still run first as
+#     a fast path; this only tightens the /opt/ and /usr/local/ cases
+#     that are most commonly writable outside the real package DB.
+_PKG_OWNER_CACHE: Dict[str, Optional[bool]] = {}
+
+# Prefixes where "installed by a package" is worth verifying because they
+# are also common attacker drop-in locations. /usr/lib, /bin, /sbin, etc.
+# are left alone — nearly 100% package-managed in practice and querying
+# every single one would be needless overhead for negligible gain.
+_OWNERSHIP_CHECK_PREFIXES = ('/opt/', '/usr/local/bin/', '/usr/local/lib/',
+                             '/usr/local/sbin/')
+
+
+def _package_owns_path(path: str) -> Optional[bool]:
+    """
+    Returns True if a package manager confirms it owns this exact path,
+    False if the package manager was queried and explicitly said "not
+    owned", or None if ownership could not be determined (no package
+    manager available, or the query itself failed) — callers must treat
+    None as "unknown", NOT as "untrusted", to stay failure-open.
+    """
+    if path in _PKG_OWNER_CACHE:
+        return _PKG_OWNER_CACHE[path]
+
+    result: Optional[bool] = None
+    try:
+        if PKG_MANAGER == 'pacman' or (not PKG_MANAGER and _which('pacman')):
+            r = subprocess.run(['pacman', '-Qo', path], capture_output=True,
+                               text=True, timeout=5)
+            result = (r.returncode == 0)
+        elif PKG_MANAGER == 'apt' or (not PKG_MANAGER and _which('dpkg')):
+            r = subprocess.run(['dpkg', '-S', path], capture_output=True,
+                               text=True, timeout=5)
+            result = (r.returncode == 0)
+        elif PKG_MANAGER == 'dnf' or (not PKG_MANAGER and _which('rpm')):
+            r = subprocess.run(['rpm', '-qf', path], capture_output=True,
+                               text=True, timeout=5)
+            result = (r.returncode == 0)
+        elif PKG_MANAGER == 'zypper' or (not PKG_MANAGER and _which('rpm')):
+            r = subprocess.run(['rpm', '-qf', path], capture_output=True,
+                               text=True, timeout=5)
+            result = (r.returncode == 0)
+        # No 'else' — unknown/unavailable package manager stays None
+        # (unknown), which _is_trusted_process() treats as failure-open.
+    except Exception:
+        result = None  # query itself failed — stay failure-open, not untrusted
+
+    _PKG_OWNER_CACHE[path] = result
+    return result
+
+
+def _which(binary: str) -> bool:
+    try:
+        r = subprocess.run(['which', binary], capture_output=True, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _safe_walk(root: Path):
     """Walk without following symlinks — prevents infinite loops."""
     try:
@@ -522,6 +803,21 @@ def _is_trusted_process(name: str, exe: str, pid: int) -> tuple:
             # Even from a trusted path, hard miner names override trust
             if norm in {n.replace('.exe','') for n in KNOWN_MINER_BINS}:
                 return False, 'known miner binary in installed path (verify intentional)'
+            # ── TIER 1 HARDENING: package-ownership check ──────────
+            # /opt/ and /usr/local/* are the prefixes most likely to be
+            # writable by something other than the real package manager
+            # (manual installs, `sudo make install`, an earlier foothold
+            # dropping a payload). For those specifically, require the
+            # package DB to confirm ownership before trusting on path
+            # alone. Every other trusted prefix keeps the original,
+            # unchanged fast-path behavior below.
+            if exe_l.startswith(_OWNERSHIP_CHECK_PREFIXES):
+                owned = _package_owns_path(exe)
+                if owned is False:
+                    return False, ('binary in /opt or /usr/local not owned by any '
+                                    'installed package — verify this is intentional')
+                # owned is True or None (unknown/unavailable pkg mgr) →
+                # fall through to the normal trust grant, failure-open.
             return True, f'installed software path ({exe[:50]})'
 
     return False, ''
@@ -698,6 +994,9 @@ class SecurityScanner:
             self._scan_suid_sgid(log_cb)
             self._scan_world_writable(log_cb)
             self._scan_cron(log_cb)
+            self._scan_shell_rc_files(log_cb)
+            self._scan_xdg_autostart(log_cb)
+            self._scan_systemd_user_units(log_cb)
             self._scan_suspicious_files(log_cb, SCAN_DIRS_LINUX)
             self._scan_network_linux(log_cb)
             self._scan_ld_preload(log_cb)
@@ -819,18 +1118,21 @@ class SecurityScanner:
             '/usr/lib/systemd/systemd-logind', '/usr/lib/systemd/systemd-user-sessions',
             '/usr/bin/fusermount', '/usr/bin/fusermount3',
             '/usr/lib/dbus-1.0/dbus-daemon-launch-helper',
+            '/usr/lib/ssh/ssh-keysign', '/usr/libexec/ssh/ssh-keysign',
+            '/usr/lib/openssh/ssh-keysign',
         }
+        _wl = _load_user_whitelist()
         out = run('find /usr /bin /sbin /tmp -perm /4000 -type f 2>/dev/null', timeout=15)
         found = 0
         for line in out.splitlines():
             f = line.strip()
-            if not f or f in known_suid or _is_expected_suid_path(f):
+            if not f or f in known_suid or _is_expected_suid_path(f) or f in _wl:
                 continue
             self.results.append(ScanResult(
                 severity='high', category='suid', path=f,
                 detail=f'Unexpected SUID binary: {f}',
                 reasons=['File has setuid bit outside known-safe whitelist'],
-                can_fix=True, fix_cmd=_h('fix-suid', f),
+                can_fix=True, fix_action='fix-suid', fix_target=f,
             ))
             log_cb(f'  ⚠  Unexpected SUID: {f}', 'warn')
             log_cb(f'     Strip with: sudo chmod u-s "{f}" (fix available)', 'dim')
@@ -854,7 +1156,7 @@ class SecurityScanner:
                 severity='high', category='writable', path=f,
                 detail=f'World-writable system file: {f}',
                 reasons=['Any user can modify this system file'],
-                can_fix=True, fix_cmd=_h('fix-writable', f),
+                can_fix=True, fix_action='fix-writable', fix_target=f,
             ))
             log_cb(f'  ⚠  World-writable: {f}', 'warn')
             found += 1
@@ -913,6 +1215,208 @@ class SecurityScanner:
             self._ok(log_cb, f'No cron backdoors found{suffix}')
 
     # ══════════════════════════════════════════════════════
+    # TIER 1 — SHELL RC-FILE INJECTION
+    # ══════════════════════════════════════════════════════
+    # A very common desktop persistence vector that the scanner previously
+    # had zero coverage for: appending a malicious command to a login/
+    # interactive shell rc file. It runs every single time the user opens
+    # a terminal — arguably more reliable than cron for an attacker,
+    # since it doesn't depend on a cron daemon being installed/enabled at
+    # all (several minimal Arch/Void setups don't ship one by default).
+    def _scan_shell_rc_files(self, log_cb):
+        log_cb('', 'info')
+        log_cb('◆ Scanning shell startup files for injected commands...', 'info')
+        home = Path.home()
+        rc_files = [
+            home / '.bashrc', home / '.bash_profile', home / '.bash_login',
+            home / '.profile',
+            home / '.zshrc', home / '.zprofile', home / '.zshenv',
+            home / '.config' / 'fish' / 'config.fish',
+            # System-wide — persistence here affects every user on the box.
+            Path('/etc/bash.bashrc'), Path('/etc/profile'),
+            Path('/etc/zsh/zshrc'),
+        ]
+        found   = 0
+        partial = False
+
+        for f in rc_files:
+            try:
+                if not f.is_file():
+                    continue
+                txt = f.read_text(errors='ignore')
+                for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+                    if re.search(pattern, txt, re.I):
+                        self.results.append(ScanResult(
+                            severity='critical', category='persistence', path=str(f),
+                            detail=f'Shell startup file backdoor: {desc} in {f.name}',
+                            reasons=[f'Pattern matched in {f}', desc,
+                                     'Runs on every new interactive shell'],
+                        ))
+                        log_cb(f'  ⛔  Shell RC backdoor [{desc}]: {f}', 'err')
+                        found += 1
+            except (PermissionError, OSError):
+                log_cb(f'  ~ {f}: permission denied', 'dim')
+                partial = True
+
+        if found == 0:
+            suffix = ' (partial — some files unreadable)' if partial else ''
+            self._ok(log_cb, f'No shell startup file backdoors found{suffix}')
+
+    # ══════════════════════════════════════════════════════
+    # TIER 1 — XDG AUTOSTART ENTRIES
+    # ══════════════════════════════════════════════════════
+    # .desktop files under autostart/ are launched automatically at every
+    # graphical login by virtually every Linux desktop environment (GNOME,
+    # KDE, XFCE, Hyprland via xdg-autostart, etc). A malicious Exec= line
+    # here is functionally equivalent to a Windows Run-key autorun entry
+    # (which the Windows side of this scanner already checks for) — this
+    # was the missing Linux-side counterpart.
+    def _scan_xdg_autostart(self, log_cb):
+        log_cb('', 'info')
+        log_cb('◆ Scanning XDG autostart entries...', 'info')
+        autostart_dirs = [
+            Path.home() / '.config' / 'autostart',
+            Path('/etc/xdg/autostart'),
+        ]
+        found   = 0
+        partial = False
+
+        for d in autostart_dirs:
+            if not d.is_dir():
+                continue
+            try:
+                for f in d.iterdir():
+                    if f.suffix != '.desktop' or not f.is_file():
+                        continue
+                    try:
+                        txt = f.read_text(errors='ignore')
+                    except (PermissionError, OSError):
+                        log_cb(f'  ~ {f}: permission denied', 'dim')
+                        partial = True
+                        continue
+
+                    exec_line = ''
+                    for line in txt.splitlines():
+                        if line.strip().startswith('Exec='):
+                            exec_line = line.strip()[len('Exec='):]
+                            break
+                    if not exec_line:
+                        continue
+
+                    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+                        if re.search(pattern, exec_line, re.I):
+                            self.results.append(ScanResult(
+                                severity='critical', category='persistence', path=str(f),
+                                detail=f'Autostart backdoor: {desc} in {f.name}',
+                                reasons=[f'Exec= line: {exec_line[:100]}', desc,
+                                         'Runs automatically on every graphical login'],
+                            ))
+                            log_cb(f'  ⛔  Autostart backdoor [{desc}]: {f}', 'err')
+                            found += 1
+                            break
+
+                    # Separate from malware-pattern matching: also flag an
+                    # Exec= that points into a world-writable temp
+                    # directory, even with no known-bad pattern — same
+                    # "runs from /tmp" signal the process scorer already
+                    # applies elsewhere, applied here to autostart entries.
+                    exec_l = exec_line.lower()
+                    if any(t in exec_l for t in ('/tmp/', '/dev/shm/', '/var/tmp/')):
+                        self.results.append(ScanResult(
+                            severity='high', category='persistence', path=str(f),
+                            detail=f'Autostart entry runs from temp directory: {f.name}',
+                            reasons=[f'Exec= line: {exec_line[:100]}',
+                                     'Autostart programs should not live in /tmp'],
+                        ))
+                        log_cb(f'  ⚠  Autostart from temp dir: {f}', 'warn')
+                        found += 1
+            except PermissionError:
+                log_cb(f'  ~ {d}: permission denied', 'dim')
+                partial = True
+
+        if found == 0:
+            suffix = ' (partial — some entries unreadable)' if partial else ''
+            self._ok(log_cb, f'No suspicious autostart entries found{suffix}')
+
+    # ══════════════════════════════════════════════════════
+    # TIER 1 — SYSTEMD USER UNITS (--user timers/services)
+    # ══════════════════════════════════════════════════════
+    # systemd --user units are an increasingly common persistence
+    # mechanism that most desktop security scanners (including CyberClean
+    # until now) don't check at all: unlike system-wide units they don't
+    # need root to install, they survive reboots, and — unlike cron —
+    # they're invisible to a `crontab -l` review. We check two things:
+    # (1) known-bad command patterns in ExecStart=, same as cron/autostart
+    #     above, and
+    # (2) any --user unit that references a binary/script under a temp
+    #     directory, which is the "runs from /tmp" signal applied to this
+    #     surface. Units are parsed with the stdlib configparser-style
+    #     manual line scan rather than executing systemd-analyze, so a
+    #     malformed unit file (like the "Unbalanced quoting" one this
+    #     scan is directly meant to catch) can't crash the scanner.
+    def _scan_systemd_user_units(self, log_cb):
+        log_cb('', 'info')
+        log_cb('◆ Scanning systemd --user units for backdoors...', 'info')
+        unit_dirs = [
+            Path.home() / '.config' / 'systemd' / 'user',
+            Path('/etc/systemd/user'),
+        ]
+        found   = 0
+        partial = False
+
+        for d in unit_dirs:
+            if not d.is_dir():
+                continue
+            try:
+                for f in d.iterdir():
+                    if f.suffix not in ('.service', '.timer') or not f.is_file():
+                        continue
+                    try:
+                        txt = f.read_text(errors='ignore')
+                    except (PermissionError, OSError):
+                        log_cb(f'  ~ {f}: permission denied', 'dim')
+                        partial = True
+                        continue
+
+                    exec_start = ''
+                    for line in txt.splitlines():
+                        if line.strip().startswith('ExecStart='):
+                            exec_start = line.strip()[len('ExecStart='):]
+                            break
+                    if not exec_start:
+                        continue
+
+                    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+                        if re.search(pattern, exec_start, re.I):
+                            self.results.append(ScanResult(
+                                severity='critical', category='persistence', path=str(f),
+                                detail=f'systemd --user unit backdoor: {desc} in {f.name}',
+                                reasons=[f'ExecStart= line: {exec_start[:100]}', desc,
+                                         'Persists across reboots, invisible to crontab -l'],
+                            ))
+                            log_cb(f'  ⛔  systemd unit backdoor [{desc}]: {f}', 'err')
+                            found += 1
+                            break
+
+                    exec_l = exec_start.lower()
+                    if any(t in exec_l for t in ('/tmp/', '/dev/shm/', '/var/tmp/')):
+                        self.results.append(ScanResult(
+                            severity='high', category='persistence', path=str(f),
+                            detail=f'systemd --user unit runs from temp directory: {f.name}',
+                            reasons=[f'ExecStart= line: {exec_start[:100]}',
+                                     'User units should not execute from /tmp'],
+                        ))
+                        log_cb(f'  ⚠  systemd unit from temp dir: {f}', 'warn')
+                        found += 1
+            except PermissionError:
+                log_cb(f'  ~ {d}: permission denied', 'dim')
+                partial = True
+
+        if found == 0:
+            suffix = ' (partial — some units unreadable)' if partial else ''
+            self._ok(log_cb, f'No suspicious systemd --user units found{suffix}')
+
+    # ══════════════════════════════════════════════════════
     # SUSPICIOUS FILES  (smart context filtering)
     # ══════════════════════════════════════════════════════
     def _scan_suspicious_files(self, log_cb, dirs):
@@ -960,15 +1464,19 @@ class SecurityScanner:
                     # ── Pattern match ──────────────────────────
                     for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                         if re.search(pattern, txt, re.I):
-                            fix_cmd = (
-                                f'sudo -n {HELPER} remove-file "{f}"'
-                                if OS == 'Linux' else f'del /f /q "{f}"'
-                            )
+                            # SECURITY: this filename was found specifically because
+                            # it looked malicious — it is exactly the kind of
+                            # attacker-influenced string that must never be
+                            # interpolated into a shell command (see module-level
+                            # SECURITY NOTE at the top of this file). Use the
+                            # structured fix_action/fix_target path (stdin-based on
+                            # Linux via run_fix_action, os.remove() on Windows via
+                            # remove_file_windows) instead of building a shell string.
                             self.results.append(ScanResult(
                                 severity='critical', category='malware', path=fstr,
                                 detail=f'Malicious script: {f.name}',
                                 reasons=[f'Pattern: {desc}', f'Location: {fstr[:80]}'],
-                                can_fix=True, fix_cmd=fix_cmd,
+                                can_fix=True, fix_action='remove-file', fix_target=fstr,
                             ))
                             log_cb(f'  ⛔  Malicious script: {f.name}', 'err')
                             log_cb(f'     Reason: {desc}', 'dim')
@@ -1322,22 +1830,19 @@ class SecurityScanner:
                         val_lower = val.lower()
                         for kw, reason in suspicious_kw:
                             if kw.lower() in val_lower:
-                                # ── Fix: delete the registry value + quarantine the file ──
-                                # reg delete removes the persistence key so it won't restart
-                                reg_fix = (
-                                    f'reg delete "{hive_name}\\{key_path}" '
-                                    f'/v "{name}" /f'
-                                )
-                                # Also try to kill the process if the exe path is extractable
+                                # ── Fix: delete the registry value + kill the process ──
+                                # SECURITY: do NOT build a 'reg delete ... & taskkill ...'
+                                # shell string here. `name` is the registry VALUE NAME,
+                                # which is attacker-controlled (malware names its own
+                                # persistence entry) and can contain ", &, |, % — all of
+                                # which survive naive double-quoting under cmd.exe and
+                                # allow command injection. Instead we hand back enough
+                                # structured data for the caller to remove the value via
+                                # the winreg API directly and kill the process via psutil
+                                # — neither of which ever invokes a shell, so there is no
+                                # interpreter for a crafted name/value to escape from.
                                 exe_match = re.search(r'"?([A-Za-z]:\\[^"]+\.exe)"?', val, re.I)
-                                if exe_match:
-                                    exe_path = exe_match.group(1)
-                                    fix_cmd = (
-                                        f'{reg_fix} & '
-                                        f'taskkill /F /T /IM "{Path(exe_path).name}" 2>nul'
-                                    )
-                                else:
-                                    fix_cmd = reg_fix
+                                exe_name  = Path(exe_match.group(1)).name if exe_match else ''
 
                                 self.results.append(ScanResult(
                                     severity='high', category='malware', path=val,
@@ -1345,7 +1850,10 @@ class SecurityScanner:
                                     reasons=[reason, f'Value: {val[:100]}',
                                              f'Registry: {hive_name}\\{key_path}'],
                                     can_fix=True,
-                                    fix_cmd=fix_cmd,
+                                    fix_action='fix-autorun',
+                                    # NUL-separated structured target — never shell-parsed.
+                                    # Fields: hive_name \0 key_path \0 value_name \0 exe_name
+                                    fix_target='\x00'.join([hive_name, key_path, name, exe_name]),
                                 ))
                                 log_cb(f'  ⚠  Suspicious autorun: {name}', 'warn')
                                 log_cb(f'     Reason: {reason}', 'dim')

@@ -346,15 +346,62 @@ def _linux_proc_net_fallback() -> list:
     return results
 
 
-def get_network_processes(include_private: bool = False) -> List[NetworkProcess]:
+def get_network_processes(include_private: bool = False, timeout: float = 6.0) -> List[NetworkProcess]:
     """
     Map established TCP connections to owning process, with threat scoring.
     Thread-safe. Falls back to /proc/net/tcp on Linux when psutil needs root.
 
     Returns list sorted by score DESC, then name ASC.
+
+    HARDENING NOTE: the real scan runs in a daemon worker thread with a hard
+    `timeout` (default 6s). On some systems — notably inside certain
+    containers/VMs, or when a process has an unreadable/exotic /proc entry —
+    a single psutil.Process(pid).exe() or psutil.net_connections() call can
+    block indefinitely (it's a blocking syscall under the hood, not pure
+    Python, so it cannot be interrupted from the outside). Previously this
+    function had no timeout at all, so one stuck call would freeze the
+    calling QThread forever — the GUI symptom was the scanner log getting
+    stuck on "Scanning active network processes..." with no way to recover
+    short of killing the app. Now: if the worker doesn't finish in time, we
+    give up gracefully and return an empty list rather than hanging.
+
+    LOCK-POISONING GUARD: if a worker hangs, its thread (daemon, so it
+    can't block process exit) keeps running in the background and would
+    hold _net_lock forever — which would make every subsequent call also
+    time out, permanently, even though nothing is wrong with them. To
+    avoid that, the lock is acquired with `blocking=False` retried inside
+    the worker's own timeout budget; if it can't get the lock (because a
+    previous stuck worker still holds it), this call fails fast as "scan
+    skipped" rather than queueing up behind a worker that will never
+    finish. Net effect: one hung call degrades a handful of subsequent
+    calls to "no results this time" instead of "everything times out
+    forever from now on".
     """
-    with _net_lock:
-        return _get_network_processes_inner(include_private)
+    result_box: list = []
+
+    def _worker():
+        # Non-blocking acquire: if a previous, permanently-stuck worker
+        # still holds the lock, don't queue up behind it — just skip.
+        if not _net_lock.acquire(blocking=False):
+            return
+        try:
+            result_box.append(_get_network_processes_inner(include_private))
+        except Exception:
+            pass
+        finally:
+            _net_lock.release()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if result_box:
+        return result_box[0]
+    # Either timed out, the lock was held by a stuck previous call, or the
+    # worker raised before appending anything. All cases: fail safe with
+    # an empty list — never hang, never crash the caller. Network-process
+    # enrichment is best-effort and non-critical to the rest of the scan.
+    return []
 
 
 def _get_network_processes_inner(include_private: bool) -> List[NetworkProcess]:
@@ -401,11 +448,23 @@ def _get_network_processes_inner(include_private: bool) -> List[NetworkProcess]:
         for pid, *_ in raw_conns:
             if pid in pid_info or pid == 0:
                 continue
+            name, exe, proc = f'PID {pid}', '', None
             try:
                 proc = psutil.Process(pid)
-                pid_info[pid] = (proc.name(), proc.exe())
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pid_info[pid] = (f'PID {pid}', '')
+                name = proc.name()
+            except Exception:
+                pass
+            if proc is not None:
+                try:
+                    exe = proc.exe()
+                except Exception:
+                    # .exe() can fail independently of .name() — e.g.
+                    # permission denied on /proc/PID/exe, or the path
+                    # resolves into a different mount namespace (common
+                    # inside containers). Keep whatever name we already
+                    # resolved rather than discarding it.
+                    pass
+            pid_info[pid] = (name, exe)
 
         # Build NetworkProcess list
         for pid, local_port, remote_ip, remote_port in raw_conns:

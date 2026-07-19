@@ -61,6 +61,186 @@ def _t(key: str, default: str = '', **kwargs) -> str:
 
 REPO = "vuphitung/CyberClean"
 
+# ══════════════════════════════════════════════════════════════
+# RELEASE SIGNING — Ed25519 (v2.4)
+# ══════════════════════════════════════════════════════════════
+# SECURITY: This public key is baked into the app at build time and is
+# the actual root of trust for auto-update — NOT the .sha256 sidecar.
+#
+# WHY THIS MATTERS: SHA-256 alone only proves "the download wasn't
+# corrupted in transit" — it says nothing about WHO produced the file,
+# because both the artifact and its checksum come from the same GitHub
+# release, i.e. the same trust boundary. If the GitHub account/repo is
+# ever compromised, an attacker can upload a malicious build AND a
+# matching .sha256 for it, and the old check would happily pass.
+#
+# Ed25519 fixes this because the PRIVATE key that produces a valid
+# .sig file never touches GitHub at all (kept offline / in CI secrets).
+# An attacker who fully compromises the GitHub account still cannot
+# forge a signature that this public key will accept.
+#
+# DO NOT replace this constant by fetching a key from GitHub/the repo
+# at runtime — that would just move the same trust problem one level
+# up. The public key must ship inside the binary the user already has
+# installed and already trusts.
+CYBERCLEAN_PUBLIC_KEY_B64 = "0HIxLhJ7mZ31Bv7p6t1DK8gGC4/eyS6myJNYz9LYms0="
+
+
+def _verify_ed25519(file_path: Path, sig_url: str, ua: str) -> tuple[bool, str]:
+    """
+    Download the .sig sidecar and verify it against CYBERCLEAN_PUBLIC_KEY_B64.
+
+    Unlike _verify_sha256, this is NOT allowed to fail open on 404 or
+    network errors for versions that ship with signing enabled — a
+    missing/unreachable .sig on a release that is supposed to be signed
+    is treated as a hard failure. (Backward compat for pre-signing
+    releases is handled one layer up, in _verify_release, by falling
+    back to the legacy SHA-256-only path when v2.4+ metadata is absent.)
+    """
+    import base64
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        return False, "cryptography package missing — cannot verify signature"
+
+    try:
+        pub_raw = base64.b64decode(CYBERCLEAN_PUBLIC_KEY_B64)
+        pubkey = Ed25519PublicKey.from_public_bytes(pub_raw)
+    except Exception as e:
+        return False, f"Invalid embedded public key: {e}"
+
+    import ssl
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+
+    try:
+        req = Request(sig_url, headers={"User-Agent": ua})
+        with urlopen(req, timeout=30, context=ssl_ctx) as resp:
+            sig_raw = resp.read().decode("utf-8", errors="replace").strip()
+    except HTTPError as e:
+        if e.code == 404:
+            return False, "no .sig found — release is not signed"
+        return False, f"HTTP {e.code} downloading .sig"
+    except (URLError, OSError) as e:
+        # Fail CLOSED here (unlike the legacy SHA-256 sidecar) — a
+        # network hiccup must never be treated as "signature verified".
+        return False, f"network error fetching .sig: {e}"
+
+    try:
+        signature = base64.b64decode(sig_raw)
+    except Exception:
+        return False, f"malformed .sig content: {sig_raw[:80]!r}"
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return False, f"cannot read file for signature check: {e}"
+
+    try:
+        pubkey.verify(signature, data)
+        return True, "signature verified (Ed25519)"
+    except InvalidSignature:
+        return False, (
+            "SIGNATURE INVALID — this file was NOT signed with the real "
+            "CyberClean release key. Do not install. Please report this."
+        )
+    except Exception as e:
+        return False, f"signature check error: {e}"
+
+
+def _verify_release(file_path: Path, base_url: str, version: str) -> tuple[bool, str]:
+    """
+    Combined verification, called by both the Linux and Windows update paths.
+
+    Order of trust:
+      1. Try Ed25519 .sig (real authenticity check) — if a .sig exists,
+         it MUST pass. A present-but-invalid .sig is always a hard fail.
+      2. If no .sig exists at all (404) -> this is either a pre-3.0.2
+         release, or v2.4 signing infra genuinely wasn't used for it.
+         Fall back to the legacy SHA-256 sidecar check for backward
+         compatibility with users updating from older versions, and
+         label the result clearly as "integrity-only, not authenticated"
+         so it's visible in logs/progress text rather than silently
+         indistinguishable from a real signature pass.
+    """
+    ua = f"CyberClean-Updater/{version}"
+    sig_url = f"{base_url}.sig"
+    ok_sig, sig_msg = _verify_ed25519(file_path, sig_url, ua)
+    if ok_sig:
+        return True, sig_msg
+    if "no .sig found" not in sig_msg:
+        # .sig existed but failed verification, or a hard network error
+        # occurred while a signed release was expected — do not fall back.
+        return False, sig_msg
+
+    # No .sig at all -> legacy path, for old/unsigned releases only.
+    sha_url = f"{base_url}.sha256"
+    ok_hash, hash_msg = _legacy_verify_sha256(file_path, sha_url, ua)
+    if ok_hash:
+        return True, f"[unsigned release — integrity only] {hash_msg}"
+    return False, hash_msg
+
+
+def _legacy_verify_sha256(file_path: Path, sha256_url: str, ua: str) -> tuple[bool, str]:
+    """
+    Legacy SHA-256-only check, kept ONLY for releases published before
+    signing was added (backward compat for users on old app versions
+    updating across the 3.0.1 -> 3.0.2 boundary, and for any release
+    that for some reason has no .sig).
+
+    NOTE: unlike the old _verify_sha256, network errors while fetching
+    the sidecar now fail CLOSED, not open. The previous "skip on any
+    network error" behavior was too permissive: it can't be exploited
+    on its own (the main download still fails closed on TLS errors),
+    but fail-closed is the correct default for anything with "verify"
+    in the name, and there is no longer a good reason to be lenient
+    here now that a hard failure just means "please retry", not
+    "permanently blocked".
+    """
+    import ssl, hashlib
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+
+    sha256 = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha256.update(chunk)
+        local_hash = sha256.hexdigest().lower()
+    except OSError as e:
+        return False, f"Cannot read file for verification: {e}"
+
+    try:
+        req = Request(sha256_url, headers={"User-Agent": ua})
+        with urlopen(req, timeout=30, context=ssl_ctx) as resp:
+            raw = resp.read().decode("utf-8", errors="replace").strip()
+    except HTTPError as e:
+        if e.code == 404:
+            return True, "skipped — no .sha256 on server (pre-signing release, OK)"
+        return False, f"HTTP {e.code} downloading .sha256"
+    except (URLError, OSError) as e:
+        return False, f"network error fetching .sha256: {e}"
+
+    expected_hash = raw.split()[0].lower() if raw else ""
+    if not expected_hash or len(expected_hash) != 64:
+        return False, f"unexpected .sha256 format: {raw[:80]!r}"
+
+    if local_hash == expected_hash:
+        return True, f"verified OK ({local_hash[:16]}…)"
+    return False, (
+        f"SHA-256 MISMATCH — file may be corrupt or tampered!\n"
+        f"  Expected: {expected_hash[:32]}…\n"
+        f"  Got:      {local_hash[:32]}…\n"
+        f"Please try again or download manually from GitHub."
+    )
+
+
+_VERSION_TAG_RE = re.compile(r"^\d+\.\d+\.\d+(?:[.\-][A-Za-z0-9]+)?$")
+
 
 def _parse_version_tuple(ver: str) -> tuple:
     """Same rules as version.parse_version_tuple — duplicated so update check works in any thread/bundle."""
@@ -133,7 +313,12 @@ class UpdateCheckThread(QThread):
         data = _fetch_github_json(latest_url, headers)
         if isinstance(data, dict) and data.get("tag_name"):
             tag = str(data["tag_name"]).lstrip("v").strip()
-            if tag and _version_is_newer(tag, cur):
+            # SECURITY: tag comes straight from the GitHub API and is used
+            # to build download URLs later — reject anything that isn't a
+            # plain semver-ish string before it ever touches a URL, so a
+            # crafted tag_name (e.g. containing "/" or "..") can never be
+            # used to redirect the download to an unexpected path.
+            if tag and _VERSION_TAG_RE.match(tag) and _version_is_newer(tag, cur):
                 self.found.emit(tag, data.get("body") or "")
             return
 
@@ -148,7 +333,7 @@ class UpdateCheckThread(QThread):
             if not isinstance(rel, dict) or rel.get("draft"):
                 continue
             tag = (rel.get("tag_name") or "").lstrip("v").strip()
-            if not tag or not _version_is_newer(tag, cur):
+            if not tag or not _VERSION_TAG_RE.match(tag) or not _version_is_newer(tag, cur):
                 continue
             if not best_tag or _version_is_newer(tag, best_tag):
                 best_tag = tag
@@ -289,68 +474,6 @@ class UpdateWorker(QThread):
                     import time as _t2
                     _t2.sleep(0.1)
 
-    # ── SHA-256 verify ───────────────────────────────────────
-    def _verify_sha256(self, file_path: Path, sha256_url: str) -> tuple[bool, str]:
-        """
-        Download .sha256 sidecar từ GitHub release và verify file đã download.
-
-        Backward compat: nếu .sha256 không tồn tại trên server (HTTP 404),
-        trả về (True, "skipped") — cho phép user từ các bản cũ (v2.2.6, v2.2.7)
-        update lên bản mới mà không bị block.
-
-        Chỉ fail khi:
-          - File .sha256 tồn tại VÀ hash không khớp (file bị corrupt hoặc MITM)
-          - Network error khi download .sha256 (không phải 404)
-        """
-        import ssl, hashlib
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = True
-        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-
-        # Tính SHA-256 của file đã download
-        sha256 = hashlib.sha256()
-        try:
-            with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    sha256.update(chunk)
-            local_hash = sha256.hexdigest().lower()
-        except OSError as e:
-            return False, f"Cannot read file for verification: {e}"
-
-        # Download .sha256 sidecar
-        try:
-            req = Request(
-                sha256_url,
-                headers={"User-Agent": f"CyberClean-Updater/{self.version}"},
-            )
-            with urlopen(req, timeout=30, context=ssl_ctx) as resp:
-                raw = resp.read().decode("utf-8", errors="replace").strip()
-        except HTTPError as e:
-            if e.code == 404:
-                # .sha256 không tồn tại → release cũ không có checksum → cho qua
-                return True, "skipped — no .sha256 on server (old release, OK)"
-            return False, f"HTTP {e.code} downloading .sha256"
-        except (URLError, OSError) as e:
-            # Network lỗi khi lấy .sha256 — cảnh báo nhưng không block
-            # (tránh trường hợp user mạng yếu bị kẹt chỉ vì không lấy được .sha256)
-            return True, f"skipped — network error fetching .sha256: {e}"
-
-        # Parse: "abc123...  CyberClean-2.2.8-linux-x86_64.tar.gz" hoặc chỉ "abc123..."
-        expected_hash = raw.split()[0].lower() if raw else ""
-        if not expected_hash or len(expected_hash) != 64:
-            # File .sha256 có format lạ — cho qua thay vì block
-            return True, f"skipped — unexpected .sha256 format: {raw[:80]!r}"
-
-        if local_hash == expected_hash:
-            return True, f"verified OK ({local_hash[:16]}…)"
-        else:
-            return False, (
-                f"SHA-256 MISMATCH — file may be corrupt or tampered!\n"
-                f"  Expected: {expected_hash[:32]}…\n"
-                f"  Got:      {local_hash[:32]}…\n"
-                f"Please try again or download manually from GitHub."
-            )
-
     # ── Linux ────────────────────────────────────────────────
     def _update_linux(self):
         ver = self.version
@@ -380,17 +503,17 @@ class UpdateWorker(QThread):
                 return False, _t("upd_err_small",
                     "Download too small — check release assets on GitHub.")
 
-            # SHA-256 verify (backward compat: 404 = skip, mismatch = fail)
-            self.progress.emit(63, _t("upd_verifying", "Verifying integrity…"))
-            sha256_url = (
+            # Signature verify (Ed25519, falls back to legacy SHA-256 only
+            # for releases published before signing existed — see _verify_release)
+            self.progress.emit(63, _t("upd_verifying", "Verifying signature…"))
+            asset_base = (
                 f"https://github.com/{REPO}/releases/download/v{ver}/"
-                f"CyberClean-{ver}-linux-x86_64.tar.gz.sha256"
+                f"CyberClean-{ver}-linux-x86_64.tar.gz"
             )
-            ok_hash, hash_msg = self._verify_sha256(tar_path, sha256_url)
-            if not ok_hash:
-                return False, _t("upd_err_hash", hash_msg, msg=hash_msg)
-            if "skipped" not in hash_msg:
-                self.progress.emit(64, f"✓ {hash_msg}")
+            ok_verify, verify_msg = _verify_release(tar_path, asset_base, ver)
+            if not ok_verify:
+                return False, _t("upd_err_hash", verify_msg, msg=verify_msg)
+            self.progress.emit(64, f"✓ {verify_msg}")
 
             self.progress.emit(65, _t("upd_extracting", "Extracting"))
             extract_dir = tmp_dir / "extracted"
@@ -432,9 +555,19 @@ class UpdateWorker(QThread):
 
             self.progress.emit(75, _t("upd_installing", "Installing…"))
             install_src = extracted_app.parent
-            staging     = Path("/tmp/cyberclean_staging")
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
+            # SECURITY: staging now lives under tmp_dir, which was created
+            # via tempfile.mkdtemp() a few lines above — random name, 0700
+            # permissions, guaranteed fresh (never reused across runs).
+            # This replaces the old fixed path Path("/tmp/cyberclean_staging"),
+            # which was a predictable, world-visible location and a classic
+            # TOCTOU/insecure-temp-file anti-pattern (CWE-377): a local
+            # attacker could not swap it out after creation thanks to /tmp's
+            # sticky bit, but relying on that incidental protection is
+            # fragile — a future refactor (e.g. adding dirs_exist_ok=True
+            # to make retries more robust) could silently reopen it. Using
+            # mkdtemp's random path removes the predictability entirely,
+            # so there's no fixed target for a local attacker to race against.
+            staging = tmp_dir / "staging"
             shutil.copytree(str(install_src), str(staging))
 
             helper = "/usr/local/bin/cyber-clean-helper"
@@ -446,17 +579,24 @@ class UpdateWorker(QThread):
                 creationflags=_no_window_flags(),
             )
             if r.returncode != 0:
-                r2 = subprocess.run(
-                    f"sudo -n rsync -a --delete {staging}/ {install_dst}/",
-                    shell=True, capture_output=True, text=True, timeout=120,
-                    creationflags=_no_window_flags(),
-                )
-                if r2.returncode != 0:
-                    try:
-                        shutil.copytree(str(staging), str(install_dst), dirs_exist_ok=True)
-                    except OSError as e:
-                        return False, _t("upd_err_install",
-                            f"Install failed: {e}", err=str(e))
+                # Fallback: plain non-privileged copy. NOTE: the previous
+                # version of this fallback shelled out to `sudo -n rsync`
+                # via shell=True with f-string-interpolated paths — that
+                # command was never actually granted in sudoers (only the
+                # helper binary is), so it could only ever "work" by
+                # accident via an unrelated cached sudo ticket, while still
+                # carrying shell=True + string-interpolation risk for no
+                # real benefit. Removed; if the helper call fails, fall
+                # straight through to the unprivileged copy below (works
+                # for the ~/.local fallback install location; for /opt it
+                # will simply fail loudly, which is correct — we should
+                # not silently attempt more privileged shell commands that
+                # were never actually authorized).
+                try:
+                    shutil.copytree(str(staging), str(install_dst), dirs_exist_ok=True)
+                except OSError as e:
+                    return False, _t("upd_err_install",
+                        f"Install failed: {e}", err=str(e))
 
             self.progress.emit(95, _t("upd_restarting", "Restarting…"))
             return True, "ok"
@@ -489,15 +629,16 @@ class UpdateWorker(QThread):
                 return False, _t("upd_err_small_win",
                     "Installer too small — asset name may differ on GitHub.")
 
-            # SHA-256 verify (backward compat: 404 = skip, mismatch = fail)
-            self.progress.emit(68, _t("upd_verifying", "Verifying integrity…"))
-            sha256_url = (
+            # Signature verify (Ed25519, falls back to legacy SHA-256 only
+            # for releases published before signing existed)
+            self.progress.emit(68, _t("upd_verifying", "Verifying signature…"))
+            asset_base = (
                 f"https://github.com/{REPO}/releases/download/v{ver}/"
-                f"CyberClean_Setup_v{ver}.exe.sha256"
+                f"CyberClean_Setup_v{ver}.exe"
             )
-            ok_hash, hash_msg = self._verify_sha256(installer, sha256_url)
-            if not ok_hash:
-                return False, _t("upd_err_hash", hash_msg, msg=hash_msg)
+            ok_verify, verify_msg = _verify_release(installer, asset_base, ver)
+            if not ok_verify:
+                return False, _t("upd_err_hash", verify_msg, msg=verify_msg)
 
             self.progress.emit(70, _t("upd_launching", "Launching installer…"))
 

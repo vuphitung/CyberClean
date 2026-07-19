@@ -376,11 +376,13 @@ def _get_windows() -> List[InstalledApp]:
 
 
 def _enrich_with_winget(apps: List[InstalledApp]):
-    """Run 'winget list' to upgrade source to 'winget' for known packages.
-    
-    FIX: timeout raised 15→45s — winget can take 30s+ on office machines
-    that haven't run it recently (source refresh). Also add
-    --disable-interactivity so it never blocks waiting for user input.
+    """Run 'winget list' để enrich source info — chạy với timeout ngắn.
+
+    FIX: timeout 10s thay vì 45s.
+    Winget enrichment là nice-to-have, không critical.
+    Trên máy văn phòng chưa chạy winget → winget refresh source mất 30s+.
+    Thà hiện danh sách ngay (dù thiếu winget info) còn hơn đợi 45s.
+    Winget info sẽ được refresh lần sau khi winget đã cache source rồi.
     """
     if OS != 'Windows':
         return
@@ -389,8 +391,8 @@ def _enrich_with_winget(apps: List[InstalledApp]):
         return
     try:
         out, code = run(
-            'winget list --disable-interactivity --accept-source-agreements 2>nul',
-            timeout=45,   # was 15 — too short on cold/office machines
+            'winget list --disable-interactivity --accept-source-agreements --no-upgrade 2>nul',
+            timeout=10,   # FIX: 10s thay vì 45s — trả về nhanh cho user
         )
         if code != 0:
             return
@@ -591,10 +593,30 @@ def uninstall_app(app: InstalledApp, log_cb: Callable):
         quiet_str     = parts[2].strip() if len(parts) > 2 else ''
 
         if not quiet_str and uninstall_str:
-            # No silent mode — open UI, don't hang waiting
-            subprocess.Popen(uninstall_str, shell=True)
-            log_cb(f'  ✓ Opened uninstaller for {app.name}.', 'ok')
-            log_cb('  ℹ  Complete the uninstall in the new window, then click REFRESH.', 'warn')
+            # FIX: Popen với CREATE_NO_WINDOW flag để không flash console.
+            # Thêm check uninstall_str hợp lệ trước khi Popen.
+            # Nếu uninstall_str trỏ tới file không tồn tại → báo lỗi rõ ràng
+            # thay vì mở process lỗi → user thấy app biến khỏi list nhưng
+            # thực ra chưa gỡ được.
+            from pathlib import Path as _P
+            import re as _re
+            _exe_m = _re.match(r'^"([^"]+)"', uninstall_str) or _re.match(r'^(\S+\.exe)', uninstall_str, _re.IGNORECASE)
+            if _exe_m:
+                _exe_path = _P(_exe_m.group(1))
+                if not _exe_path.exists():
+                    log_cb(f'  ✗ Uninstaller not found: {_exe_path}', 'err')
+                    log_cb(f'  i App may already be partially uninstalled.', 'warn')
+                    return False
+            try:
+                subprocess.Popen(
+                    uninstall_str, shell=True,
+                    creationflags=_NO_WIN,
+                )
+                log_cb(f'  ✓ Opened uninstaller for {app.name}.', 'ok')
+                log_cb('  ℹ  Complete the uninstall in the new window, then click REFRESH.', 'warn')
+            except Exception as _e:
+                log_cb(f'  ✗ Cannot launch uninstaller: {_e}', 'err')
+                return False
             return 'UI_OPENED'
 
         out, code = _run_win_uninstall(app.name, reg_key, uninstall_str, quiet_str, log_cb)

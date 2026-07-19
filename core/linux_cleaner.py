@@ -34,6 +34,96 @@ def run(cmd, timeout=30):
     except Exception as e:
         return str(e), 1
 
+def ensure_privileged_session(log_cb=None) -> bool:
+    """
+    Pre-warm the sudo authentication session ONCE, before running a batch of
+    privileged clean targets, to avoid asking for a password once per target.
+
+    WHY THIS EXISTS:
+    Every privileged CleanTarget (paccache, broken-downloads, journal, ...)
+    calls run_privileged() independently. Each call tries `sudo -n` first
+    (silent, only succeeds if NOPASSWD is configured for the helper — this
+    is what install.sh sets up, and the normal/expected path for anyone who
+    installed via install.sh). If NOPASSWD is NOT configured for some reason
+    (install.sh not run, sudoers rule got removed, running from source
+    without installing, unusual distro sudo config...), `sudo -n` fails
+    immediately and each call falls through to `pkexec` independently —
+    on desktops without a running polkit agent (e.g. bare Hyprland/Sway with
+    no polkit-gnome/polkit-kde-agent), pkexec falls back to a *text* password
+    prompt in the terminal, once per target. Selecting "Clean Full" with
+    several root-needing targets then means typing the password 2-3+ times
+    in a row, which is confusing and easy to fail (see real report: 3
+    separate `pkexec` prompts for paccache / broken-downloads / clean-crash-dirs).
+
+    THE FIX: before looping over targets, make exactly ONE check:
+      1. `sudo -n true` — if this succeeds, NOPASSWD is already working.
+         Nothing else to do; every subsequent `sudo -n` call in the loop
+         will keep succeeding silently, same as today. Zero behavior change
+         for the normal, correctly-installed case.
+      2. If it fails, fall back to ONE interactive `sudo -v` call. This is
+         allowed to prompt for a password (unlike `sudo -n`), but it does so
+         only ONCE, and caches sudo's authentication timestamp (default ~15
+         minutes) — every `sudo -n` call made afterwards, for any target,
+         within that window succeeds without prompting again.
+      3. If even that fails (no tty available, wrong password, etc.), we
+         don't raise — individual targets still fall through to their
+         existing pkexec fallback exactly as before. This function can only
+         make things better (fewer prompts) or leave things exactly as they
+         already were; it never makes anything worse or blocks silently.
+
+    Returns True if a privileged session is available (either NOPASSWD was
+    already working, or the one-time sudo -v succeeded), False otherwise.
+    """
+    if IS_ROOT:
+        return True
+
+    # Step 1: is NOPASSWD already working? (the expected, normal case)
+    try:
+        r = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    # Step 2: NOPASSWD isn't working — ask for the password ONCE via a real
+    # interactive sudo prompt (sudo handles reading it from the terminal
+    # itself; we don't need — and must never build — our own password UI).
+    # This only runs when the normal path already failed, so it adds no
+    # extra step for anyone whose install.sh setup is correct.
+    #
+    # TTY GUARD: sudo -v needs to read the password from a real terminal.
+    # If CyberClean was launched from a desktop icon (no attached tty —
+    # the common case for real end users, unlike a dev running it from a
+    # terminal), there's nothing for sudo to prompt on: it would either
+    # fail immediately with "no tty present" (harmless) or, on some sudo
+    # configs, hang waiting for input that can never arrive. Check for a
+    # usable tty first and skip straight to the existing per-target
+    # pkexec fallback (which has its own GUI-agent-or-text-prompt logic
+    # independent of our stdin) if there isn't one — this function must
+    # never introduce a hang that wasn't there before.
+    import sys
+    if not sys.stdin.isatty():
+        if log_cb:
+            log_cb(
+                '  i  No terminal attached — falling back to per-target '
+                'authentication prompts.',
+                'mute'
+            )
+        return False
+
+    if log_cb:
+        log_cb(
+            '  ⚠  NOPASSWD helper not configured — asking for your password '
+            'once for this session (re-run install.sh to avoid this).',
+            'warn'
+        )
+    try:
+        r = subprocess.run(['sudo', '-v'], timeout=120)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def run_privileged(action_key, raw_cmd=None, stdin_data=None):
     """
     Execute a privileged action via the NOPASSWD helper.
@@ -481,7 +571,12 @@ class LinuxCleaner(BaseCleaner):
         before = _parse_size(out)
 
         if not dry:
-            _, code = run(f'journalctl --vacuum-time={JOURNAL_DAYS}d 2>/dev/null')
+            # FIX #7: thêm --vacuum-size=500M để cap tổng size.
+            # Trên server hoặc máy không reboot thường xuyên, 7 ngày log
+            # có thể là hàng GB. Size cap đảm bảo không giữ quá 500MB
+            # dù time-based vacuum chưa đủ.
+            vacuum_cmd = f'journalctl --vacuum-time={JOURNAL_DAYS}d --vacuum-size=500M 2>/dev/null'
+            _, code = run(vacuum_cmd)
             if code != 0:
                 run_privileged('journal')
             # journalctl --vacuum is synchronous — no sleep needed

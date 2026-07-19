@@ -621,9 +621,25 @@ class CyberTerminal(QWidget):
         root.addWidget(self._te, 1)
 
     # ── Public API ───────────────────────────────────────────────────────
+    _MAX_LOG_LINES = 500   # BUG FIX #1: giới hạn dòng để tránh memory leak
+                           # khi app chạy liên tục 8-12 tiếng
+
     def append_log(self, msg: str, level: str = 'text'):
         """Append một dòng log có màu theo level."""
         col, _prefix = self._LEVEL.get(level, ('#7eb8cc', ''))
+
+        # Trim log nếu vượt quá MAX_LOG_LINES
+        # QTextDocument.blockCount() = số dòng hiện tại
+        doc = self._te.document()
+        if doc.blockCount() > self._MAX_LOG_LINES:
+            cursor = self._te.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            # Xóa 100 dòng đầu một lần để tránh trim quá thường xuyên
+            for _ in range(100):
+                cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+                cursor.removeSelectedText()
+                cursor.deleteChar()  # xóa newline
+
         cursor = self._te.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         fmt = QTextCharFormat()
@@ -749,6 +765,20 @@ class CleanWorker(QThread):
                         summary.append(f'{tid}:{fmt_size(result.freed_bytes)}')
             else:
                 # ── SERIAL PATH: real clean, or cleaner without estimate_parallel ─
+                # Pre-warm sudo session ONCE before the loop, so that if
+                # NOPASSWD isn't configured (see ensure_privileged_session
+                # docstring in linux_cleaner.py for why this matters), the
+                # user is asked for their password at most once for this
+                # whole batch instead of once per privileged target.
+                if not self.dry and IS_LINUX:
+                    try:
+                        from core.linux_cleaner import ensure_privileged_session
+                        ensure_privileged_session(
+                            log_cb=lambda m, l: self.log.emit(m, l)
+                        )
+                    except ImportError:
+                        pass  # module unavailable — no-op, falls back to per-target behavior
+
                 for i, tid in enumerate(self.targets):
                     if self._stop_requested:
                         self.log.emit('  ⚠  Interrupted — partial results below', 'warn')
@@ -758,26 +788,51 @@ class CleanWorker(QThread):
                     slice_mid   = int(((i + 0.5) / steps) * 95)
                     slice_end   = int(((i + 1) / steps) * 95)
                     label = tid.replace('_', ' ').upper()
-                    self.progress.emit(slice_start, f'{label}...')
-                    self.log.emit(f'\n  ▸ {_tlog(label)}', 'head')
-                    self.progress.emit(slice_mid, f'{label}...')
 
-                    # ── Estimate cache (dry-run only) ─────────────────────
-                    # Avoid re-scanning the same dirs within 60s — huge win on
-                    # Windows where WinSxS and large caches are slow to walk.
-                    if self.dry and hasattr(CLEANER, '_cache_get'):
-                        cached = CLEANER._cache_get(tid)
-                        if cached is not None:
-                            result = cached
-                            self.log.emit(_tlog('  ⚡  (cached)'), 'dry')
+                    # FIX #2: emit log + progress NGAY lập tức trước khi scan.
+                    # Trước đây UI trông như đơ khi scan target nặng (WinSxS, large cache).
+                    # Giờ user thấy "Đang quét X..." ngay → biết app đang chạy.
+                    self.log.emit(f'\n  ▸ {_tlog(label)}', 'head')
+                    self.progress.emit(slice_start, f'Đang quét {label}...')
+
+                    # FIX #5: timeout per-target — nếu 1 target bị treo (DISM chậm,
+                    # disk lỗi...) thì skip sau 120s thay vì block mãi mãi.
+                    import concurrent.futures as _cf
+                    _TARGET_TIMEOUT = 120  # giây
+
+                    def _run_target():
+                        if self.dry and hasattr(CLEANER, '_cache_get'):
+                            cached = CLEANER._cache_get(tid)
+                            if cached is not None:
+                                return cached, True   # (result, from_cache)
+                            res = CLEANER.clean(tid, dry=True)
+                            CLEANER._cache_set(tid, res)
+                            return res, False
                         else:
-                            result = CLEANER.clean(tid, dry=True)
-                            CLEANER._cache_set(tid, result)
-                    else:
-                        result = CLEANER.clean(tid, dry=self.dry)
-                        # Invalidate cache after a real clean so next dry-run rescans
-                        if not self.dry and hasattr(CLEANER, '_cache_invalidate'):
-                            CLEANER._cache_invalidate(tid)
+                            res = CLEANER.clean(tid, dry=self.dry)
+                            if not self.dry and hasattr(CLEANER, '_cache_invalidate'):
+                                CLEANER._cache_invalidate(tid)
+                            return res, False
+
+                    try:
+                        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                            _fut = _ex.submit(_run_target)
+                            try:
+                                result, from_cache = _fut.result(timeout=_TARGET_TIMEOUT)
+                                if from_cache:
+                                    self.log.emit(_tlog('  ⚡  (cached)'), 'dry')
+                            except _cf.TimeoutError:
+                                _fut.cancel()
+                                from core.base_cleaner import CleanResult as _CR
+                                result = _CR(tid)
+                                result.error = f'Timeout ({_TARGET_TIMEOUT}s) — target skipped'
+                                self.log.emit(f'  ⚠ {label}: quét quá lâu, bỏ qua', 'warn')
+                    except Exception as _te:
+                        from core.base_cleaner import CleanResult as _CR
+                        result = _CR(tid)
+                        result.error = str(_te)
+
+                    self.progress.emit(slice_mid, f'{label}...')
 
                     self.progress.emit(slice_end, f'{label}')
 
@@ -926,8 +981,33 @@ class _ScanWorker(QThread):
             from core.analyzer import get_network_processes
             self.log.emit('  ⟳  ' + _tlog('Scanning active network processes...'), 'head')
             net_results = get_network_processes()
-        except Exception:
+            # FIX: previously nothing was logged after this call — if the
+            # user was watching the log pane (not the results table or the
+            # scan button), the last visible line stayed
+            # "Scanning active network processes..." forever, even though
+            # get_network_processes() had already returned. This made a
+            # perfectly successful scan look indistinguishable from a hang.
+            # get_network_processes() itself has a 6s internal timeout and
+            # always returns (see analyzer.py docstring), so by the time we
+            # reach this line the network step is genuinely finished —
+            # we just never said so out loud.
+            suspicious = sum(1 for n in net_results if getattr(n, 'suspicious', False))
+            if suspicious:
+                self.log.emit(
+                    f'  ⚠  {_t("log_net_complete_warn", "Network scan complete")} — '
+                    f'{suspicious} {_t("log_net_suspicious_count", "suspicious connection(s) found")}',
+                    'warn'
+                )
+            else:
+                self.log.emit(
+                    f'  ✓  {_t("log_net_complete_ok", "Network scan complete — no suspicious connections")}',
+                    'ok'
+                )
+        except Exception as e:
+            self.log.emit(f'  ~  {_t("log_net_skipped", "Network scan skipped")}: {e}', 'warn')
             net_results = []
+        self.log.emit('', 'info')
+        self.log.emit(f'  {_t("log_scan_all_done", "All scan steps finished.")}', 'head')
         self.done.emit(results, net_results)
 
 

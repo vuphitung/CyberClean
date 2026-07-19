@@ -86,6 +86,15 @@ from core.booster import (free_ram, memory_tune, memory_tune_restore,
                           game_mode_on, game_mode_off, eco_mode_on, eco_mode_off,
                           smart_boost_on, smart_boost_off, detect_pc_tier)
 
+# ── GameBoostPage (new 1-button cyber UI) ───────────────────────
+try:
+    from core.game_boost_widget import GameBoostPage as _GameBoostPage
+    _HAS_GAME_BOOST_PAGE = True
+except ImportError:
+    _HAS_GAME_BOOST_PAGE = False
+    _GameBoostPage = None
+
+
 if IS_WINDOWS and not is_windows_admin():
     request_windows_admin()
 
@@ -1281,140 +1290,35 @@ class CyberCleanApp(QMainWindow):
     # REDESIGNED SYSTEM BOOSTER
     # ─────────────────────────────────────────────────────────
     def _build_browser_turbo(self):
+        """
+        NEW: GameBoostPage — 1 nút cyber, 4 giai đoạn, GPU busy metric.
+        Thay thế hoàn toàn trang SYS BOOSTER cũ với 7 nút riêng lẻ.
+
+        Logic:
+          Phase 0 SCAN    — detect GPU, game PIDs, baseline GPU busy %
+          Phase 1 APPLY   — free RAM → governor → mesa env → VFR → nice
+          Phase 2 MONITOR — GPU busy % live từ sysfs mỗi 4s
+          Phase 3 RESTORE — undo tất cả khi tắt
+        """
         w = QWidget()
+        w.setStyleSheet(f'background:{C.get("bg", "#0d1117")};')
         outer = QVBoxLayout(w)
-        outer.setContentsMargins(26, 22, 26, 22)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        outer.addWidget(self._page_header(
-            _t('booster_title', 'SYSTEM BOOSTER'),
-            _t('booster_sub', 'Free RAM · optimize CPU · clear disk cache · tune system'),
-            store_key='booster'
-        ))
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet('border:none;background:transparent;')
-        sw = QWidget()
-        lay = QVBoxLayout(sw)
-        lay.setContentsMargins(0, 0, 4, 0)
-        lay.setSpacing(10)
-
-        if not hasattr(self, '_boost_lbls'): self._boost_lbls = {}
-        def _boost_card(title, color, desc, btn_label, btn_color, slot):
-            f = QFrame()
-            f.setStyleSheet(
-                f'QFrame{{background:{C["bg2"]};'
-                f'border-top:1px solid {C["border2"]};'
-                f'border-right:1px solid {C["border2"]};'
-                f'border-bottom:1px solid {C["border2"]};'
-                f'border-left:3px solid {color}60;'
-                f'border-radius:3px;}}'
-                f'QFrame:hover{{background:{C["bg3"]};}}'
+        if _HAS_GAME_BOOST_PAGE and _GameBoostPage is not None:
+            # ── New cyber UI ───────────────────────────────────
+            self._game_boost_page = _GameBoostPage(w)
+            outer.addWidget(self._game_boost_page)
+        else:
+            # ── Fallback: plain label nếu import thất bại ─────
+            fallback = QLabel(
+                "⚠  game_boost_widget.py not found\n"
+                "Copy core/game_boost_widget.py vào project và restart."
             )
-            hl = QHBoxLayout(f); hl.setContentsMargins(18, 16, 18, 16); hl.setSpacing(18)
-            vl = QVBoxLayout(); vl.setSpacing(5)
-            t = QLabel(title)
-            t.setStyleSheet(
-                f'color:{color};font-size:11px;letter-spacing:3px;'
-                f'font-family:{MONO};font-weight:700;'
-            )
-            d = QLabel(desc)
-            d.setStyleSheet(f'color:{C["text3"]};font-size:11px;')
-            d.setWordWrap(True)
-            vl.addWidget(t); vl.addWidget(d)
-            b = _btn(btn_label, btn_color, small=True)
-            b.clicked.connect(slot)
-            _key = getattr(slot, '__name__', str(id(slot)))
-            self._boost_lbls[_key] = (t, d, b)  # lưu cả button để retranslate
-            hl.addLayout(vl, 1); hl.addWidget(b)
-            return f
-
-        lay.addWidget(_boost_card(
-            f"⬡  {_t('booster_free_ram','FREE RAM')}", C['cyan'],
-            _t('ram_desc','Drop page cache, reclaim unused memory. Instant RAM boost without rebooting.'),
-            f"▶  {_t('btn_free_now','FREE NOW')}", 'cyan', self._boost_free_ram
-        ))
-
-        # CPU Priority card (complex — built manually)
-        f_cpu = QFrame()
-        f_cpu.setStyleSheet(
-            f'QFrame{{background:{C["bg2"]};'
-            f'border-top:1px solid {C["border2"]};'
-            f'border-right:1px solid {C["border2"]};'
-            f'border-bottom:1px solid {C["border2"]};'
-            f'border-left:3px solid {C["yellow"]}60;'
-            f'border-radius:3px;}}'
-            f'QFrame:hover{{background:{C["bg3"]};}}'
-        )
-        hl_cpu = QHBoxLayout(f_cpu); hl_cpu.setContentsMargins(18, 16, 18, 16); hl_cpu.setSpacing(18)
-        vl_cpu = QVBoxLayout(); vl_cpu.setSpacing(5)
-        self._lbl_t_cpu = QLabel(f"⚡  {_t('booster_cpu','CPU PRIORITY MODE')}")
-        self._lbl_t_cpu.setStyleSheet(
-            f'color:{C["yellow"]};font-size:11px;letter-spacing:3px;'
-            f'font-family:{MONO};font-weight:700;'
-        )
-        self._lbl_d_cpu = QLabel(_t('cpu_desc','Freeze or throttle background bloat. Give foreground app 100% CPU resources.'))
-        self._lbl_d_cpu.setStyleSheet(f'color:{C["text3"]};font-size:11px;')
-        self._lbl_d_cpu.setWordWrap(True)
-        vl_cpu.addWidget(self._lbl_t_cpu); vl_cpu.addWidget(self._lbl_d_cpu)
-        btn_row_cpu = QHBoxLayout(); btn_row_cpu.setSpacing(8)
-        self._game_btn = _btn(f"  {_t('btn_game_mode','GAME MODE')}", 'red', small=True)
-        self._game_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["red"]))
-        self._game_btn.setIconSize(QSize(20, 20))
-        self._game_btn.setCheckable(True)
-        self._game_btn.setToolTip(_t('game_tooltip','Throttle background bloat — no suspend, no deadlock'))
-        self._game_btn.clicked.connect(self._toggle_game_mode)
-        self._eco_btn = _btn(f"  {_t('btn_eco_mode','ECO MODE')}", 'green', small=True)
-        self._eco_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["green"]))
-        self._eco_btn.setIconSize(QSize(20, 20))
-        self._eco_btn.setCheckable(True)
-        self._eco_btn.setToolTip(_t('eco_tooltip','Lower all background task priority to IDLE'))
-        self._eco_btn.clicked.connect(self._toggle_eco_mode)
-        btn_row_cpu.addWidget(self._game_btn)
-        btn_row_cpu.addWidget(self._eco_btn)
-        self._smart_btn = _btn(f"  {_t('btn_smart_boost','SMART BOOST')}", 'purple', small=True)
-        self._smart_btn.setIcon(_make_icon(_icon_booster, size=18, color=C["purple"]))
-        self._smart_btn.setIconSize(QSize(20, 20))
-        self._smart_btn.setCheckable(True)
-        self._smart_btn.setToolTip(_t('smart_tooltip','Auto-detect PC tier and apply optimal boost'))
-        self._smart_btn.clicked.connect(self._toggle_smart_boost)
-        btn_row_cpu.addWidget(self._smart_btn)
-        btn_row_cpu.addStretch()
-        hl_cpu.addLayout(vl_cpu, 1); hl_cpu.addLayout(btn_row_cpu)
-        lay.addWidget(f_cpu)
-
-        lay.addWidget(_boost_card(
-            f"◈  {_t('booster_disk','DISK CACHE CLEAR')}", C['cyan'],
-            _t('disk_desc','Clear GPU/shader cache, temp files. Frees VRAM, fixes video stutter & WebGL glitches.'),
-            f"◈  {_t('btn_clear_cache','CLEAR CACHE')}", 'cyan', self._clear_gpu_cache
-        ))
-
-        lay.addWidget(_boost_card(
-            f"⬡  {_t('booster_mem_tune','MEMORY TUNE')}", C['green'],
-            _t('mem_tune_desc','Linux: set swappiness=10 + compact memory. Windows: flush standby list & optimize VM.'),
-            f"▶  {_t('btn_tune_now','TUNE NOW')}", 'green', self._boost_memory_tune
-        ))
-
-        lay.addWidget(_boost_card(
-            f"✕  {_t('booster_kill_bloat','KILL BACKGROUND BLOAT')}", C['red'],
-            _t('kill_desc','Find and kill zombie, sleeping & high-memory idle processes safely.'),
-            f"✕  {_t('btn_kill_bloat','KILL BLOAT')}", 'red', self._boost_kill_bloat
-        ))
-
-        lay.addStretch()
-        scroll.setWidget(sw)
-        outer.addWidget(scroll, 1)
-        outer.addSpacing(10)
-
-        self._lbl_booster_output_sec = _lbl_section(_t('lbl_output', 'OUTPUT LOG'))
-        outer.addWidget(self._lbl_booster_output_sec)
-        self._browser_log = QTextEdit()
-        self._browser_log.setReadOnly(True)
-        self._browser_log.setMinimumHeight(110)
-        self._browser_log.setMaximumHeight(210)
-        self._browser_log.setPlaceholderText(_t('lbl_output', 'OUTPUT'))
-        outer.addWidget(self._browser_log)
+            fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            fallback.setStyleSheet("color:#f0a500;font-size:13px;padding:40px;")
+            outer.addWidget(fallback)
 
         return w
 
@@ -2041,8 +1945,88 @@ class CyberCleanApp(QMainWindow):
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
-        import subprocess as _sp
+
+        # ── Route findings to the correct, injection-proof fix path ────
+        # SECURITY: fix-suid / fix-writable / fix-autorun / remove-file all
+        # carry attacker-influenced data (a filename or registry value name
+        # an attacker chose). They are NEVER run as a shell string — see
+        # scanner.py's run_fix_action() / fix_autorun_entry() /
+        # remove_file_windows() docstrings for why.
+        # Only findings whose fix_cmd was built from values we fully
+        # control (validated ints: a PID, a TCP port) still use the plain
+        # shell_fixes path below.
+        try:
+            from core.scanner import run_fix_action, fix_autorun_entry, remove_file_windows
+        except ImportError:
+            from scanner import run_fix_action, fix_autorun_entry, remove_file_windows
+        batched: dict = {}   # action -> [targets]  (Linux helper actions)
+        autorun_fixes  = []
+        winfile_fixes  = []  # 'remove-file' on Windows — no sudoers helper exists there
+        shell_fixes    = []
+
         for r in to_fix:
+            if r.fix_action == 'fix-autorun':
+                autorun_fixes.append(r)
+            elif r.fix_action == 'remove-file' and IS_WINDOWS:
+                # Windows has no privileged-helper concept (that's a Linux
+                # sudoers mechanism) — route to the native os.remove() path
+                # instead of the Linux-only stdin/helper batch below.
+                winfile_fixes.append(r)
+            elif r.fix_action:
+                batched.setdefault(r.fix_action, []).append(r)
+            elif r.fix_cmd:
+                shell_fixes.append(r)
+
+        # 1) Batched helper actions (fix-suid, fix-writable, remove-file on
+        #    Linux) — one sudo call per action covering every target,
+        #    targets sent via stdin, never interpolated into argv or a
+        #    shell string.
+        for action, items in batched.items():
+            targets = [r.fix_target for r in items if r.fix_target]
+            out, code = run_fix_action(action, targets, timeout=30)
+            ok = (code == 0)
+            for r in items:
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {action}',
+                    'ok' if ok else 'err'
+                )
+            if not ok and out:
+                self._on_opt_log(f'     {out}', 'err')
+
+        # 2) Windows autorun fixes — winreg.DeleteValue + psutil kill,
+        #    no cmd.exe involved.
+        for r in autorun_fixes:
+            try:
+                out, code = fix_autorun_entry(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 2b) Windows malicious-file removal — os.remove(), no cmd.exe
+        #     'del /f /q "{path}"' string. Same injection class as the
+        #     registry path above; the filename was found because it
+        #     looked malicious, so it is attacker-influenced data.
+        for r in winfile_fixes:
+            try:
+                out, code = remove_file_windows(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 3) Remaining fixes whose fix_cmd interpolates only validated
+        #    integers (PID, port) — e.g. 'sudo -n helper kill-pid 1234' or
+        #    a netsh firewall rule keyed by a fixed port number. No
+        #    attacker-controlled free text reaches these strings.
+        import subprocess as _sp
+        for r in shell_fixes:
             try:
                 result = _sp.run(r.fix_cmd, shell=True, capture_output=True, text=True, timeout=10)
                 self._on_opt_log(
@@ -2051,6 +2035,7 @@ class CyberCleanApp(QMainWindow):
                 )
             except Exception as e:
                 self._on_opt_log(f'  ✗  {r.fix_cmd}: {e}', 'err')
+
         self._run_scanner()
 
     def _mark_scan_result_safe(self):
@@ -3138,9 +3123,24 @@ class CyberCleanApp(QMainWindow):
             )
 
     def _do_background_clean(self, notify=True):
+        # FIX #3: Auto-clean nền chỉ xóa các target thực sự "safe" và
+        # rebuild nhanh. KHÔNG xóa shader cache, prefetch, browser cache —
+        # những thứ này cần thời gian rebuild → user thấy máy chậm sau restart
+        # mà không hiểu tại sao.
+        _AUTO_CLEAN_SKIP = {
+            # Rebuild chậm (1-10 phút game launch đầu tiên)
+            'shader_cache', 'win_shader', 'mesa_shader',
+            # Prefetch giúp app khởi động nhanh hơn — không nên xóa tự động
+            'win_prefetch',
+            # Browser cache rebuild tốn bandwidth và làm chậm duyệt web
+            'chrome_cache', 'firefox_cache', 'edge_cache',
+            'brave_cache', 'browser_cache',
+            # WinSxS cần DISM + pending reboot — không chạy tự động
+            'win_winsxs',
+        }
         safe_targets = [
             t.id for t in CLEANER.get_targets()
-            if t.safety == 'safe'
+            if t.safety == 'safe' and t.id not in _AUTO_CLEAN_SKIP
         ]
         if not safe_targets:
             return

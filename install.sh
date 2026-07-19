@@ -177,9 +177,56 @@ case "$1" in
   swappiness)       echo 10 > /proc/sys/vm/swappiness ;;
   dirty-ratio)      echo 10 > /proc/sys/vm/dirty_ratio ;;
   dirty-background-ratio) echo 5 > /proc/sys/vm/dirty_background_ratio ;;
-  fix-suid)         [[ -z "$2" ]] && exit 1; chmod u-s "$2" 2>/dev/null ;;
-  fix-writable)     [[ -z "$2" ]] && exit 1; chmod o-w "$2" 2>/dev/null ;;
-  remove-file)      [[ -z "$2" ]] && exit 1; rm -f "$2" 2>/dev/null ;;
+  fix-suid)
+    # SECURITY: targets arrive via STDIN (newline-separated absolute
+    # paths), never via argv/shell interpolation — this is what makes it
+    # safe to call even when a filename contains shell metacharacters
+    # (an attacker who planted a SUID file controls its name).
+    #
+    # TOCTOU GUARD: re-check the file STILL has the setuid bit right
+    # before stripping it. Closes the window between the GUI scan and the
+    # user clicking Auto-Fix, during which the path could have been
+    # replaced (e.g. swapped for a symlink into a sensitive location).
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      [[ -f "$f" ]] || continue     # must be a regular file
+      [[ ! -L "$f" ]] || continue   # never follow a symlink — operate on the real file only
+      [[ -u "$f" ]] || continue     # must still have the setuid bit set right now
+      chmod u-s -- "$f" 2>/dev/null || true
+    done ;;
+  fix-writable)
+    # Same stdin + TOCTOU pattern as fix-suid above.
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      [[ -f "$f" ]] || continue
+      [[ ! -L "$f" ]] || continue
+      perm=$(stat -c '%a' "$f" 2>/dev/null) || continue
+      last="${perm: -1}"
+      # World-write bit set ⇔ last octal digit is 2,3,6, or 7
+      # (write=2, can combine with read=4 and/or exec=1 → 2,3,6,7)
+      case "$last" in
+        2|3|6|7) ;;
+        *) continue ;;   # no longer world-writable — skip (TOCTOU guard)
+      esac
+      chmod o-w -- "$f" 2>/dev/null || true
+    done ;;
+  remove-file)
+    # SECURITY: targets arrive via STDIN (newline-separated absolute
+    # paths), same pattern as fix-suid/fix-writable above — never via
+    # argv/shell interpolation. This action is specifically used to
+    # delete files the Security Scanner flagged as malicious, which
+    # means the filename itself is attacker-influenced and must never
+    # be allowed to touch a shell parser at the Python-calling side.
+    #
+    # SAFETY: only allow deleting REGULAR files, never directories or
+    # symlinks (a malicious "file" swapped for a symlink to something
+    # important must not be followed).
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      [[ -f "$f" ]] || continue     # must be a regular file right now
+      [[ ! -L "$f" ]] || continue   # never follow a symlink
+      rm -f -- "$f" 2>/dev/null || true
+    done ;;
   kill-pid)         [[ -z "$2" ]] && exit 1; kill -9 "$2" 2>/dev/null ;;
   stop-service)     [[ -z "$2" ]] && exit 1; systemctl stop "$2" 2>/dev/null ;;
   clean-rotated-logs)

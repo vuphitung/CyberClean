@@ -76,6 +76,34 @@ def _is_locked_win(path: Path) -> bool:
         return True
 
 
+def _safe_path_str(path) -> str:
+    """BUG FIX #3: Convert path sang string an toàn với Unicode.
+    Username Tiếng Việt (Nguyễn, Trần...) hoặc Chinese characters
+    gây UnicodeEncodeError trên một số Windows locale (cp1252).
+    Dùng os.fspath() + errors='replace' để tránh crash.
+    """
+    try:
+        return os.fspath(path)
+    except Exception:
+        try:
+            return str(path).encode('utf-8', errors='replace').decode('utf-8')
+        except Exception:
+            return repr(path)
+
+
+def _expand_env_path(env_var: str, fallback: str) -> Path:
+    """Expand env var an toàn với Unicode path.
+    os.environ.get() đôi khi trả về bytes thay vì str trên Windows locale lỗi.
+    """
+    try:
+        val = os.environ.get(env_var, fallback)
+        if isinstance(val, bytes):
+            val = val.decode('utf-8', errors='replace')
+        return Path(val)
+    except Exception:
+        return Path(fallback)
+
+
 def _dir_size_safe(path, _limit=500_000_000_000) -> int:
     """
     Walk tree without following NTFS junctions/symlinks.
@@ -223,8 +251,8 @@ class WindowsCleaner(BaseCleaner):
     def _win_temp(self, dry):
         r = CleanResult('win_temp')
         dirs = list({
-            Path(os.environ.get('TEMP', 'C:/Windows/Temp')),
-            Path(os.environ.get('TMP',  'C:/Windows/Temp')),
+            _expand_env_path('TEMP', 'C:/Windows/Temp'),
+            _expand_env_path('TMP',  'C:/Windows/Temp'),
             Path('C:/Windows/Temp'),
             Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'Temp',
         })
@@ -249,8 +277,18 @@ class WindowsCleaner(BaseCleaner):
                 for item in list(d.iterdir()):
                     try:
                         mtime = item.stat().st_mtime
-                        if (now - mtime) < 86400:
+                        age_secs = now - mtime
+                        if age_secs < 86400:
                             continue
+                        # FIX: khi ổ C gần đầy (< 2GB free), Discord/Chrome
+                        # đang extract update vào %TEMP%. Chỉ xóa file > 2 ngày.
+                        try:
+                            import shutil as _sh
+                            _free_bytes = _sh.disk_usage(str(d.anchor)).free
+                            if _free_bytes < 2 * 1024**3 and age_secs < 172800:
+                                continue  # disk critical: giữ file < 2 ngày
+                        except OSError:
+                            pass
                         if item.is_dir() and item.name.lower().startswith(SKIP_DIR_PREFIXES):
                             continue
                         if item.is_file() and item.suffix.lower() in SKIP_EXTENSIONS:
@@ -621,9 +659,47 @@ class WindowsCleaner(BaseCleaner):
                 # 3010 = success, restart required
                 r.error = f'DISM cleanup failed (code {code})'
             else:
-                # Can't measure exact freed bytes after DISM — report nominal
                 r.freed_bytes   = 0
                 r.files_removed = 1
+                # FIX #1: Check pending reboot BEFORE returning.
+                # DISM sometimes leaves pending ops that need a proper restart.
+                # If user hard-shuts the PC → Windows detects incomplete component
+                # store → triggers Startup Repair on next boot.
+                # We warn them explicitly so they know to Restart (not Shutdown).
+                _pending = False
+                try:
+                    import winreg as _wr
+                    for _rp_key in (
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing",
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+                        r"SYSTEM\CurrentControlSet\Control\Session Manager",
+                    ):
+                        try:
+                            _k = _wr.OpenKey(_wr.HKEY_LOCAL_MACHINE, _rp_key, 0, _wr.KEY_READ)
+                            try:
+                                if 'Session Manager' in _rp_key:
+                                    _v, _ = _wr.QueryValueEx(_k, 'PendingFileRenameOperations')
+                                    if _v:
+                                        _pending = True
+                                else:
+                                    _wr.QueryValueEx(_k, 'RebootPending')
+                                    _pending = True
+                            except OSError:
+                                pass
+                            _wr.CloseKey(_k)
+                        except OSError:
+                            pass
+                        if _pending:
+                            break
+                except Exception:
+                    pass
+                if _pending or code == 3010:
+                    r.error = (
+                        '⚠ DISM xong — cần RESTART để hoàn tất. '
+                        'Hãy RESTART đúng cách (Start → Restart), '
+                        'KHÔNG tắt nguồn trực tiếp hoặc force shutdown. '
+                        'Nếu tắt nguồn giữa chừng Windows sẽ chạy Startup Repair khi mở lại.'
+                    )
         return r
 
     # ── Event Logs ────────────────────────────────────────────
@@ -634,7 +710,24 @@ class WindowsCleaner(BaseCleaner):
         r.freed_bytes = size_before
         if not dry and is_admin():
             out, _ = run_win('wevtutil el', timeout=15)
-            logs    = [l.strip() for l in out.splitlines() if l.strip()]
+            all_logs = [l.strip() for l in out.splitlines() if l.strip()]
+
+            # FIX #4: KHÔNG xóa Security log và System log theo mặc định.
+            # Trên máy văn phòng dùng SCCM/SIEM, xóa Security log vi phạm
+            # compliance policy và trigger security alert cho IT department.
+            # Chỉ xóa Application, Setup, và các log app thứ 3 an toàn.
+            _SKIP_LOGS = {
+                'Security',                          # audit/compliance log
+                'System',                            # system events
+                'Microsoft-Windows-Kernel-Power/Operational',  # power events
+                'Microsoft-Windows-Kernel-Boot/Operational',
+                'Microsoft-Windows-WindowsUpdateClient/Operational',
+            }
+            logs = [
+                l for l in all_logs
+                if not any(l == s or l.startswith(s + '/') for s in _SKIP_LOGS)
+            ]
+
             cleared = 0
             for log in logs:
                 try:
@@ -698,6 +791,30 @@ class WindowsCleaner(BaseCleaner):
         _rm = os.environ.get('APPDATA', '')
         if not _lc and not _rm:
             return r
+
+        # FIX: Bảo vệ Local Storage, IndexedDB, Databases của Discord/Slack/Teams.
+        # Đây là nơi lưu cấu hình audio device, login token, server list.
+        # Xóa nhầm → mất mic, mất đăng nhập, mất cài đặt.
+        # Chỉ xóa GPUCache và Cache (rebuild được), KHÔNG xóa Local Storage.
+        _COMMS_PROTECTED_DIRS = {
+            'local storage', 'indexeddb', 'databases',
+            'localstorage', 'session storage',
+            'leveldb', 'protobuf', 'syncdata',
+            'account manager', 'preferences',
+        }
+
+        def _is_safe_cache_dir(path_obj) -> bool:
+            name_low = path_obj.name.lower()
+            # Không xóa nếu tên thư mục là dữ liệu quan trọng
+            if name_low in _COMMS_PROTECTED_DIRS:
+                return False
+            # Không xóa nếu là thư mục của comms apps (Discord, Slack, Teams)
+            _COMMS_APPS = {'discord', 'slack', 'msteams', 'teams', 'zoom',
+                           'telegram', 'signal', 'skype', 'zalo'}
+            for part in path_obj.parts:
+                if part.lower() in _COMMS_APPS:
+                    return False
+            return True
         local   = Path(_lc) if _lc else Path('C:/Users/Default/AppData/Local')
         roaming = Path(_rm) if _rm else Path('C:/Users/Default/AppData/Roaming')
 
