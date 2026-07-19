@@ -38,7 +38,7 @@ sudo cyberclean --uninstall
 
 ### Windows
 
-**[⬇ Tải CyberClean Setup v3.0.1 (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+**[⬇ Tải CyberClean cho Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
 Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng → CyberClean`.
 
@@ -139,7 +139,7 @@ Mỗi tiến trình qua ma trận chấm điểm đa chiều (+/− điểm theo
 ---
 
 ### [↑] Tự động cập nhật
-Kiểm tra GitHub Releases lúc khởi động (chạy nền, không block UI). Tải xuống → thay thế → khởi động lại chỉ một click.
+Kiểm tra GitHub Releases lúc khởi động (chạy nền, không block UI) — chỉ hiện badge, không tự tải/tự cài nếu chưa bấm. Update cần bấm xác nhận rõ ràng; file tải về được verify bằng chữ ký Ed25519 nhúng sẵn trong app trước khi cài bất cứ thứ gì.
 
 ---
 
@@ -167,6 +167,7 @@ Thu nhỏ xuống khay hệ thống. Tự động dọn các mục an toàn mỗ
 
 - **Không thu thập dữ liệu** — không gọi mạng trong lúc hoạt động bình thường
 - **Không chạy ngầm** — chỉ chạy khi bạn mở app
+- **Release có chữ ký** — từ v3.0.2, mọi release được ký bằng Ed25519; public key nằm sẵn trong app, private key không bao giờ nằm trên repo này. Updater từ chối cài bất cứ file nào không có chữ ký hợp lệ.
 - **Đặc quyền có phạm vi** — sudoers rule chỉ cấp quyền cho `/usr/local/bin/cyber-clean-helper`, không phải sudo toàn bộ. Helper là shell script bạn có thể đọc và kiểm tra.
 - **send2trash** — file bị xóa đưa vào Thùng rác hệ thống khi có thể, không xóa vĩnh viễn
 
@@ -177,7 +178,13 @@ Thu nhỏ xuống khay hệ thống. Tự động dọn các mục an toàn mỗ
 ```bash
 git clone https://github.com/vuphitung/CyberClean.git
 cd CyberClean
+
+# Arch/Debian 12+/các distro theo PEP 668 chặn pip cài thẳng vào system —
+# dùng venv (chạy được mọi nơi, không đụng Python hệ thống):
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install pyinstaller
 
 # Chạy trực tiếp
 python main.py
@@ -187,37 +194,53 @@ python3 build.py --linux
 
 # Build installer Windows
 python build.py --inno
-
-# Build updater
-1. Bump version — edit version.py only:
-__version__ = "3.0.2"   # ← đổi phiên bản 
-
-2. Build:
-python3 build.py --linux
-
-3. Update version trong install.sh (dòng~68):
-VERSION="3.0.2"   # ← thay đổi theo phiên bản mới nhất
-
-4. tải khóa sha256:
-sha256sum dist/CyberClean-3.0.2-linux-x86_64.tar.gz > dist/CyberClean-3.0.2-linux-x86_64.tar.gz.sha256
-
-5. Create GitHub Release:
-gh release create v3.0.2 \
-  dist/CyberClean-3.0.2-linux-x86_64.tar.gz \
-  dist/CyberClean-3.0.2-linux-x86_64.tar.gz.sha256 \
-  --title "CyberClean v3.0.2 [release title]" \
-  --notes "### Changelog
-- Fix ...
-- Add ...
-
-**Verify Download:**
-\`\`\`bash
-sha256sum -c CyberClean-3.0.2-linux-x86_64.tar.gz.sha256
-\`\`\`"
-
 ```
 
-**Yêu cầu:** Python 3.10+ · PyQt6 · psutil · PyInstaller
+**Yêu cầu:** Python 3.10+ · PyQt6 · psutil · cryptography · PyInstaller
+
+### Ra release (dành cho maintainer)
+
+Từ v3.0.2, release được ký bằng Ed25519 — chỉ có SHA-256 sidecar thôi
+không đủ chứng minh release thật sự đến từ repo này, nó chỉ chứng minh
+file tải về không lỗi đường truyền. Public key nằm sẵn trong
+`utils/updater.py`; private key chỉ nằm trong GitHub Actions secret
+`CYBERCLEAN_SIGNING_KEY` của repo, không có gì trong file này để lộ nó ra.
+
+```bash
+# 1. Bump version — chỉ sửa version.py, không cần sửa file nào khác:
+__version__ = "3.0.x"
+
+# 2. Build (trong venv):
+python3 build.py --linux         # và/hoặc: python build.py --inno   (Windows)
+
+# 3. Ký artifact — ra file .sig (Ed25519, căn cứ xác thực thật sự)
+#    và .sha256 (giữ lại chỉ để app đời cũ trước 3.0.2 update lên mượt):
+export CYBERCLEAN_SIGNING_KEY="<private key — xem gen_release_key.py, không bao giờ commit>"
+python3 sign_release.py dist/CyberClean-3.0.x-linux-x86_64.tar.gz
+
+# 4. Publish — upload cả file gốc lẫn 2 sidecar:
+gh release create v3.0.x \
+  dist/CyberClean-3.0.x-linux-x86_64.tar.gz \
+  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sig \
+  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sha256 \
+  --title "CyberClean v3.0.x" \
+  --notes "### Changelog
+- Fix ...
+- Add ..."
+```
+
+`install.sh` tự lấy version từ GitHub Releases API lúc cài, nên không
+cần sửa mỗi lần release. Nó vẫn giữ 1 hằng số fallback hardcode (chỉ
+dùng khi gọi API lỗi) — nếu muốn kỹ thì bump luôn cho nhánh dự phòng đó
+đỡ quá cũ, nhưng không bắt buộc để cài đặt bình thường hoạt động.
+
+**Tự verify file tải về:**
+```bash
+sha256sum -c CyberClean-3.0.x-linux-x86_64.tar.gz.sha256
+```
+Lệnh này chỉ xác nhận file không bị lỗi đường truyền — không tự chứng
+minh được tính xác thực. Updater trong app còn kiểm tra thêm file
+`.sig` với public key nhúng sẵn trước khi cài bất cứ gì.
 
 ---
 
