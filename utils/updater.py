@@ -156,27 +156,65 @@ def _verify_release(file_path: Path, base_url: str, version: str) -> tuple[bool,
     Combined verification, called by both the Linux and Windows update paths.
 
     Order of trust:
-      1. Try Ed25519 .sig (real authenticity check) — if a .sig exists,
-         it MUST pass. A present-but-invalid .sig is always a hard fail.
-      2. If no .sig exists at all (404) -> this is either a pre-3.0.2
-         release, or v2.4 signing infra genuinely wasn't used for it.
-         Fall back to the legacy SHA-256 sidecar check for backward
-         compatibility with users updating from older versions, and
-         label the result clearly as "integrity-only, not authenticated"
-         so it's visible in logs/progress text rather than silently
-         indistinguishable from a real signature pass.
+      1. Try Ed25519 .sig (real authenticity check) — if the target
+         version is signing-eligible (>= SIGNING_INTRODUCED_VERSION), the
+         .sig MUST be present and MUST pass. No fallback is possible for
+         these versions, period.
+      2. Only for versions strictly older than SIGNING_INTRODUCED_VERSION
+         (genuinely pre-dating signing infrastructure) does this fall
+         back to the legacy SHA-256 sidecar check, for real backward
+         compatibility with users updating from very old installs.
+
+    SECURITY — why this is NOT gated on "did the .sig request 404":
+    A network-position attacker (MITM, malicious proxy, poisoned DNS,
+    a compromised CDN edge) fully controls HTTP responses, including
+    manufacturing a 404 for a .sig request that would otherwise have
+    succeeded — for ANY release, signed or not. If "the server says no
+    .sig exists" were the trigger for falling back to SHA-256-only
+    checking, an attacker could force that fallback on every single
+    update check, then supply a matching fake .sha256 alongside a
+    tampered payload — completely defeating the Ed25519 signing scheme
+    for every version, not just old ones. That was the previous behavior
+    here and has been removed.
+
+    The version string passed in comes from this app's own GitHub
+    Releases API tag lookup, not from the .sig/.sha256 endpoints being
+    verified — but more importantly, the decision of "is this version
+    signing-eligible" is made by comparing against a version number
+    hardcoded in THIS installed app's own code (SIGNING_INTRODUCED_VERSION
+    below), which a network attacker cannot rewrite without already having
+    arbitrary code execution on the machine (at which point the update
+    mechanism is a moot point anyway). An attacker can still lie about
+    which tag/version a payload corresponds to, but they cannot make this
+    running app's code believe 3.0.3 is "pre-signing" — that threshold
+    ships inside the binary being asked to verify, not on the network.
     """
+    # Every release from this version onward is guaranteed, by this app's
+    # own release process (see sign_release.py / the CI signing step),
+    # to have been published with a valid .sig. Bump this only when a
+    # NEW app release is cut — never in response to anything observed
+    # over the network at verification time.
+    SIGNING_INTRODUCED_VERSION = (3, 0, 2)
+    is_signing_eligible = _parse_version_tuple(version) >= SIGNING_INTRODUCED_VERSION
+
     ua = f"CyberClean-Updater/{version}"
     sig_url = f"{base_url}.sig"
     ok_sig, sig_msg = _verify_ed25519(file_path, sig_url, ua)
     if ok_sig:
         return True, sig_msg
-    if "no .sig found" not in sig_msg:
-        # .sig existed but failed verification, or a hard network error
-        # occurred while a signed release was expected — do not fall back.
-        return False, sig_msg
 
-    # No .sig at all -> legacy path, for old/unsigned releases only.
+    if is_signing_eligible:
+        # This version MUST be signed — no fallback exists for it, no
+        # matter what the .sig request returned (404, network error, or
+        # an actual invalid signature are all treated identically: fail
+        # closed). This is the line that closes the downgrade attack.
+        return False, (
+            f"{sig_msg} — version {version} is required to be signed; "
+            f"refusing to fall back to unsigned verification"
+        )
+
+    # Only reachable for versions older than SIGNING_INTRODUCED_VERSION —
+    # genuinely pre-dates signing infra, legacy path is the real fallback.
     sha_url = f"{base_url}.sha256"
     ok_hash, hash_msg = _legacy_verify_sha256(file_path, sha_url, ua)
     if ok_hash:

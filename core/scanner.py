@@ -277,6 +277,155 @@ def remove_file_windows(fix_target: str) -> tuple:
         return f'Delete failed: {e}', 1
 
 
+def disable_systemd_user_unit(fix_target: str) -> tuple:
+    """
+    Disable, stop, and remove a malicious systemd --user unit file.
+
+    fix_target is the absolute path to the .service/.timer file found by
+    _scan_systemd_user_units(). Unlike a plain file the scanner found on
+    disk, this file is *actively referenced by systemd* (possibly enabled
+    via a symlink in .config/systemd/user/*.wants/) — deleting it without
+    disabling first can leave a dangling/orphaned unit reference, which is
+    exactly the "Unbalanced quoting, ignoring" / "Refusing to start, unit
+    ... not loaded" failure mode that shows up in `journalctl --user` when
+    a unit file goes missing out from under systemd. So the sequence is:
+    stop → disable → remove file → daemon-reload, in that order.
+
+    All steps run through systemctl/os.remove with list-form argv or
+    direct filesystem calls — no shell, no string interpolation of the
+    unit name or path (it is attacker-influenced — same threat model as
+    fix_autorun_entry()'s registry value name). These are --user scope
+    operations: no root/sudo needed, since a user's own systemd --user
+    instance already runs under their own UID.
+
+    Returns (message: str, returncode: int) — 0 on success. Best-effort:
+    a stop/disable failure (e.g. unit was already inactive or unknown to
+    systemd) does not block removing the file, since removing the
+    persistence artifact is the actual goal.
+    """
+    if OS != 'Linux':
+        return 'Not Linux', 1
+
+    p = Path(fix_target)
+    if not p.is_file() or p.is_symlink():
+        return 'No longer a regular file (skipped)', 0
+
+    unit_name = p.name  # e.g. 'cyber-clean.service' — argv-only from here on
+    messages = []
+
+    for verb in ('stop', 'disable'):
+        try:
+            subprocess.run(['systemctl', '--user', verb, unit_name],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass  # best-effort — unit may already be stopped/not-loaded
+
+    try:
+        os.remove(p)
+        messages.append(f'Removed {p}')
+    except FileNotFoundError:
+        messages.append('Already gone')
+    except PermissionError:
+        return 'Permission denied removing unit file', 1
+    except OSError as e:
+        return f'Delete failed: {e}', 1
+
+    try:
+        subprocess.run(['systemctl', '--user', 'daemon-reload'],
+                       capture_output=True, text=True, timeout=10)
+        messages.append('Reloaded systemd --user daemon')
+    except Exception:
+        pass  # non-fatal — file removal already succeeded
+
+    return '; '.join(messages), 0
+
+
+def fix_shell_rc_line(fix_target: str) -> tuple:
+    """
+    Remove exactly one malicious line from a shell startup file, leaving
+    the rest of the user's configuration untouched.
+
+    fix_target is 'path\\x00line_number\\x00exact_line_text', produced by
+    _scan_shell_rc_files(). Before writing anything back, this re-reads
+    the file and verifies the line at that line number STILL matches the
+    exact text captured at scan time — if it doesn't (the file changed,
+    was regenerated, or line numbers shifted because the user edited it
+    between the scan and clicking Auto-Fix), this refuses rather than
+    guessing and potentially deleting the wrong line. This mirrors the
+    TOCTOU re-check the privileged helper already does server-side for
+    fix-suid/fix-writable (see run_fix_action() docstring above) — here
+    it's done client-side because rc-file edits for the user's own home
+    directory don't need to cross the privilege boundary at all.
+
+    For system-wide files (/etc/bash.bashrc, /etc/profile, /etc/zsh/zshrc)
+    a regular user has no write permission, so the edit is delegated to
+    the privileged helper via a dedicated stdin-based action instead of
+    ever building a shell command with the line content in it — the line
+    text is attacker-controlled and must never touch a shell parser (same
+    threat model documented at the top of this file for fix-suid/
+    fix-writable/remove-file).
+
+    Returns (message: str, returncode: int) — 0 on success.
+    """
+    parts = fix_target.split('\x00')
+    if len(parts) != 3:
+        return 'Malformed fix target', 1
+    path_str, lineno_str, expected_line = parts
+    try:
+        lineno = int(lineno_str)
+    except ValueError:
+        return 'Malformed line number', 1
+
+    p = Path(path_str)
+    try:
+        if not p.is_file() or p.is_symlink():
+            return 'No longer a regular file (skipped)', 0
+        lines = p.read_text(errors='ignore').splitlines(keepends=True)
+    except (PermissionError, OSError) as e:
+        return f'Cannot read file: {e}', 1
+
+    if lineno < 1 or lineno > len(lines):
+        return 'Line number out of range — file changed since scan, skipped', 1
+
+    # TOCTOU re-check: does the target line still match what we scanned?
+    # .rstrip('\n') so trailing-newline differences don't cause a false
+    # mismatch on the last line of a file.
+    actual_line = lines[lineno - 1].rstrip('\n')
+    if actual_line != expected_line:
+        return 'File changed since scan — line no longer matches, skipped', 1
+
+    new_lines = lines[:lineno - 1] + lines[lineno:]
+
+    # ── System-wide file: declined, not auto-fixed ──────────────────────
+    # /etc/bash.bashrc, /etc/profile, /etc/zsh/zshrc affect every user on
+    # the machine. Auto-fixing these would require piping a full
+    # replacement file through the privileged helper as root — a much
+    # larger blast radius than the single-file deletes fix-suid/
+    # fix-writable/remove-file already perform, since a truncated or
+    # corrupted transfer here would break shell startup for every account
+    # on the box, not just the current user. There is also no existing
+    # helper action for this (install.sh's helper only whitelists the
+    # actions in FIX_ACTION_BATCHABLE plus a handful of others — adding a
+    # whole-file-overwrite action there is a separate, deliberate change,
+    # not something to bolt on silently here). The finding is still
+    # reported at full severity; the user removes the line manually.
+    system_wide = str(p) in (
+        '/etc/bash.bashrc', '/etc/profile', '/etc/zsh/zshrc',
+    )
+    if system_wide:
+        return (f'System-wide file — not auto-fixed (affects all users). '
+                f'Manually remove line {lineno} from {p}: {expected_line.strip()[:80]}'), 1
+
+    # ── User-owned file: direct write, no privilege needed ──────────────
+    try:
+        p.write_text(''.join(new_lines), encoding='utf-8')
+        return f'Removed line {lineno} from {p}', 0
+    except PermissionError:
+        return 'Permission denied', 1
+    except OSError as e:
+        return f'Write failed: {e}', 1
+
+
 def run_fix_action(action: str, targets: List[str], timeout: int = 30) -> tuple:
     """
     Execute a batched, injection-proof fix action via the privileged helper.
@@ -1225,7 +1374,7 @@ class SecurityScanner:
     # all (several minimal Arch/Void setups don't ship one by default).
     def _scan_shell_rc_files(self, log_cb):
         log_cb('', 'info')
-        log_cb('◆ Scanning shell startup files for injected commands...', 'info')
+        log_cb('◆ Đang quét file khởi động shell tìm lệnh chèn...', 'info')
         home = Path.home()
         rc_files = [
             home / '.bashrc', home / '.bash_profile', home / '.bash_login',
@@ -1243,24 +1392,57 @@ class SecurityScanner:
             try:
                 if not f.is_file():
                     continue
-                txt = f.read_text(errors='ignore')
-                for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
-                    if re.search(pattern, txt, re.I):
-                        self.results.append(ScanResult(
-                            severity='critical', category='persistence', path=str(f),
-                            detail=f'Shell startup file backdoor: {desc} in {f.name}',
-                            reasons=[f'Pattern matched in {f}', desc,
-                                     'Runs on every new interactive shell'],
-                        ))
-                        log_cb(f'  ⛔  Shell RC backdoor [{desc}]: {f}', 'err')
-                        found += 1
+                lines = f.read_text(errors='ignore').splitlines()
+                # Line-by-line (not whole-text) so we can capture exactly
+                # which line to remove for a surgical fix — deleting the
+                # whole rc file is not acceptable, it would wipe the
+                # user's entire shell configuration along with the one
+                # malicious line.
+                for lineno, line in enumerate(lines, start=1):
+                    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+                        if re.search(pattern, line, re.I):
+                            # NUL-separated structured target, same pattern
+                            # as fix_autorun_entry()'s registry fix_target:
+                            # path \0 line_number \0 exact_line_text. The
+                            # exact line text is re-verified by the fixer
+                            # immediately before editing (TOCTOU guard —
+                            # the file could have changed between scan
+                            # time and the user clicking Auto-Fix).
+                            fix_tgt = '\x00'.join([str(f), str(lineno), line])
+                            # System-wide files (/etc/...) are reported but
+                            # not auto-fixed — see fix_shell_rc_line()'s
+                            # docstring for why. can_fix reflects that
+                            # honestly rather than offering a fix button
+                            # that will always decline when clicked.
+                            is_system_wide = str(f) in (
+                                '/etc/bash.bashrc', '/etc/profile', '/etc/zsh/zshrc',
+                            )
+                            extra_reason = (['System-wide file — remove manually, affects all users']
+                                            if is_system_wide else [])
+                            self.results.append(ScanResult(
+                                severity='critical', category='persistence', path=str(f),
+                                detail=f'Shell startup file backdoor: {desc} in {f.name}:{lineno}',
+                                reasons=[f'Line {lineno}: {line.strip()[:100]}', desc,
+                                         'Runs on every new interactive shell'] + extra_reason,
+                                can_fix=not is_system_wide,
+                                fix_action='fix-shell-rc' if not is_system_wide else '',
+                                fix_target=fix_tgt if not is_system_wide else '',
+                            ))
+                            log_cb(f'  ⛔  Shell RC backdoor [{desc}]: {f}:{lineno}', 'err')
+                            if is_system_wide:
+                                log_cb(f'     Tự sửa thủ công — file hệ thống dùng chung, ảnh hưởng mọi user', 'dim')
+                            else:
+                                log_cb(f'     TỰ SỬA: chỉ xóa dòng này, giữ nguyên phần còn lại của {f.name} (có thể fix)', 'dim')
+                            found += 1
+                            break  # one pattern match is enough per line
+
             except (PermissionError, OSError):
                 log_cb(f'  ~ {f}: permission denied', 'dim')
                 partial = True
 
         if found == 0:
             suffix = ' (partial — some files unreadable)' if partial else ''
-            self._ok(log_cb, f'No shell startup file backdoors found{suffix}')
+            self._ok(log_cb, f'Không phát hiện backdoor trong file khởi động shell{suffix}')
 
     # ══════════════════════════════════════════════════════
     # TIER 1 — XDG AUTOSTART ENTRIES
@@ -1273,7 +1455,7 @@ class SecurityScanner:
     # was the missing Linux-side counterpart.
     def _scan_xdg_autostart(self, log_cb):
         log_cb('', 'info')
-        log_cb('◆ Scanning XDG autostart entries...', 'info')
+        log_cb('◆ Đang quét mục tự khởi động XDG (autostart)...', 'info')
         autostart_dirs = [
             Path.home() / '.config' / 'autostart',
             Path('/etc/xdg/autostart'),
@@ -1310,8 +1492,10 @@ class SecurityScanner:
                                 detail=f'Autostart backdoor: {desc} in {f.name}',
                                 reasons=[f'Exec= line: {exec_line[:100]}', desc,
                                          'Runs automatically on every graphical login'],
+                                can_fix=True, fix_action='remove-file', fix_target=str(f),
                             ))
                             log_cb(f'  ⛔  Autostart backdoor [{desc}]: {f}', 'err')
+                            log_cb(f'     TỰ SỬA: xóa {f.name} (có thể fix)', 'dim')
                             found += 1
                             break
 
@@ -1327,8 +1511,10 @@ class SecurityScanner:
                             detail=f'Autostart entry runs from temp directory: {f.name}',
                             reasons=[f'Exec= line: {exec_line[:100]}',
                                      'Autostart programs should not live in /tmp'],
+                            can_fix=True, fix_action='remove-file', fix_target=str(f),
                         ))
                         log_cb(f'  ⚠  Autostart from temp dir: {f}', 'warn')
+                        log_cb(f'     TỰ SỬA: xóa {f.name} (có thể fix)', 'dim')
                         found += 1
             except PermissionError:
                 log_cb(f'  ~ {d}: permission denied', 'dim')
@@ -1336,7 +1522,7 @@ class SecurityScanner:
 
         if found == 0:
             suffix = ' (partial — some entries unreadable)' if partial else ''
-            self._ok(log_cb, f'No suspicious autostart entries found{suffix}')
+            self._ok(log_cb, f'Không có mục autostart đáng ngờ{suffix}')
 
     # ══════════════════════════════════════════════════════
     # TIER 1 — SYSTEMD USER UNITS (--user timers/services)
@@ -1356,7 +1542,7 @@ class SecurityScanner:
     #     scan is directly meant to catch) can't crash the scanner.
     def _scan_systemd_user_units(self, log_cb):
         log_cb('', 'info')
-        log_cb('◆ Scanning systemd --user units for backdoors...', 'info')
+        log_cb('◆ Đang quét systemd --user unit tìm backdoor...', 'info')
         unit_dirs = [
             Path.home() / '.config' / 'systemd' / 'user',
             Path('/etc/systemd/user'),
@@ -1393,8 +1579,10 @@ class SecurityScanner:
                                 detail=f'systemd --user unit backdoor: {desc} in {f.name}',
                                 reasons=[f'ExecStart= line: {exec_start[:100]}', desc,
                                          'Persists across reboots, invisible to crontab -l'],
+                                can_fix=True, fix_action='disable-systemd-unit', fix_target=str(f),
                             ))
                             log_cb(f'  ⛔  systemd unit backdoor [{desc}]: {f}', 'err')
+                            log_cb(f'     TỰ SỬA: tắt + xóa {f.name} (có thể fix)', 'dim')
                             found += 1
                             break
 
@@ -1405,8 +1593,10 @@ class SecurityScanner:
                             detail=f'systemd --user unit runs from temp directory: {f.name}',
                             reasons=[f'ExecStart= line: {exec_start[:100]}',
                                      'User units should not execute from /tmp'],
+                            can_fix=True, fix_action='disable-systemd-unit', fix_target=str(f),
                         ))
                         log_cb(f'  ⚠  systemd unit from temp dir: {f}', 'warn')
+                        log_cb(f'     TỰ SỬA: tắt + xóa {f.name} (có thể fix)', 'dim')
                         found += 1
             except PermissionError:
                 log_cb(f'  ~ {d}: permission denied', 'dim')
@@ -1414,7 +1604,7 @@ class SecurityScanner:
 
         if found == 0:
             suffix = ' (partial — some units unreadable)' if partial else ''
-            self._ok(log_cb, f'No suspicious systemd --user units found{suffix}')
+            self._ok(log_cb, f'Không có systemd --user unit đáng ngờ{suffix}')
 
     # ══════════════════════════════════════════════════════
     # SUSPICIOUS FILES  (smart context filtering)

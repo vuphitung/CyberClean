@@ -730,27 +730,37 @@ class CleanWorker(QThread):
             # ── FAST PATH: dry-run uses parallel estimate if available ────────
             # estimate_parallel() scans all dirs concurrently → 3-5x faster.
             if self.dry and hasattr(CLEANER, 'estimate_parallel'):
+                # estimate_parallel() scans every target concurrently on its
+                # own worker thread (see base_cleaner.py) — this is what
+                # actually makes dry-run/Smart Clean fast, especially on
+                # Windows where several targets (Recycle Bin via
+                # PowerShell/COM, WinSxS via DISM, per-profile browser
+                # caches) are each slow individually and used to run one
+                # after another instead of overlapping.
                 self.progress.emit(5, 'Scanning...')
+
+                def _on_scan_progress(pct, label):
+                    self.progress.emit(5 + int(pct * 0.90), f'Đang quét {label}...')
+
                 try:
-                    estimates = CLEANER.estimate_parallel(self.targets)
+                    results_map = CLEANER.estimate_parallel(
+                        self.targets, progress_cb=_on_scan_progress
+                    )
                 except Exception:
-                    estimates = {}
+                    results_map = {}
+
                 for i, tid in enumerate(self.targets):
                     if self._stop_requested:
                         self.log.emit('  ⚠  Interrupted', 'warn')
                         break
                     label = tid.replace('_', ' ').upper()
-                    pct = int(5 + ((i + 1) / steps) * 90)
-                    self.progress.emit(pct, label)
-                    freed = estimates.get(tid, 0)
-                    # Still call clean(dry=True) for CleanResult + error reporting
-                    # but check cache first to avoid redundant disk scan
-                    if hasattr(CLEANER, '_cache_get'):
-                        cached = CLEANER._cache_get(tid)
-                        result = cached if cached is not None else CLEANER.clean(tid, dry=True)
-                        if cached is None:
-                            CLEANER._cache_set(tid, result)
-                    else:
+                    # Results already computed (and cached) by
+                    # estimate_parallel — no second scan needed here.
+                    result = results_map.get(tid)
+                    if result is None:
+                        # Target wasn't in the map for some reason (e.g.
+                        # estimate_parallel itself raised) — fall back to a
+                        # direct scan so the user still gets a result.
                         result = CLEANER.clean(tid, dry=True)
                     total_freed += result.freed_bytes
                     rollback    += result.rollback

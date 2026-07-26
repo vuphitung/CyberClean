@@ -1956,12 +1956,16 @@ class CyberCleanApp(QMainWindow):
         # control (validated ints: a PID, a TCP port) still use the plain
         # shell_fixes path below.
         try:
-            from core.scanner import run_fix_action, fix_autorun_entry, remove_file_windows
+            from core.scanner import (run_fix_action, fix_autorun_entry, remove_file_windows,
+                                       disable_systemd_user_unit, fix_shell_rc_line)
         except ImportError:
-            from scanner import run_fix_action, fix_autorun_entry, remove_file_windows
+            from scanner import (run_fix_action, fix_autorun_entry, remove_file_windows,
+                                  disable_systemd_user_unit, fix_shell_rc_line)
         batched: dict = {}   # action -> [targets]  (Linux helper actions)
         autorun_fixes  = []
         winfile_fixes  = []  # 'remove-file' on Windows — no sudoers helper exists there
+        systemd_fixes  = []  # 'disable-systemd-unit' — user-scope, no root needed
+        shellrc_fixes  = []  # 'fix-shell-rc' — direct file write, no root needed
         shell_fixes    = []
 
         for r in to_fix:
@@ -1972,6 +1976,17 @@ class CyberCleanApp(QMainWindow):
                 # sudoers mechanism) — route to the native os.remove() path
                 # instead of the Linux-only stdin/helper batch below.
                 winfile_fixes.append(r)
+            elif r.fix_action == 'disable-systemd-unit':
+                # systemd --user units are per-user scope — systemctl
+                # --user needs no root, so this must NOT fall into the
+                # sudo-helper batched path below (it isn't in
+                # FIX_ACTION_BATCHABLE and doesn't need to be).
+                systemd_fixes.append(r)
+            elif r.fix_action == 'fix-shell-rc':
+                # Same reasoning as disable-systemd-unit: a direct,
+                # unprivileged file write (or a declined system-wide
+                # case), not a sudo-helper batch action.
+                shellrc_fixes.append(r)
             elif r.fix_action:
                 batched.setdefault(r.fix_action, []).append(r)
             elif r.fix_cmd:
@@ -2013,6 +2028,36 @@ class CyberCleanApp(QMainWindow):
         for r in winfile_fixes:
             try:
                 out, code = remove_file_windows(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 2c) systemd --user unit persistence — systemctl --user
+        #     stop+disable, then os.remove(), then daemon-reload. No sudo,
+        #     no shell string built from the unit filename.
+        for r in systemd_fixes:
+            try:
+                out, code = disable_systemd_user_unit(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 2d) Shell rc-file line removal — surgical single-line edit via
+        #     direct file read/write, re-verifying the line still matches
+        #     before touching the file (TOCTOU guard). System-wide files
+        #     (/etc/...) are intentionally declined here rather than
+        #     auto-fixed — see fix_shell_rc_line()'s docstring.
+        for r in shellrc_fixes:
+            try:
+                out, code = fix_shell_rc_line(r.fix_target)
                 ok = (code == 0)
                 self._on_opt_log(
                     f'  {"✓" if ok else "✗"}  {r.path}: {out}',

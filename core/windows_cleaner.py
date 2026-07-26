@@ -58,6 +58,45 @@ def run_win(cmd, timeout=30):
         return str(e), 1
 
 
+def run_powershell(ps_script: str, timeout: int = 30):
+    """
+    Run a PowerShell script WITHOUT going through cmd.exe (shell=False,
+    argv list). Safer than building `f'PowerShell -Command "...{path}..."'`
+    strings and passing them through run_win(shell=True): that approach
+    means a path gets parsed twice (once by cmd.exe, once by PowerShell)
+    and any embedded path segment isn't escaped for either layer, so a
+    filename/folder containing a single quote, backtick, or `&`/`|` can
+    break the command or, in the worst case, get interpreted as a second
+    command. Here PowerShell is invoked directly as the process, so there's
+    only one layer of parsing to worry about (PowerShell's own quoting).
+    """
+    try:
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
+            shell=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, creationflags=_NO_WIN,
+            encoding='utf-8', errors='replace',
+        )
+        return r.stdout.strip(), r.returncode
+    except subprocess.TimeoutExpired:
+        return f'timeout after {timeout}s', 1
+    except Exception as e:
+        return str(e), 1
+
+
+def _ps_literal_path(path) -> str:
+    """
+    Escape a filesystem path for use inside a PowerShell single-quoted
+    literal string. In PowerShell, a single quote inside a '...' literal is
+    escaped by doubling it ('' ), same rule as SQL — NOT a backslash.
+    Using this instead of raw f-string interpolation is what makes paths
+    with apostrophes (e.g. "C:\\Users\\O'Brien\\...") or stray `$`, `&`,
+    backtick characters safe to embed.
+    """
+    return str(path).replace("'", "''")
+
+
 def is_admin():
     try:
         import ctypes
@@ -165,6 +204,14 @@ def _chromium_profile_cache_dirs(base: Path, cache_subfolders: list) -> list:
 
 class WindowsCleaner(BaseCleaner):
 
+    # DISM component-store analysis (win_winsxs) can take 10-40s on its own
+    # and the store barely changes minute to minute, so give it a much
+    # longer cache TTL than the 60s default — no point re-running DISM every
+    # time the user re-opens Smart Clean within the same session.
+    TTL_OVERRIDES = {
+        'win_winsxs': 900,   # 15 min
+    }
+
     def get_targets(self):
         return [
             CleanTarget('win_temp',         'Windows Temp',
@@ -248,6 +295,44 @@ class WindowsCleaner(BaseCleaner):
         return r
 
     # ── Temp ──────────────────────────────────────────────────
+    _TEMP_SKIP_DIR_PREFIXES = (
+        'scoped_dir', 'chrome_', 'msedge_', 'discord',
+        'vscode', 'electron', 'squirrel',
+        'tmp', 'clr', 'msi', 'msp',
+    )
+    _TEMP_SKIP_EXTENSIONS = {'.lnk', '.lock', '.msi'}
+
+    @classmethod
+    def _temp_item_should_skip(cls, item, now: float, free_bytes) -> bool:
+        """
+        Single source of truth for "should this %TEMP% item be left alone?" —
+        used by BOTH the dry-run estimate and the real clean. Previously this
+        logic was duplicated in two places and had drifted: the real-clean
+        branch had a low-disk-space guard (keep files <2 days old when the
+        drive has <2GB free, since Chrome/Discord update-extraction writes
+        there) that the dry-run branch didn't apply. That meant the
+        estimated size shown to the user could be *higher* than what a real
+        clean actually freed whenever the disk was nearly full — confusing
+        and makes the app look untrustworthy. Now both paths call this same
+        function, so the number shown always matches the number delivered.
+        """
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            return True
+        age_secs = now - mtime
+        if age_secs < 86400:
+            return True
+        # Disk nearly full: Chrome/Discord etc. extract updates into %TEMP%.
+        # Only touch files older than 2 days in that case.
+        if free_bytes is not None and free_bytes < 2 * 1024**3 and age_secs < 172800:
+            return True
+        if item.is_dir() and item.name.lower().startswith(cls._TEMP_SKIP_DIR_PREFIXES):
+            return True
+        if item.is_file() and item.suffix.lower() in cls._TEMP_SKIP_EXTENSIONS:
+            return True
+        return False
+
     def _win_temp(self, dry):
         r = CleanResult('win_temp')
         dirs = list({
@@ -258,13 +343,6 @@ class WindowsCleaner(BaseCleaner):
         })
         now = time.time()
 
-        SKIP_DIR_PREFIXES = (
-            'scoped_dir', 'chrome_', 'msedge_', 'discord',
-            'vscode', 'electron', 'squirrel',
-            'tmp', 'clr', 'msi', 'msp',
-        )
-        SKIP_EXTENSIONS = {'.lnk', '.lock', '.msi'}
-
         for d in dirs:
             if not d.exists():
                 continue
@@ -272,50 +350,29 @@ class WindowsCleaner(BaseCleaner):
             if safe_path.rstrip('/') in ('c:', 'c:/', 'c:/windows', 'c:/users'):
                 continue
 
-            size_before = _dir_size_safe(d)
-            if not dry:
-                for item in list(d.iterdir()):
-                    try:
-                        mtime = item.stat().st_mtime
-                        age_secs = now - mtime
-                        if age_secs < 86400:
-                            continue
-                        # FIX: khi ổ C gần đầy (< 2GB free), Discord/Chrome
-                        # đang extract update vào %TEMP%. Chỉ xóa file > 2 ngày.
-                        try:
-                            import shutil as _sh
-                            _free_bytes = _sh.disk_usage(str(d.anchor)).free
-                            if _free_bytes < 2 * 1024**3 and age_secs < 172800:
-                                continue  # disk critical: giữ file < 2 ngày
-                        except OSError:
-                            pass
-                        if item.is_dir() and item.name.lower().startswith(SKIP_DIR_PREFIXES):
-                            continue
-                        if item.is_file() and item.suffix.lower() in SKIP_EXTENSIONS:
-                            continue
-                        if item.is_file() and _is_locked_win(item):
-                            continue
-                        sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                        if item.is_dir():
-                            shutil.rmtree(item, ignore_errors=True)
-                        else:
-                            item.unlink(missing_ok=True)
-                        r.freed_bytes   += sz
-                        r.files_removed += 1
-                    except (PermissionError, OSError):
-                        pass
-            else:
-                for item in d.iterdir():
-                    try:
-                        if (now - item.stat().st_mtime) < 86400:
-                            continue
-                        if item.is_dir() and item.name.lower().startswith(SKIP_DIR_PREFIXES):
-                            continue
-                        if item.is_file() and item.suffix.lower() in SKIP_EXTENSIONS:
-                            continue
+            try:
+                free_bytes = shutil.disk_usage(str(d.anchor)).free
+            except OSError:
+                free_bytes = None
+
+            for item in list(d.iterdir()):
+                try:
+                    if self._temp_item_should_skip(item, now, free_bytes):
+                        continue
+                    if dry:
                         r.freed_bytes += _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                    except (OSError, PermissionError):
-                        pass
+                        continue
+                    if item.is_file() and _is_locked_win(item):
+                        continue
+                    sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+                    r.freed_bytes   += sz
+                    r.files_removed += 1
+                except (PermissionError, OSError):
+                    pass
         return r
 
     # ── Prefetch ──────────────────────────────────────────────
@@ -951,10 +1008,12 @@ class WindowsCleaner(BaseCleaner):
                             except OSError:
                                 pass
                         else:
-                            # Attempt via takeown + del (PowerShell)
-                            run_win(
-                                f'PowerShell -NoProfile -Command "Remove-Item -Force '
-                                f'-LiteralPath \'{f}\' -EA SilentlyContinue" 2>$null'
+                            # Attempt via PowerShell — path is escaped for
+                            # PowerShell's own quoting rules (see
+                            # _ps_literal_path) and run directly (shell=False),
+                            # not built as a raw cmd.exe string.
+                            run_powershell(
+                                f"Remove-Item -Force -LiteralPath '{_ps_literal_path(f)}' -EA SilentlyContinue"
                             )
             except OSError:
                 pass

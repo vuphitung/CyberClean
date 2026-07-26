@@ -230,7 +230,12 @@ _KNOWN_GAME_PROCS = {
     "rdr2", "witcher3", "witcher2", "witcher",
     "overwatch", "overwatch2", "diablo4",
     # Roblox Windows
-    "robloxplayerbeta", "roblox", "robloxplayerlauncher", "robloxcrashhandler",
+    # NOTE: robloxcrashhandler intentionally excluded — see _NEVER_GAME.
+    # It is evidence the game process CRASHED, not evidence a game is
+    # running; trusting it by name (no CPU gate) meant a lingering crash
+    # dialog/report-uploader kept the app in "game detected" state and
+    # kept applying game-priority boost to a non-game process.
+    "robloxplayerbeta", "roblox", "robloxplayerlauncher",
 }
 
 # Generic sandbox / wrapper / compatibility-layer processes. These run
@@ -314,6 +319,10 @@ _NEVER_GAME = {
     "bwrap", "xdg-dbus-proxy", "dbus-daemon", "dbus-broker",
     "pressure-vessel-wrap", "pressure-vessel-launcher",
     "bash", "sh", "env", "flatpak-portal", "wineserver",
+    # Crash handlers / report uploaders — evidence the game CRASHED,
+    # never evidence a game is actively running. Must be blocked in
+    # every tier, not just excluded from the trusted-name list.
+    "robloxcrashhandler",
 } | _KNOWN_HEAVY_NON_GAMES
 
 _GAME_CPU_THRESHOLD = 15.0   # % CPU — games usually use >15% when active
@@ -1098,6 +1107,24 @@ def _run(cmd, timeout=30):
         return str(e), 1
 
 
+def _run_no_shell(argv: list, stdin_data: str = None, timeout=30):
+    """
+    Same purpose as _run() but never touches a shell — argv is a fixed
+    list (no untrusted string is interpolated into a command line), and
+    any value that needs to reach the target (e.g. a sysfs value for
+    `tee`) is sent over stdin instead of through `echo X | ...`. Use this
+    instead of _run() with an f-string whenever a value — even one that
+    is expected to always be a small fixed word, like a parsed sysfs
+    setting — is being placed into a command.
+    """
+    try:
+        r = subprocess.run(argv, input=stdin_data, capture_output=True,
+                           text=True, timeout=timeout)
+        return r.stdout.strip(), r.returncode
+    except Exception as e:
+        return str(e), 1
+
+
 def _run_helper(action, timeout=30):
     if IS_WINDOWS:
         return _run(action, timeout)
@@ -1378,8 +1405,9 @@ def _kill_runaway_widgets(log) -> int:
     Strategy:
     1. Find processes whose name matches _WIDGET_SUSPECTS
     2. Warm up cpu_percent (0.2s) — short enough to not delay game mode
-    3. Kill only if STILL above threshold after warm-up (avoids killing
-       legitimate startup bursts)
+    3. Kill only if STILL above threshold on TWO consecutive samples
+       0.2s apart (avoids killing legitimate startup/reload bursts —
+       see fix note below)
     4. SIGKILL not SIGTERM — a looping process ignores SIGTERM
 
     Returns count of processes killed.
@@ -1407,13 +1435,36 @@ def _kill_runaway_widgets(log) -> int:
     import time as _t
     _t.sleep(0.2)
 
-    # Pass 2: check actual CPU and kill if still runaway
+    # Pass 2: first real reading. A single sample above threshold is not
+    # enough to conclude "runaway" — normal events like a config reload
+    # (waybar) or a workspace-switch redraw (conky) legitimately spike
+    # CPU for a couple hundred ms and would otherwise get killed right as
+    # the user starts their game, silently losing their status bar/widget
+    # until they notice and restart it manually.
+    still_high = []
     for p in candidates:
+        try:
+            cpu = p.cpu_percent(interval=0)
+            if cpu > _WIDGET_CPU_THRESHOLD:
+                still_high.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    if not still_high:
+        return 0
+
+    # FIX (important): require a SECOND consecutive high reading before
+    # killing. A genuine infinite loop stays pegged across both samples;
+    # a legitimate startup/reload burst naturally drops back down by now.
+    _t.sleep(0.2)
+
+    # Pass 3: confirm and kill only processes still above threshold
+    for p in still_high:
         try:
             cpu = p.cpu_percent(interval=0)
             nm  = p.name()
             if cpu > _WIDGET_CPU_THRESHOLD:
-                # Double-check: read /proc/stat to confirm it's not a transient spike
+                # Double-check: not already a zombie
                 try:
                     status = p.status()
                     if status == psutil.STATUS_ZOMBIE:
@@ -1426,16 +1477,10 @@ def _kill_runaway_widgets(log) -> int:
                 # True runaway loop — SIGKILL (SIGTERM is ignored by looping procs)
                 p.kill()
                 killed += 1
-                log(f"  ✕ Killed runaway widget: {nm} (pid {p.pid}, {cpu:.0f}% CPU)", "warn")
+                log(f"  ✕ Killed runaway widget: {nm} (pid {p.pid}, {cpu:.0f}% CPU sustained)", "warn")
                 log(f"    → Restart {nm} manually after gaming session", "ok")
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-
-    if killed == 0 and candidates:
-        # Found widget processes but none were runaway — log quietly
-        names = [p.name() for p in candidates if not p.status() == psutil.STATUS_ZOMBIE
-                 if True]
-        pass  # Don't spam log with "all good" for every widget
 
     return killed
 
@@ -2363,9 +2408,32 @@ def _restore_gamedvr(orig_val: Optional[int], log):
 # install.sh should add: @gamegroup - rtprio 1
 # Fallback: nice(-10) if no rt permission.
 
+# Max number of threads per game process to promote to SCHED_FIFO.
+# FIX (critical): the old code promoted EVERY thread of the game
+# (often 30-100+ threads on modern engines: audio, network, asset
+# streaming, physics, worker pools...) to SCHED_FIFO. SCHED_FIFO
+# threads can ONLY be pre-empted by a higher-priority SCHED_FIFO/RR
+# thread or by voluntarily yielding/blocking. If even ONE of those
+# many threads ever spins without blocking (a busy-wait, a bug, a
+# lock contention loop — common in game engines under load), the
+# kernel is *required* to keep running it forever ahead of every
+# normal-priority thread on that core, including input drivers, audio
+# mixing, and the GPU driver's submission thread. Symptom reported by
+# users: CPU pegged, machine hot, but gameplay feels *worse* — massive
+# stutter — because the desktop's own rendering/input pipeline is
+# being starved by the game's own background threads, not helped by
+# them running "real-time".
+# Limiting to the few busiest threads (main thread + render thread,
+# which are what actually needs to avoid being pre-empted at the
+# frame-deadline level) keeps the intended benefit while removing the
+# system-freeze risk from incidental worker threads.
+_MAX_RT_THREADS_PER_PROCESS = 2
+
+
 def _set_realtime_scheduling(game_pids: list, log, saved: dict):
     """
-    Apply SCHED_FIFO / high nice to game process and its render threads.
+    Apply SCHED_FIFO to only the busiest thread(s) of each game process
+    (see _MAX_RT_THREADS_PER_PROCESS for why not all threads).
     Stores originals in saved['rt_sched'] for restore.
     """
     if not IS_LINUX:
@@ -2392,12 +2460,24 @@ def _set_realtime_scheduling(game_pids: list, log, saved: dict):
     used_rt = False
 
     for pid in game_pids:
-        # Also grab all threads of the process for full effect
+        # Rank this process's threads by CPU usage and only promote the
+        # busiest few, instead of every thread unconditionally.
         tids = [pid]
         try:
             import os as _os
             task_dir = _os.listdir(f"/proc/{pid}/task")
-            tids = [int(t) for t in task_dir]
+            all_tids = [int(t) for t in task_dir]
+            if HAS_PSUTIL and len(all_tids) > _MAX_RT_THREADS_PER_PROCESS:
+                try:
+                    proc = psutil.Process(pid)
+                    threads = proc.threads()   # [(id, user_time, system_time), ...]
+                    ranked = sorted(threads, key=lambda t: t.user_time + t.system_time,
+                                     reverse=True)
+                    tids = [t.id for t in ranked[:_MAX_RT_THREADS_PER_PROCESS]] or [pid]
+                except Exception:
+                    tids = all_tids[:_MAX_RT_THREADS_PER_PROCESS]
+            else:
+                tids = all_tids
         except (OSError, ValueError):
             pass
 
@@ -2426,7 +2506,8 @@ def _set_realtime_scheduling(game_pids: list, log, saved: dict):
                 pass
 
     if used_rt:
-        log(f"  + Real-time scheduling: SCHED_FIFO/1 applied to {len(rt_entries)} threads — game never preempted", "ok")
+        log(f"  + Real-time scheduling: SCHED_FIFO/1 applied to {len(rt_entries)} thread(s) "
+            f"(top {_MAX_RT_THREADS_PER_PROCESS}/process — never the full thread pool)", "ok")
     elif rt_entries:
         log("  + Game priority: nice(-10) applied (no rt permission — install.sh adds rtprio)", "warn")
     else:
@@ -2564,13 +2645,16 @@ def _detect_performance_cores() -> list:
     cpu_perf = {}   # {cpu_id: highest_perf_value}
     cpu_path = Path("/sys/devices/system/cpu")
     try:
+        is_arm = platform.machine().lower().startswith(("arm", "aarch"))
         for cpu_dir in sorted(cpu_path.glob("cpu[0-9]*")):
             cpu_id_str = cpu_dir.name[3:]
             try:
                 cpu_id = int(cpu_id_str)
             except ValueError:
                 continue
-            # Method 1: ACPI CPPC (Intel 12th gen+ / AMD Zen 4)
+            # Method 1: ACPI CPPC (Intel 12th gen+ / AMD Zen 4) — reliable
+            # signal on x86 hybrid CPUs, present when the kernel actually
+            # supports the hybrid topology.
             cppc_file = cpu_dir / "acpi_cppc/highest_perf"
             if cppc_file.exists():
                 try:
@@ -2578,14 +2662,24 @@ def _detect_performance_cores() -> list:
                     continue
                 except (OSError, ValueError):
                     pass
-            # Method 2: cpu_capacity (ARM big.LITTLE)
-            cap_file = cpu_dir / "cpu_capacity"
-            if cap_file.exists():
-                try:
-                    cpu_perf[cpu_id] = int(cap_file.read_text().strip())
-                    continue
-                except (OSError, ValueError):
-                    pass
+            # Method 2: cpu_capacity — ONLY trust this on real ARM
+            # big.LITTLE hardware. FIX (critical): this file also exists
+            # on some x86 hybrid kernels that haven't fully wired up
+            # CPPC, but its values there are not reliably P-core-vs-E-core
+            # — on an unpatched kernel it can rank E-cores above P-cores.
+            # If that happens, the game gets pinned to the WEAKER cores
+            # and driven near 100% utilization there: exactly the reported
+            # symptom of "boost enabled but game is hotter and choppier".
+            # Since ACPI CPPC (Method 1) already covers the real x86 hybrid
+            # case, we only need this fallback for genuine ARM SoCs.
+            if is_arm:
+                cap_file = cpu_dir / "cpu_capacity"
+                if cap_file.exists():
+                    try:
+                        cpu_perf[cpu_id] = int(cap_file.read_text().strip())
+                        continue
+                    except (OSError, ValueError):
+                        pass
             # No hybrid info: assign equal weight
             cpu_perf[cpu_id] = 100
     except (OSError, PermissionError):
@@ -2605,6 +2699,16 @@ def _detect_performance_cores() -> list:
     # Hybrid: return only cores with max performance value
     max_perf = max(cpu_perf.values())
     p_cores = [cpu_id for cpu_id, perf in cpu_perf.items() if perf == max_perf]
+
+    # Sanity check: P-cores should be a genuine minority/majority split,
+    # never almost-empty. If detection is confused and returns e.g. just
+    # 1 core out of 16, pinning would cram every game thread onto that
+    # single core — worse than doing nothing. Bail out to "no pinning"
+    # rather than risk that.
+    if len(p_cores) < 2 or len(p_cores) > len(cpu_perf) - 1:
+        _PERF_CORES_CACHE = []
+        return []
+
     _PERF_CORES_CACHE = sorted(p_cores)
     return _PERF_CORES_CACHE
 
@@ -2722,8 +2826,8 @@ def _set_thp_game(game_pids: list, log, saved: dict):
                     thp_file.write_text("madvise\n")
                     log("  + THP: global mode → madvise (huge pages for opted-in processes)", "ok")
                 except PermissionError:
-                    _, code = _run(
-                        f"echo madvise | sudo -n tee {thp_file}", timeout=3
+                    _, code = _run_no_shell(
+                        ["sudo", "-n", "tee", str(thp_file)], stdin_data="madvise", timeout=3
                     )
                     if code == 0:
                         log("  + THP: madvise set via helper", "ok")
@@ -2744,7 +2848,7 @@ def _restore_thp(saved: dict, log):
     try:
         thp_file.write_text(orig + "\n")
     except PermissionError:
-        _run(f"echo {orig} | sudo -n tee {thp_file}", timeout=3)
+        _run_no_shell(["sudo", "-n", "tee", str(thp_file)], stdin_data=orig, timeout=3)
 
 
 def _set_gpu_performance(log, saved: dict):
@@ -3462,18 +3566,31 @@ def game_mode_on(log) -> dict:
             for game_pid, _ in running_games:
                 all_game_pids.append(game_pid)
 
-            # Windows: REALTIME priority class for game
+            # Windows: HIGH priority class for game.
+            # FIX (critical): REALTIME_PRIORITY_CLASS (0x100) sits ABOVE audio,
+            # input, and GPU driver worker threads in the Windows scheduler.
+            # If any game thread ever busy-loops or blocks briefly (extremely
+            # common — asset streaming, GC pause, network hitch), it starves
+            # mouse/keyboard input, WASAPI audio, and DWM composition system-wide.
+            # Symptom reported by users: CPU usage spikes, fans ramp, but FPS
+            # feels WORSE/stuttery rather than better — this is exactly that,
+            # because the "boost" was actively fighting the OS for scheduling
+            # slots the driver/input stack needs to run smoothly.
+            # HIGH_PRIORITY_CLASS (0x80) still beats every normal/background
+            # process for CPU contention, without pre-empting system-critical
+            # threads. This is also what Task Manager's "High" option uses,
+            # and what most legitimate game-boost tools use.
             import ctypes as _wct
             for pid in all_game_pids:
                 try:
                     PROCESS_ALL_ACCESS = 0x1F0FFF
-                    REALTIME_PRIORITY_CLASS = 0x00000100
+                    HIGH_PRIORITY_CLASS = 0x00000080
                     h = _wct.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
                     if h:
-                        _wct.windll.kernel32.SetPriorityClass(h, REALTIME_PRIORITY_CLASS)
+                        _wct.windll.kernel32.SetPriorityClass(h, HIGH_PRIORITY_CLASS)
                         _wct.windll.kernel32.CloseHandle(h)
-                        saved["game_priority"][pid] = "realtime"
-                        log(f"  ↑ Windows: game process set to REALTIME priority class", "ok")
+                        saved["game_priority"][pid] = "high"
+                        log(f"  ↑ Windows: game process set to HIGH priority class", "ok")
                 except Exception:
                     pass
 

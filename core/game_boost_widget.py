@@ -22,6 +22,18 @@ from PyQt6.QtWidgets import QTextEdit
 IS_LINUX   = platform.system() == "Linux"
 IS_WINDOWS = platform.system() == "Windows"
 
+# FIX: psutil is required (see requirements.txt) but several call sites
+# below did `import psutil as _psu` with no guard. If it's ever missing
+# (running from source without a full `pip install -r requirements.txt`,
+# or a PyInstaller build missing the hidden import), those call sites
+# would raise an unhandled ImportError straight into the Qt event loop —
+# crashing the whole app instead of just disabling the affected feature.
+try:
+    import psutil as _psutil_check  # noqa: F401
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 # ── Dùng design tokens từ ui_widgets ─────────────────────────
 try:
     from ui_widgets import C, MONO
@@ -377,15 +389,32 @@ class GpuMonitorThread(QThread):
             except ImportError: pass
 
         if IS_WINDOWS:
+            # Method 1: nvidia-smi — không phụ thuộc WMI performance counter class,
+            # đáng tin cậy hơn nhiều trên Windows 10 (class GPUEngine hay thiếu/rỗng)
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi",
+                     "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=3,
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                if r.returncode == 0 and r.stdout.strip():
+                    return int(float(r.stdout.strip().splitlines()[0].strip()))
+            except: pass
+
+            # Method 2: WMI Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine
+            # (thường chỉ hoạt động khi driver expose đúng performance counter;
+            # phổ biến hơn trên Win11, có thể thiếu/rỗng trên nhiều máy Win10)
             try:
                 r = subprocess.run(
                     ["powershell", "-NoProfile", "-Command",
                      "(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine"
+                     " -ErrorAction SilentlyContinue"
                      " | Measure-Object -Property UtilizationPercentage -Sum).Sum"],
                     capture_output=True, text=True, timeout=3,
                     creationflags=0x08000000)  # CREATE_NO_WINDOW — tránh nháy cửa sổ PowerShell mỗi 4s
-                if r.returncode == 0:
-                    return int(float(r.stdout.strip() or 0))
+                out = r.stdout.strip()
+                if r.returncode == 0 and out:
+                    return int(float(out))
             except: pass
         return -1
 
@@ -417,7 +446,7 @@ class GameWatcherThread(QThread):
     (psutil.pid_exists) — nếu toàn bộ PID của một lượt detect đã chết,
     phát signal game_lost để UI cập nhật lại đúng trạng thái.
     """
-    game_found = pyqtSignal(list, str)   # (pids, game_name)
+    game_found = pyqtSignal(list, str, list)   # (new_pids, game_name, all_known_pids)
     game_lost  = pyqtSignal()            # tất cả PID đã theo dõi đều đã chết
     log_sig    = pyqtSignal(str, str)
 
@@ -427,26 +456,65 @@ class GameWatcherThread(QThread):
         self._stop   = threading.Event()
         self._known  = set(saved.get("game_pids") or [])
         self._had_game = bool(self._known)
+        # FIX: without this counter, once ANY game was tracked and alive,
+        # the watcher would skip the expensive scan forever (see run()) —
+        # meaning a SECOND game launched afterward (playing two games at
+        # once, or opening another game while the first stays open) would
+        # never be detected or get its own priority boost, until the
+        # first game fully closed. Every _FULL_RESCAN_EVERY ticks we pay
+        # the full scan cost once, purely to catch a newly-launched
+        # second/third game — still far cheaper than scanning every tick.
+        self._ticks_since_scan = 0
+
+    _FULL_RESCAN_EVERY = 10   # ~40s at the 4s poll interval
 
     def stop(self): self._stop.set()
 
     def run(self):
+        if not HAS_PSUTIL:
+            self.log_sig.emit("  ~ watcher: psutil not available — game auto-detect disabled", "warn")
+            return
         import psutil as _psu
         while not self._stop.wait(4.0):
             try:
-                from core.booster import _detect_running_games
-                running, _ = _detect_running_games()
-
-                # ── Kiểm tra PID cũ còn sống không (chiều "game dừng") ──
+                # ── Cheap liveness check first ──
+                # If we already have a tracked game and it's still alive,
+                # skip the expensive full-system scan entirely this cycle.
+                # FIX (critical): the old code always called
+                # _detect_running_games() here, which — with no cached
+                # cpu_samples — does a FULL process_iter() pass, warms up
+                # cpu_percent() on every process on the system, then
+                # blocks for time.sleep(0.5), then does a SECOND full
+                # process_iter() pass. Repeating that every 4 seconds for
+                # the entire play session created a recurring CPU burst
+                # that directly competed with the game for CPU time —
+                # this is what produced the periodic stutter/lag reported
+                # by users ("giật kinh khủng"), plus a 0.5s main-loop
+                # stall each cycle. pid_exists() is a single, near-free
+                # /proc lookup — more than enough to confirm the game(s)
+                # we already found are still running.
                 if self._known:
                     alive = {pid for pid in self._known if _psu.pid_exists(pid)}
                     if not alive and self._had_game:
                         # Mọi PID đã theo dõi đều đã chết — game đã dừng
                         self._known = set()
                         self._had_game = False
+                        self._ticks_since_scan = 0
                         self.game_lost.emit()
+                        # fall through to do a full scan below, in case
+                        # a different game started at the same moment
                     else:
                         self._known = alive
+                        self._ticks_since_scan += 1
+                        # Multi-game support: periodically rescan even
+                        # while a game is alive, so a second/third game
+                        # launched later still gets detected and boosted.
+                        if self._ticks_since_scan < self._FULL_RESCAN_EVERY:
+                            continue
+                        self._ticks_since_scan = 0
+
+                from core.booster import _detect_running_games
+                running, _ = _detect_running_games()
 
                 if not running:
                     continue
@@ -460,13 +528,18 @@ class GameWatcherThread(QThread):
                             if c.pid not in seen:
                                 seen.add(c.pid); pids.append(c.pid)
                     except: pass
-                # Only emit if new PIDs appeared
+                # Only emit if new PIDs appeared (covers both "first game
+                # found" and "another game found while one is running")
                 new = set(pids) - self._known
                 if new:
                     self._known |= set(pids)
                     self._had_game = True
-                    name = running[0][1] if running else "game"
-                    self.game_found.emit(pids, name)
+                    # Report the newly-found game's name specifically,
+                    # not always running[0] — matters once a second game
+                    # is what actually triggered this emit.
+                    new_names = [nm for pid, nm in running if pid in new]
+                    name = new_names[0] if new_names else (running[0][1] if running else "game")
+                    self.game_found.emit(list(new), name, list(self._known))
             except Exception as e:
                 self.log_sig.emit(f"  ~ watcher: {e}", "warn")
 
@@ -632,8 +705,22 @@ class GameBoostPage(QWidget):
                 # Restore swappiness
                 sw = saved.get("swappiness_orig") if saved else None
                 if sw and IS_LINUX:
-                    try: Path("/proc/sys/vm/swappiness").write_text(sw)
-                    except: pass
+                    try:
+                        Path("/proc/sys/vm/swappiness").write_text(sw)
+                    except (PermissionError, OSError):
+                        # FIX: if swappiness was originally set via the
+                        # privileged helper (no direct write permission),
+                        # restoring must also go through the helper —
+                        # otherwise it silently fails here and swappiness
+                        # is left at 1 permanently, even after the user
+                        # thinks they've turned Boost off.
+                        try:
+                            subprocess.run(
+                                ["sudo", "-n", "/usr/local/bin/cyber-clean-helper",
+                                 "set-swappiness", sw],
+                                capture_output=True, timeout=5)
+                        except Exception:
+                            pass
                 # Restore VFR
                 if saved and saved.get("hyprland_vfr") and shutil.which("hyprctl"):
                     try:
@@ -677,8 +764,14 @@ class GameBoostPage(QWidget):
             self._watcher.stop(); self._watcher = None
 
     # ── Game found handler ────────────────────────────────────
-    def _on_game_found(self, pids: list, name: str):
-        """Gọi khi watcher detect game sau khi boost đã bật."""
+    def _on_game_found(self, pids: list, name: str, all_known_pids: list = None):
+        """Gọi khi watcher detect game sau khi boost đã bật.
+        pids = chỉ những PID MỚI vừa phát hiện (có thể là game thứ 2, thứ 3...).
+        all_known_pids = TOÀN BỘ PID game đang theo dõi (kể cả game cũ đã
+        chạy từ trước) — dùng để loại trừ khỏi vòng nice(+5) nền bên dưới,
+        tránh hạ ưu tiên nhầm game đang chạy khi một game khác vừa mở.
+        """
+        all_game_pids = set(all_known_pids) if all_known_pids else set(pids)
         # Update metric card
         self._mc_game.set_value(f"{len(pids)} PIDs", name[:12], 80, C['purple'])
         self._mc_game.set_lit(True)
@@ -686,6 +779,7 @@ class GameBoostPage(QWidget):
         # không cần quyền root, chỉ cố gắng và bỏ qua nếu hệ thống không
         # cho phép; CyberClean không nâng quyền chỉ để renice).
         boosted = 0
+        bg_count = 0
         try:
             import psutil as _psu
             for pid in pids[:8]:
@@ -696,6 +790,36 @@ class GameBoostPage(QWidget):
                         boosted += 1
                 except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied):
                     pass
+
+            # FIX: also deprioritize background processes now that a real
+            # game exists — this used to only happen at Boost-on time (when
+            # a game was already running), so a game launched AFTER Boost
+            # was turned on never got this benefit. Same SKIP list/logic as
+            # the Boost-on path in _boost_logic.
+            # Excludes ALL known game PIDs (all_game_pids), not just the
+            # newly-found ones — otherwise an already-running first game
+            # would get wrongly nice(+5)'d the moment a second game shows up.
+            if IS_LINUX:
+                uid = os.getuid()
+                SKIP = {"kwin_wayland","kwin","hyprland","sway","pipewire","wireplumber",
+                        "dbus-daemon","systemd","fcitx","fcitx5","ibus","discord",
+                        "firefox","chrome","cyberclean","python","python3"}
+                for p in _psu.process_iter(["pid", "name"]):
+                    try:
+                        nm = (p.info["name"] or "").lower().replace(".exe", "")
+                        if nm in SKIP or p.pid in all_game_pids:
+                            continue
+                        try:
+                            if p.uids().real != uid:
+                                continue
+                        except (_psu.NoSuchProcess, _psu.AccessDenied):
+                            continue
+                        o = p.nice()
+                        if o < 5:
+                            p.nice(5)
+                            bg_count += 1
+                    except Exception:
+                        pass
         except ImportError:
             pass
 
@@ -705,6 +829,8 @@ class GameBoostPage(QWidget):
                 "head"
             )
             self._log.append_line(f"  + {boosted} game threads → nice(-10)", "ok")
+            if bg_count:
+                self._log.append_line(f"  + {bg_count} background → nice(+5)", "ok")
         else:
             self._log.append_line(
                 f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok"
@@ -752,14 +878,26 @@ class GameBoostPage(QWidget):
         if pct < 0: return
         if self._gpu_baseline < 0:
             self._gpu_baseline = pct
-            # Detect nếu đang dùng CPU proxy (không có gpu_busy_percent)
+            # Detect nếu đang dùng CPU proxy (không có metric GPU thật nào)
             import platform
             from pathlib import Path as _P
-            has_gpu_sysfs = any(
+            has_gpu_busy_pct = any(
                 True for _ in _P("/sys/class/drm").glob(
                     "card*/device/gpu_busy_percent")
             ) if platform.system() == "Linux" else False
-            self._using_cpu_proxy = not has_gpu_sysfs
+            # FIX: Method 2 (RC6 residency) is ALSO a real GPU-derived
+            # metric (used on older Intel iGPUs that lack gpu_busy_percent,
+            # e.g. HD 520/530 on Skylake/Broadwell). Only Method 3 (raw
+            # system cpu_percent()) is a true proxy with no GPU signal at
+            # all. Previously any machine using Method 2 was wrongly
+            # relabeled "CPU LOAD" even though the number was genuinely
+            # GPU-derived — confusing for the exact hardware the tooltip
+            # was written for.
+            has_rc6 = any(
+                True for _ in _P("/sys/class/drm").glob(
+                    "card*/gt/gt0/rc6_residency_ms")
+            ) if platform.system() == "Linux" else False
+            self._using_cpu_proxy = not (has_gpu_busy_pct or has_rc6)
 
         delta = pct - self._gpu_baseline
         col   = C['green'] if delta >= 0 else C['red']
@@ -767,11 +905,12 @@ class GameBoostPage(QWidget):
         # Label khác nhau tùy source metric
         lbl   = C['cyan']
         self._mc_gpu.set_value(f"{pct}%", dstr, pct, col)
-        # Đổi label card nếu dùng CPU proxy
+        # Đổi label card nếu dùng CPU proxy (không có metric GPU thật nào)
         if getattr(self, '_using_cpu_proxy', False):
             self._mc_gpu._lbl.setText("CPU LOAD")
+            gpu_label = getattr(self, '_gpu_name', None) or "This GPU"
             self._mc_gpu._lbl.setToolTip(
-                "Intel HD 520: no gpu_busy_percent sysfs.\n"
+                f"{gpu_label}: no GPU busy-time metric available on this kernel.\n"
                 "Showing CPU load % as proxy — higher = game using more CPU."
             )
         self._mc_gpu.set_lit(True)
@@ -801,6 +940,49 @@ class GameBoostPage(QWidget):
                         if "VGA" in ln or "3D" in ln:
                             gpu_name = ln.split(":")[-1].strip()[:45]; break
                 except: pass
+        elif IS_WINDOWS:
+            # Method 1: nvidia-smi (nếu có card NVIDIA + driver) — nhanh, đáng tin cậy nhất
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    capture_output=True, text=True, timeout=3,
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                name = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
+                if r.returncode == 0 and name:
+                    gpu_name = name[:45]
+            except Exception:
+                pass
+            # Method 2: WMI qua PowerShell CIM (bắt mọi vendor: NVIDIA/AMD/Intel),
+            # ưu tiên adapter đang thực sự render màn hình
+            if gpu_name == "unknown":
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-CimInstance Win32_VideoController | "
+                         "Where-Object { $_.CurrentHorizontalResolution -ne $null } | "
+                         "Select-Object -First 1 -ExpandProperty Name)"],
+                        capture_output=True, text=True, timeout=3,
+                        creationflags=0x08000000)
+                    name = r.stdout.strip()
+                    if r.returncode == 0 and name:
+                        gpu_name = name[:45]
+                except Exception:
+                    pass
+            # Method 3: fallback không lọc theo màn hình active (đề phòng driver
+            # không set CurrentHorizontalResolution trên vài máy)
+            if gpu_name == "unknown":
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-CimInstance Win32_VideoController | "
+                         "Select-Object -First 1 -ExpandProperty Name)"],
+                        capture_output=True, text=True, timeout=3,
+                        creationflags=0x08000000)
+                    name = r.stdout.strip()
+                    if r.returncode == 0 and name:
+                        gpu_name = name[:45]
+                except Exception:
+                    pass
         log(f"│  ◈ GPU: {gpu_name}", "mute")
 
         # Detect game PIDs — dùng _detect_running_games() từ booster.py (v3.0)
@@ -948,9 +1130,23 @@ class GameBoostPage(QWidget):
         # 5. vm.swappiness = 1
         if IS_LINUX:
             sw = Path("/proc/sys/vm/swappiness")
+            # FIX: always read the REAL current value first — this is a
+            # read-only operation that needs no elevated privilege, so it
+            # never fails for the reason the write below might. Without
+            # this, the helper fallback path used to hardcode "60" as a
+            # guessed "original" value, permanently overwriting whatever
+            # the user's real swappiness was (often 1, 10, or 100
+            # depending on distro/tuning) the next time Boost was turned
+            # off.
+            real_orig = None
             try:
-                saved["swappiness_orig"] = sw.read_text().strip()
+                real_orig = sw.read_text().strip()
+            except (PermissionError, OSError):
+                pass
+
+            try:
                 sw.write_text("1")
+                saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
                 log("│  + vm.swappiness → 1 (game pages stay in RAM)", "ok")
             except (PermissionError, OSError):
                 try:
@@ -958,51 +1154,63 @@ class GameBoostPage(QWidget):
                         ["sudo","-n","/usr/local/bin/cyber-clean-helper","swappiness"],
                         capture_output=True, timeout=5)
                     if r.returncode == 0:
-                        saved["swappiness_orig"] = "60"
+                        saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
                         log("│  + vm.swappiness → 10 (via helper)", "ok")
-                except: pass
+                except Exception:
+                    pass
 
         # 6. nice(-10) game, nice(+5) background
+        # FIX: only deprioritize background processes if we actually have
+        # a game to prioritize over them. Previously this ran unconditionally
+        # even when game_pids was empty (game not launched yet — watcher
+        # will catch it later), which meant every other app on the desktop
+        # (browser, editor, everything) got nice(+5)'d for no benefit at
+        # all during the "waiting for game" period. The watcher thread's
+        # _on_game_found already re-applies game-priority boost once a
+        # real game PID shows up, so nothing is lost by waiting.
         bg_count = 0
-        try:
-            import psutil as _psu
-            uid = os.getuid() if IS_LINUX else -1
-            SKIP = {"kwin_wayland","kwin","hyprland","sway","pipewire","wireplumber",
-                    "dbus-daemon","systemd","fcitx","fcitx5","ibus","discord",
-                    "firefox","chrome","cyberclean","python","python3"}
+        if game_pids:
+            try:
+                import psutil as _psu
+                uid = os.getuid() if IS_LINUX else -1
+                SKIP = {"kwin_wayland","kwin","hyprland","sway","pipewire","wireplumber",
+                        "dbus-daemon","systemd","fcitx","fcitx5","ibus","discord",
+                        "firefox","chrome","cyberclean","python","python3"}
 
-            for pid in game_pids[:8]:
-                try:
-                    p = _psu.Process(pid)
-                    o = p.nice()
-                    if o > -10:
-                        p.nice(-10)
-                        saved.setdefault("game_nice", {})[pid] = o
-                except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied): pass
+                for pid in game_pids[:8]:
+                    try:
+                        p = _psu.Process(pid)
+                        o = p.nice()
+                        if o > -10:
+                            p.nice(-10)
+                            saved.setdefault("game_nice", {})[pid] = o
+                    except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied): pass
 
-            for p in _psu.process_iter(["pid","name"]):
-                try:
-                    nm = (p.info["name"] or "").lower().replace(".exe","")
-                    if nm in SKIP or p.pid in game_pids:
-                        continue
-                    # uid check — bỏ qua nếu không lấy được uid
-                    if IS_LINUX and uid >= 0:
-                        try:
-                            if p.uids().real != uid: continue
-                        except (_psu.NoSuchProcess, _psu.AccessDenied):
+                for p in _psu.process_iter(["pid","name"]):
+                    try:
+                        nm = (p.info["name"] or "").lower().replace(".exe","")
+                        if nm in SKIP or p.pid in game_pids:
                             continue
-                    o = p.nice()
-                    if o < 5:
-                        p.nice(5)
-                        saved.setdefault("bg_nice", {})[p.pid] = o
-                        bg_count += 1
-                except: pass
+                        # uid check — bỏ qua nếu không lấy được uid
+                        if IS_LINUX and uid >= 0:
+                            try:
+                                if p.uids().real != uid: continue
+                            except (_psu.NoSuchProcess, _psu.AccessDenied):
+                                continue
+                        o = p.nice()
+                        if o < 5:
+                            p.nice(5)
+                            saved.setdefault("bg_nice", {})[p.pid] = o
+                            bg_count += 1
+                    except: pass
 
-            log(f"│  + {bg_count} background → nice(+5)", "ok")
-            metric_sig.emit("bg_count", bg_count)
+                log(f"│  + {bg_count} background → nice(+5)", "ok")
+                metric_sig.emit("bg_count", bg_count)
 
-
-        except ImportError: pass
+            except ImportError: pass
+        else:
+            log("│  i no game yet — background priority left untouched", "mute")
+            log("│    → watcher will apply nice(+5) once a game actually launches", "mute")
 
         saved["game_pids"] = game_pids
         log("│", "mute")

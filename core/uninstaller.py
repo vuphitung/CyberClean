@@ -38,7 +38,7 @@ NEW: UninstallResult dataclass — structured return value from uninstall_app().
 COMPAT: uninstall_app() still returns bool | 'UI_OPENED' for old call sites.
 """
 
-import subprocess, platform, re, time
+import subprocess, platform, re, time, shlex
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional
 
@@ -545,45 +545,56 @@ def uninstall_app(app: InstalledApp, log_cb: Callable):
     out, code = '', 1
 
     if app.source == 'pacman':
+        pkg = shlex.quote(app.pkg_id)
         out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper pacman-remove {app.pkg_id} 2>/dev/null',
+            f'sudo -n /usr/local/bin/cyber-clean-helper pacman-remove {pkg} 2>/dev/null',
             timeout=60,
         )
         if code != 0:
-            out, code = run(f'sudo pacman -Rns --noconfirm {app.pkg_id} 2>&1', timeout=60)
+            out, code = run(f'sudo pacman -Rns --noconfirm {pkg} 2>&1', timeout=60)
 
     elif app.source == 'apt':
+        pkg = shlex.quote(app.pkg_id)
         out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper apt-remove {app.pkg_id} 2>/dev/null',
+            f'sudo -n /usr/local/bin/cyber-clean-helper apt-remove {pkg} 2>/dev/null',
             timeout=60,
         )
         if code != 0:
-            out, code = run(f'sudo apt-get remove -y {app.pkg_id} 2>&1', timeout=60)
+            out, code = run(f'sudo apt-get remove -y {pkg} 2>&1', timeout=60)
 
     elif app.source == 'dnf':
+        pkg = shlex.quote(app.pkg_id)
         out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper dnf-remove {app.pkg_id} 2>/dev/null',
+            f'sudo -n /usr/local/bin/cyber-clean-helper dnf-remove {pkg} 2>/dev/null',
             timeout=60,
         )
         if code != 0:
-            out, code = run(f'sudo dnf remove -y {app.pkg_id} 2>&1', timeout=60)
+            out, code = run(f'sudo dnf remove -y {pkg} 2>&1', timeout=60)
 
     elif app.source == 'zypper':
         # NEW: zypper via helper
+        pkg = shlex.quote(app.pkg_id)
         out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper zypper-remove {app.pkg_id} 2>/dev/null',
+            f'sudo -n /usr/local/bin/cyber-clean-helper zypper-remove {pkg} 2>/dev/null',
             timeout=60,
         )
         if code != 0:
-            out, code = run(f'sudo zypper remove -y {app.pkg_id} 2>&1', timeout=60)
+            out, code = run(f'sudo zypper remove -y {pkg} 2>&1', timeout=60)
 
     elif app.source == 'xbps':
-        out, code = run(f'sudo xbps-remove -y {app.pkg_id} 2>&1', timeout=60)
+        out, code = run(f'sudo xbps-remove -y {shlex.quote(app.pkg_id)} 2>&1', timeout=60)
 
     elif app.source == 'flatpak':
-        out, code = run(f'flatpak uninstall -y {app.pkg_id} 2>&1', timeout=60)
+        out, code = run(f'flatpak uninstall -y {shlex.quote(app.pkg_id)} 2>&1', timeout=60)
 
     elif app.source == 'winget':
+        # winget's --id is already double-quoted here; shlex.quote() would
+        # add a second, POSIX-style quoting layer that Windows' cmd.exe
+        # does not interpret the same way — so this one keeps its existing
+        # quoting style rather than being "fixed" to match the others.
+        # winget package IDs are also far more format-constrained
+        # (Publisher.Product, no shell metacharacters in practice) than
+        # pacman/apt/flatpak names, which lowers the risk here further.
         out, code = run(f'winget uninstall --id "{app.pkg_id}" --silent 2>nul', timeout=120)
 
     elif app.source == 'registry':

@@ -175,6 +175,19 @@ case "$1" in
   drop-cache)       sync && echo 1 > /proc/sys/vm/drop_caches ;;
   compact-memory)   echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true ;;
   swappiness)       echo 10 > /proc/sys/vm/swappiness ;;
+  set-swappiness)
+    # Restore an arbitrary (previously-read) swappiness value.
+    # Only accepts a plain integer 0-200 (valid vm.swappiness range is
+    # 0-200 on modern kernels) — never passes the argument through a
+    # shell, and rejects anything that isn't a bare number so a
+    # malformed/unexpected value from the caller can't write garbage
+    # into a kernel tunable.
+    [[ -z "$2" ]] && exit 1
+    case "$2" in
+      ''|*[!0-9]*) exit 1 ;;   # reject anything that isn't digits only
+    esac
+    [[ "$2" -gt 200 ]] && exit 1
+    echo "$2" > /proc/sys/vm/swappiness ;;
   dirty-ratio)      echo 10 > /proc/sys/vm/dirty_ratio ;;
   dirty-background-ratio) echo 5 > /proc/sys/vm/dirty_background_ratio ;;
   fix-suid)
