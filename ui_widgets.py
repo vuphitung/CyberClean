@@ -540,6 +540,11 @@ class CyberTerminal(QWidget):
         'info': ('#3d6678', ''),
         'warn': ('#ffd740', '  ⚠  '),
         'text': ('#7eb8cc', ''),
+        # Was missing entirely — fell back to the default ('#7eb8cc', '')
+        # bright text color, same as normal log lines. That's why the
+        # per-step timing line looked exactly as "loud" as a real finding
+        # instead of reading as a subdued, secondary detail.
+        'dim':  ('#3d6678', ''),
     }
 
     def __init__(self, parent=None):
@@ -969,8 +974,9 @@ class _OneClickWorker(QThread):
 
 
 class _ScanWorker(QThread):
-    log  = pyqtSignal(str, str)
-    done = pyqtSignal(list, list)
+    log      = pyqtSignal(str, str)
+    progress = pyqtSignal(int, str)   # (percent, current category label)
+    done     = pyqtSignal(list, list)
 
     def __init__(self):
         super().__init__()
@@ -983,12 +989,16 @@ class _ScanWorker(QThread):
         try:
             from core.scanner import SecurityScanner
             sc      = SecurityScanner()
-            results = sc.scan(lambda m, l: self.log.emit(_tlog(m), l))
+            results = sc.scan(
+                lambda m, l: self.log.emit(_tlog(m), l),
+                progress_cb=lambda p, l: self.progress.emit(p, l),
+            )
         except Exception as e:
             self.log.emit(f'  ✗  Scanner error: {e}', 'err')
             results = []
         try:
             from core.analyzer import get_network_processes
+            self.progress.emit(97, 'Kết nối mạng (tiến trình)')
             self.log.emit('  ⟳  ' + _tlog('Scanning active network processes...'), 'head')
             net_results = get_network_processes()
             # FIX: previously nothing was logged after this call — if the
@@ -1018,6 +1028,7 @@ class _ScanWorker(QThread):
             net_results = []
         self.log.emit('', 'info')
         self.log.emit(f'  {_t("log_scan_all_done", "All scan steps finished.")}', 'head')
+        self.progress.emit(100, 'Hoàn tất')
         self.done.emit(results, net_results)
 
 

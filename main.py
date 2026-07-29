@@ -1084,7 +1084,56 @@ class CyberCleanApp(QMainWindow):
         br.addStretch()
         br.addWidget(self._watchlist_badge)
         lay.addLayout(br)
-        lay.addSpacing(14)
+        lay.addSpacing(10)
+
+        # ── Progress bar (mirrors the Clean page pattern) — shows which
+        # category is currently being scanned + a percentage, so a long
+        # scan (Services enumeration, DISM-adjacent checks, etc) doesn't
+        # look frozen. Hidden until a scan starts.
+        self._scan_prog_container = QFrame()
+        self._scan_prog_container.setFixedHeight(40)
+        self._scan_prog_container.setStyleSheet('background:transparent;')
+        self._scan_prog_container.setVisible(False)
+        sprog_cl = QVBoxLayout(self._scan_prog_container)
+        sprog_cl.setContentsMargins(0, 4, 0, 4); sprog_cl.setSpacing(3)
+
+        sprog_lbl_row = QHBoxLayout()
+        self.scan_prog_lbl = QLabel('')
+        self.scan_prog_lbl.setStyleSheet(
+            f'color:{C["cyan"]};font-size:11px;font-family:{MONO};font-weight:600;'
+            f'letter-spacing:1px;'
+        )
+        self._scan_prog_pct = QLabel('0%')
+        self._scan_prog_pct.setStyleSheet(
+            f'color:{C["text3"]};font-size:10px;font-family:{MONO};'
+        )
+        sprog_lbl_row.addWidget(self.scan_prog_lbl)
+        sprog_lbl_row.addStretch()
+        sprog_lbl_row.addWidget(self._scan_prog_pct)
+        sprog_cl.addLayout(sprog_lbl_row)
+
+        self.scan_prog = QProgressBar()
+        self.scan_prog.setTextVisible(False)
+        self.scan_prog.setFixedHeight(5)
+        self.scan_prog.setStyleSheet(f'''
+            QProgressBar {{
+                background: {C["bg3"]};
+                border: none;
+                border-radius: 2px;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {C["cyan"]}99,
+                    stop:0.6 {C["cyan"]},
+                    stop:1.0 #ffffff
+                );
+                border-radius: 2px;
+            }}
+        ''')
+        sprog_cl.addWidget(self.scan_prog)
+        lay.addWidget(self._scan_prog_container)
+        lay.addSpacing(6)
 
         # Output
         self._lbl_scan_output_sec = _lbl_section(_t('lbl_scan_output', 'SCAN OUTPUT'))
@@ -1822,6 +1871,7 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_scan_worker') and self._scan_worker is not None:
             try:
                 self._scan_worker.log.disconnect()
+                self._scan_worker.progress.disconnect()
                 self._scan_worker.done.disconnect()
             except Exception:
                 pass
@@ -1836,8 +1886,24 @@ class CyberCleanApp(QMainWindow):
         self.scan_table.setRowCount(0)
         self._scan_results = []
 
+        # Show + reset the progress bar so the user can see the scan is
+        # alive, and which category it's currently on, instead of just a
+        # log pane that can look frozen during a slow category.
+        self.scan_prog_lbl.setText(f'⟳  {_t("btn_run_scan","SCANNING...")}')
+        self._scan_prog_pct.setText('0%')
+        self._scan_prog_container.setVisible(True)
+        self.scan_prog.setValue(0)
+
         self._scan_worker = _ScanWorker()
         self._scan_worker.log.connect(self._on_opt_log)
+
+        def _on_scan_progress(p, label):
+            self.scan_prog.setValue(p)
+            self._scan_prog_pct.setText(f'{p}%')
+            self.scan_prog_lbl.setText(
+                f'⟳  Đang quét: {label}...' if p < 100 else f'✓  {_t("lbl_done","Done")}'
+            )
+        self._scan_worker.progress.connect(_on_scan_progress)
         self._scan_worker.done.connect(self._on_scan_done)
         self._scan_worker.start()
 
@@ -1845,6 +1911,7 @@ class CyberCleanApp(QMainWindow):
         self._scan_running = False
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText(f"⬡  {_t('btn_run_scan','RUN DEEP SCAN')}")
+        self._scan_prog_container.setVisible(False)
         self._scan_results = results
         sev_col = {'critical': C['red'], 'high': C['yellow'], 'medium': C['cyan'], 'info': C['text3']}
 
@@ -1957,15 +2024,19 @@ class CyberCleanApp(QMainWindow):
         # shell_fixes path below.
         try:
             from core.scanner import (run_fix_action, fix_autorun_entry, remove_file_windows,
-                                       disable_systemd_user_unit, fix_shell_rc_line)
+                                       disable_systemd_user_unit, fix_shell_rc_line,
+                                       remove_scheduled_task_windows, disable_windows_service)
         except ImportError:
             from scanner import (run_fix_action, fix_autorun_entry, remove_file_windows,
-                                  disable_systemd_user_unit, fix_shell_rc_line)
+                                  disable_systemd_user_unit, fix_shell_rc_line,
+                                  remove_scheduled_task_windows, disable_windows_service)
         batched: dict = {}   # action -> [targets]  (Linux helper actions)
         autorun_fixes  = []
         winfile_fixes  = []  # 'remove-file' on Windows — no sudoers helper exists there
         systemd_fixes  = []  # 'disable-systemd-unit' — user-scope, no root needed
         shellrc_fixes  = []  # 'fix-shell-rc' — direct file write, no root needed
+        schtask_fixes  = []  # 'remove-scheduled-task' — list-argv schtasks, no shell
+        service_fixes  = []  # 'disable-windows-service' — list-argv sc.exe, no shell
         shell_fixes    = []
 
         for r in to_fix:
@@ -1987,6 +2058,10 @@ class CyberCleanApp(QMainWindow):
                 # unprivileged file write (or a declined system-wide
                 # case), not a sudo-helper batch action.
                 shellrc_fixes.append(r)
+            elif r.fix_action == 'remove-scheduled-task':
+                schtask_fixes.append(r)
+            elif r.fix_action == 'disable-windows-service':
+                service_fixes.append(r)
             elif r.fix_action:
                 batched.setdefault(r.fix_action, []).append(r)
             elif r.fix_cmd:
@@ -2058,6 +2133,34 @@ class CyberCleanApp(QMainWindow):
         for r in shellrc_fixes:
             try:
                 out, code = fix_shell_rc_line(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 2e) Scheduled Task removal — list-argv schtasks call, no shell
+        #     string built from the (attacker-chosen) task name.
+        for r in schtask_fixes:
+            try:
+                out, code = remove_scheduled_task_windows(r.fix_target)
+                ok = (code == 0)
+                self._on_opt_log(
+                    f'  {"✓" if ok else "✗"}  {r.path}: {out}',
+                    'ok' if ok else 'err'
+                )
+            except Exception as e:
+                self._on_opt_log(f'  ✗  {r.path}: {e}', 'err')
+
+        # 2f) Windows service disable — list-argv sc.exe calls, no shell
+        #     string built from the (attacker-chosen) service name.
+        #     Disables rather than deletes, so it's reversible if
+        #     misidentified.
+        for r in service_fixes:
+            try:
+                out, code = disable_windows_service(r.fix_target)
                 ok = (code == 0)
                 self._on_opt_log(
                     f'  {"✓" if ok else "✗"}  {r.path}: {out}',

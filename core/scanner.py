@@ -105,6 +105,28 @@ except Exception:
         PKG_MANAGER = ''
 
 # ══════════════════════════════════════════════════════════════
+# SELF-EXCLUSION — real path check, not a filename substring
+# ══════════════════════════════════════════════════════════════
+# The old check further down used `if 'cyberclean' in fstr.lower(): skip`.
+# That is a self-exclusion bypass: an attacker just names their payload
+# `/tmp/cyberclean_helper.sh` or `/tmp/CyberClean_update.py` and the
+# scanner skips it, thinking it's looking at its own files. Real
+# self-exclusion has to be based on where THIS process actually runs
+# from, not on what a file happens to be named.
+try:
+    _APP_DIR = str(Path(sys.argv[0]).resolve().parent).lower().replace('\\', '/')
+except Exception:
+    _APP_DIR = ''
+
+
+def _is_own_app_file(fpath: str) -> bool:
+    """True only if the file is actually inside this app's own install/run
+    directory — never based on the filename alone."""
+    if not _APP_DIR:
+        return False
+    return fpath.lower().replace('\\', '/').startswith(_APP_DIR)
+
+# ══════════════════════════════════════════════════════════════
 # SECURITY NOTE — Auto-Fix command construction
 # ══════════════════════════════════════════════════════════════
 # Every fix_cmd below that touches an attacker-influenced string (a file
@@ -275,6 +297,62 @@ def remove_file_windows(fix_target: str) -> tuple:
         return 'Permission denied', 1
     except OSError as e:
         return f'Delete failed: {e}', 1
+
+
+def remove_scheduled_task_windows(fix_target: str) -> tuple:
+    """
+    Delete a malicious Scheduled Task via `schtasks /delete /tn <name> /f`,
+    invoked with a list argv (shell=False) — NOT a shell string like
+    f'schtasks /delete /tn "{name}" /f'. fix_target (the task name) is
+    attacker-influenced: whoever named their persistence task chose that
+    string, and Scheduled Task names can contain characters like `&`, `"`,
+    backtick that would break naive shell-string quoting the same way a
+    malicious filename does. A list-argv subprocess call bypasses shell
+    parsing entirely, so this is safe regardless of what the task is named.
+    """
+    if OS != 'Windows':
+        return 'Not Windows', 1
+    try:
+        r = subprocess.run(
+            ['schtasks', '/delete', '/tn', fix_target, '/f'],
+            shell=False, capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return f'Removed scheduled task: {fix_target}', 0
+        return (r.stderr or r.stdout or 'Unknown error').strip(), r.returncode
+    except Exception as e:
+        return f'Delete failed: {e}', 1
+
+
+def disable_windows_service(fix_target: str) -> tuple:
+    """
+    Disable (not delete) a suspicious Windows service via
+    `sc stop <name>` + `sc config <name> start= disabled`, both invoked
+    as list argv (shell=False). Same reasoning as
+    remove_scheduled_task_windows(): the service name is attacker-chosen
+    data and must never be interpolated into a shell string.
+
+    Disabling rather than deleting is the deliberately conservative choice
+    — it fully neutralizes the persistence (the service won't start again,
+    including at next boot) while staying reversible if this turns out to
+    be a legitimate service that was misidentified.
+    """
+    if OS != 'Windows':
+        return 'Not Windows', 1
+    try:
+        subprocess.run(
+            ['sc', 'stop', fix_target],
+            shell=False, capture_output=True, text=True, timeout=15,
+        )  # best-effort — service may already be stopped, ignore result
+        r = subprocess.run(
+            ['sc', 'config', fix_target, 'start=', 'disabled'],
+            shell=False, capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return f'Disabled service: {fix_target}', 0
+        return (r.stderr or r.stdout or 'Unknown error').strip(), r.returncode
+    except Exception as e:
+        return f'Disable failed: {e}', 1
 
 
 def disable_systemd_user_unit(fix_target: str) -> tuple:
@@ -522,15 +600,108 @@ def _save_user_whitelist(data: dict) -> None:
         pass
 
 
+# ══════════════════════════════════════════════════════════════
+# FILE SCAN CACHE  (skip re-opening files unchanged since last scan)
+# ══════════════════════════════════════════════════════════════
+_SCAN_CACHE_FILE = _WHITELIST_DIR / 'file_scan_cache.json'
+_SCAN_CACHE_MAX_ENTRIES = 40_000   # safety cap — if exceeded, just don't persist (self-heals next run)
+
+
+def _load_file_scan_cache() -> dict:
+    """
+    {path: [mtime, size]} for files already verified clean by the
+    magic-byte disguise check on a previous scan. Lets repeat scans skip
+    re-opening files that haven't changed since — this is the main lever
+    the app actually has over "the suspicious-files step took 14s one time
+    and 68s another" variance: most of that swing comes from Windows
+    Defender's real-time protection re-scanning every file we open (an
+    "AV vs AV" contention outside the app's control) plus the OS disk
+    cache being warm or cold between runs — neither of which the app can
+    fix directly. What it CAN do is open fewer files in the first place
+    on repeat scans, which shrinks how much of the total time is exposed
+    to that variance.
+    """
+    try:
+        if _SCAN_CACHE_FILE.exists():
+            return _json.loads(_SCAN_CACHE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_file_scan_cache(data: dict) -> None:
+    if len(data) > _SCAN_CACHE_MAX_ENTRIES:
+        return   # don't persist a runaway cache — next run just rebuilds it
+    try:
+        _WHITELIST_DIR.mkdir(parents=True, exist_ok=True)
+        _SCAN_CACHE_FILE.write_text(
+            _json.dumps(data, ensure_ascii=False), encoding='utf-8',
+        )
+    except Exception:
+        pass
+
+
+_WL_MAX_AGE_DAYS = 180   # after this, re-verify even if the path still matches
+
+
+def _wl_resolve_file(candidate: str) -> Optional[Path]:
+    """
+    Best-effort: turn a whitelist candidate string into an actual file on
+    disk, if there is one. `candidate` might be a plain file path (file-
+    scan findings), or a registry ImagePath/action string that has
+    trailing arguments after the exe ('C:\\...\\svc.exe -k netsvcs') or
+    surrounding quotes — strip those down to the executable path before
+    checking. Returns None if nothing resolvable/existing is found (e.g.
+    a scheduled task's raw command line with no clean exe path) — in
+    that case fingerprinting is skipped and the entry falls back to
+    plain path-string matching, same as before.
+    """
+    if not candidate:
+        return None
+    m = re.match(r'^\s*"?(.+?\.(?:exe|dll|sys))"?(?:\s|$)', candidate, re.I)
+    raw = m.group(1) if m else candidate
+    try:
+        p = Path(raw)
+        if p.is_file():
+            return p
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _wl_fingerprint(candidate: str) -> Optional[dict]:
+    """{'size': int, 'mtime': float} for the resolved file, or None if the
+    candidate doesn't resolve to a real file we can fingerprint."""
+    f = _wl_resolve_file(candidate)
+    if f is None:
+        return None
+    try:
+        st = f.stat()
+        return {'size': st.st_size, 'mtime': st.st_mtime}
+    except OSError:
+        return None
+
+
 def add_to_user_whitelist(path: str, reason: str = '') -> None:
     """
     Mark a path as trusted — scanner gives it -50 points so it's
     almost never flagged again. Written to user_whitelist.json.
+
+    Also records a lightweight fingerprint (file size + mtime) of the
+    underlying binary at the time it was whitelisted, if one can be
+    resolved. This closes a real gap: a whitelist keyed on path alone
+    trusts that path FOREVER, even if something later replaces the file
+    at that exact path with malware (binary replacement / DLL hijack).
+    With a fingerprint recorded, _wl_hit() below detects the mismatch
+    and treats the entry as no longer valid — the finding gets re-
+    surfaced instead of silently staying hidden.
     """
     data = _load_user_whitelist()
     data[path] = {
-        'reason':    reason or 'user marked safe',
-        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'reason':      reason or 'user marked safe',
+        'timestamp':   time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'ts_epoch':    time.time(),
+        'fingerprint': _wl_fingerprint(path),
     }
     _save_user_whitelist(data)
 
@@ -548,6 +719,44 @@ def remove_from_user_whitelist(path: str) -> bool:
 def get_user_whitelist() -> dict:
     """Return the full whitelist dict {path: {reason, timestamp}}."""
     return _load_user_whitelist()
+
+
+def _wl_hit(candidate: str, wl: dict) -> bool:
+    """
+    True if `candidate` is whitelisted AND still trustworthy right now.
+
+    A path match alone is NOT enough — this re-verifies:
+      1. Fingerprint (file size + mtime): if the file at this path was
+         fingerprinted when whitelisted and has since changed (different
+         size or mtime — e.g. malware overwrote a legitimate binary at
+         the same path), the entry is treated as invalid and the finding
+         gets re-flagged instead of silently staying hidden forever.
+      2. Expiry: entries older than _WL_MAX_AGE_DAYS are also treated as
+         invalid, so a "safe" verdict from months ago doesn't get trusted
+         indefinitely without ever being looked at again.
+
+    Either check failing means _wl_hit returns False — i.e. the caller
+    treats it as NOT whitelisted and reports the finding normally.
+    """
+    if not candidate:
+        return False
+    entry = wl.get(candidate)
+    if not entry:
+        return False
+
+    ts_epoch = entry.get('ts_epoch')
+    if ts_epoch and (time.time() - ts_epoch) > (_WL_MAX_AGE_DAYS * 86400):
+        return False  # expired — ask the user to re-confirm by re-flagging
+
+    stored_fp = entry.get('fingerprint')
+    if stored_fp is not None:
+        current_fp = _wl_fingerprint(candidate)
+        if current_fp is None or current_fp != stored_fp:
+            # File changed (or vanished) since it was whitelisted —
+            # don't trust it silently.
+            return False
+
+    return True
 
 
 # ══════════════════════════════════════════════════════════════
@@ -938,11 +1147,16 @@ def _is_trusted_process(name: str, exe: str, pid: int) -> tuple:
         return True, f'known trusted process ({norm})'
 
     # ── User whitelist check ─────────────────────────────────
-    # Paths marked safe by the user get automatic trust.
+    # Paths marked safe by the user get automatic trust — but only if the
+    # binary at that path still matches what was there when it was
+    # whitelisted (see _wl_hit: fingerprint + expiry check). This is the
+    # scenario that matters most for this exact check: if malware later
+    # replaces a legitimate, previously-whitelisted executable at the
+    # same path, it must NOT inherit that old trust silently.
     _wl = _load_user_whitelist()
-    if exe and exe in _wl:
+    if exe and _wl_hit(exe, _wl):
         return True, f'user-whitelisted: {_wl[exe].get("reason","")}'
-    if name and name in _wl:
+    if name and _wl_hit(name, _wl):
         return True, f'user-whitelisted: {_wl[name].get("reason","")}'
 
     # Trusted path — installed software
@@ -1027,6 +1241,18 @@ class _ProcessRisk:
         return '; '.join(reasons[:4])
 
 
+# Generic alias — this scorer isn't actually process-specific (score +
+# signals list + 70/40/20 severity tiers). Reused below for the Windows
+# persistence checks (Scheduled Tasks, disguised files, etc) so that ALL
+# findings across the whole scanner go through the same "multiple weak
+# signals must corroborate before a strong verdict" philosophy, instead of
+# each new check re-inventing its own single-keyword-match = instant-flag
+# logic (which is exactly what caused the false-positive floods on
+# Defender's .vdm/.lkg files and stock Windows services — see notes on
+# _scan_suspicious_files / _scan_services_windows).
+_Risk = _ProcessRisk
+
+
 def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
     """
     Score a single process across multiple signals.
@@ -1064,6 +1290,26 @@ def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
             ]
         if any(exe_l.startswith(t) for t in temp_roots):
             r.add(30, f'executable running from temp directory ({exe[:60]})')
+        else:
+            # ── Kỹ thuật bypass đã biết: attacker né /tmp bằng cách chạy
+            # payload từ ~/.cache, ~/.config, ~/.local/share, /var/log —
+            # những chỗ user ghi được KHÔNG cần root, nhưng trước đây
+            # hoàn toàn không bị tính điểm gì. Trọng số thấp hơn /tmp vì
+            # đây cũng là nơi nhiều app hợp lệ dùng thật (Flatpak/AppImage
+            # cache, config helper scripts) — một mình tín hiệu này chỉ
+            # đẩy lên 'medium', cần thêm dấu hiệu khác (mining pattern,
+            # backdoor pattern, world-writable...) mới leo thang cao hơn.
+            weak_user_writable_roots = []
+            home = str(Path.home()).lower().replace('\\', '/')
+            if home:
+                weak_user_writable_roots += [
+                    f'{home}/.cache/', f'{home}/.config/',
+                    f'{home}/.local/share/',
+                ]
+            if OS == 'Linux':
+                weak_user_writable_roots.append('/var/log/')
+            if any(exe_l.startswith(t) for t in weak_user_writable_roots):
+                r.add(20, f'executable running from user-writable data dir ({exe[:60]})')
 
     # ── Connected to mining pool port (+15) ──────────────
     if r.score > 0:   # only check connections if already suspicious (perf)
@@ -1107,15 +1353,106 @@ def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
     return r
 
 
-DANGEROUS_EXTENSIONS = {'.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf',
-                         '.bin', '.bat', '.ps1', '.vbs', '.cmd', '.scr', '.pif'}
+DANGEROUS_EXTENSIONS = {
+    '.sh', '.py', '.rb', '.pl', '.php', '.exe', '.elf',
+    '.bin', '.bat', '.ps1', '.vbs', '.cmd', '.scr', '.pif',
+    # Added: covers "rename the payload to something boring-looking"
+    # bypass — .dll/.so are loaded/executed without ever needing a
+    # "dangerous-looking" extension; .msi/.jar/.wsf/.hta/.vbe/.jse/.com/
+    # .msc are all valid double-click-to-execute or load-and-run formats
+    # on Windows; .psm1 is a PowerShell module (auto-loaded, not just
+    # run directly); .reg can silently modify the registry if merged.
+    '.dll', '.so', '.dylib', '.msi', '.jar', '.wsf', '.hta',
+    '.vbe', '.jse', '.com', '.msc', '.psm1', '.reg', '.appimage',
+}
+
+# Magic bytes for common executable formats — checked regardless of
+# extension. This is what actually closes the "rename payload.exe to
+# payload.dat / payload.png / payload.txt" bypass: an attacker can lie
+# about the extension, but not about the file's real header without
+# breaking the file itself.
+_EXECUTABLE_MAGIC = (
+    (b'MZ', 'Windows PE executable (MZ header) disguised with a non-executable extension'),
+    (b'\x7fELF', 'Linux ELF executable disguised with a non-executable extension'),
+    (b'#!/', 'Script with a shebang line disguised with a non-script extension'),
+)
+
+
+def _sniff_executable_disguise(f: Path) -> Optional[str]:
+    """
+    Read just the first few bytes (cheap — this is NOT the content-pattern
+    read, just a header sniff) and check for a real executable/script magic
+    number on a file whose extension claims it's something harmless (.dat,
+    .png, .txt, .log, no extension, etc). Returns a reason string if the
+    file's real format doesn't match its claimed extension, else None.
+    """
+    try:
+        with open(f, 'rb') as fh:
+            head = fh.read(8)
+    except OSError:
+        return None
+    for magic, reason in _EXECUTABLE_MAGIC:
+        if head.startswith(magic):
+            return reason
+    return None
+
+
+_VENDOR_NAME_HINTS = (
+    'nvidia', 'realtek', 'intel', 'amd', 'adobe', 'microsoft', 'google',
+    'mozilla', 'valve', 'steam', 'epicgames', 'discord',
+    'logitech', 'razer', 'corsair', 'asus', 'msi', 'dell', 'hp', 'lenovo',
+)
+
+_RANDOM_NAME_RE = re.compile(r'^[a-f0-9]{10,}$|^[a-z0-9]{16,}$', re.I)
+
+
+def _score_disguised_file(f: Path, disguise_reason: str) -> '_Risk':
+    """
+    Score a magic-byte disguise hit instead of flagging it outright. A
+    format mismatch alone is a real but WEAK signal (plenty of legitimate
+    software drops oddly-extensioned files with real headers) — it needs
+    corroboration to earn 'high'/'critical', same philosophy as the
+    process scorer (see _score_process / _ProcessRisk).
+    """
+    r = _Risk()
+    r.add(35, disguise_reason)  # base signal — alone this only reaches 'medium'
+
+    try:
+        mtime = f.stat().st_mtime
+        if (time.time() - mtime) < 86400:
+            r.add(20, 'modified within the last 24 hours')
+    except OSError:
+        pass
+
+    if _RANDOM_NAME_RE.match(f.stem):
+        r.add(15, 'filename looks randomly generated (hash/hex-like)')
+
+    fstr_l = str(f).lower()
+    if any(v in fstr_l for v in _VENDOR_NAME_HINTS):
+        r.add(-25, 'path contains a recognizable vendor/product name')
+
+    return r
 
 SCAN_DIRS_LINUX   = ['/tmp', '/var/tmp', '/dev/shm',
                      str(Path.home() / '.local/bin'),
-                     str(Path.home() / '.config')]
+                     str(Path.home() / '.config'),
+                     # Added: ~/.cache was explicitly called out as an
+                     # unscanned hiding spot — it's user-writable, rarely
+                     # inspected, and never nuked by "clear browser cache"
+                     # style cleanup since it's the app-data cache, not the
+                     # browser one.
+                     str(Path.home() / '.cache')]
 SCAN_DIRS_WINDOWS = [
     os.environ.get('TEMP', ''), os.environ.get('APPDATA', ''),
     'C:/Windows/Temp', 'C:/ProgramData',
+    # NOTE: deliberately NOT scanning the full %LOCALAPPDATA% root — it was
+    # added in an earlier revision to widen coverage, but %TEMP% already
+    # resolves to a subfolder inside it (…\AppData\Local\Temp), so the
+    # LOCALAPPDATA root added recursive scanning of every browser profile,
+    # Windows Store package cache, and app-data folder on the whole system.
+    # That's a huge, mostly-irrelevant file tree and was the direct cause
+    # of scans hammering CPU/disk. TEMP + APPDATA already cover the
+    # actually-relevant per-user locations.
 ]
 
 
@@ -1129,9 +1466,20 @@ class SecurityScanner:
         self.results: List[ScanResult] = []
         self._ok_count = 0
 
-    def scan(self, log_cb: Callable[[str, str], None]) -> List[ScanResult]:
+    def scan(self, log_cb: Callable[[str, str], None],
+             progress_cb: Optional[Callable[[int, str], None]] = None) -> List[ScanResult]:
+        """
+        progress_cb(pct: int, label: str) is called BEFORE each category
+        starts, so the UI can show "Đang quét: <label>..." + a percentage
+        instead of just a spinning log with no sense of how far along the
+        scan is or whether it's stuck. Also records per-category timing
+        (self.step_timings) and logs any step that takes >3s — this is
+        what answers "which step ate the 90 seconds" instead of only ever
+        seeing one final total.
+        """
         self.results = []
         self._ok_count = 0
+        self.step_timings: List[tuple] = []   # [(label, ms), ...]
         t0 = time.monotonic()
 
         log_cb('═' * 52, 'head')
@@ -1139,24 +1487,61 @@ class SecurityScanner:
         log_cb('═' * 52, 'head')
 
         if OS == 'Linux':
-            self._scan_running_processes(log_cb)
-            self._scan_suid_sgid(log_cb)
-            self._scan_world_writable(log_cb)
-            self._scan_cron(log_cb)
-            self._scan_shell_rc_files(log_cb)
-            self._scan_xdg_autostart(log_cb)
-            self._scan_systemd_user_units(log_cb)
-            self._scan_suspicious_files(log_cb, SCAN_DIRS_LINUX)
-            self._scan_network_linux(log_cb)
-            self._scan_ld_preload(log_cb)
-            self._scan_ssh_authorized_keys(log_cb)
-            self._scan_hosts_file(log_cb)
+            steps = [
+                ('Tiến trình đang chạy',      self._scan_running_processes),
+                ('SUID/SGID',                 self._scan_suid_sgid),
+                ('File world-writable',       self._scan_world_writable),
+                ('Cron jobs',                 self._scan_cron),
+                ('Shell RC files',            self._scan_shell_rc_files),
+                ('XDG autostart',             self._scan_xdg_autostart),
+                ('Systemd --user units',      self._scan_systemd_user_units),
+                ('File nghi ngờ',             lambda cb: self._scan_suspicious_files(cb, SCAN_DIRS_LINUX)),
+                ('Kết nối mạng',              self._scan_network_linux),
+                ('LD_PRELOAD',                self._scan_ld_preload),
+                ('SSH authorized_keys',       self._scan_ssh_authorized_keys),
+                ('Hosts file',                self._scan_hosts_file),
+            ]
         elif OS == 'Windows':
-            self._scan_running_processes(log_cb)
-            self._scan_suspicious_files(log_cb, [d for d in SCAN_DIRS_WINDOWS if d])
-            self._scan_autorun_windows(log_cb)
-            self._scan_network_windows(log_cb)
-            self._scan_hosts_file(log_cb)
+            steps = [
+                ('Tiến trình đang chạy',      self._scan_running_processes),
+                ('File nghi ngờ',             lambda cb: self._scan_suspicious_files(cb, [d for d in SCAN_DIRS_WINDOWS if d])),
+                ('Autorun Windows',           self._scan_autorun_windows),
+                # ── Windows persistence coverage brought up to the same
+                # depth as the Linux checks above (see notes on each fn).
+                ('Scheduled Tasks',           self._scan_scheduled_tasks_windows),
+                ('Startup folder',            self._scan_startup_folder_windows),
+                ('Windows Services',          self._scan_services_windows),
+                ('AppInit_DLLs / IFEO',       self._scan_appinit_ifeo_windows),
+                ('Kết nối mạng',              self._scan_network_windows),
+                ('Hosts file',                self._scan_hosts_file),
+            ]
+        else:
+            steps = []
+
+        total = len(steps)
+        for i, (label, fn) in enumerate(steps):
+            if progress_cb:
+                # Leave the last 5% for the summary/print step below, so
+                # the bar doesn't sit at 100% while _print_summary is
+                # still running.
+                pct = int((i / total) * 95) if total else 0
+                progress_cb(pct, label)
+
+            t_step = time.monotonic()
+            try:
+                fn(log_cb)
+            except Exception as e:
+                log_cb(f'  ✗  {label}: lỗi nội bộ trong bước quét — {e}', 'err')
+            step_ms = int((time.monotonic() - t_step) * 1000)
+            self.step_timings.append((label, step_ms))
+            # Only surface timing for steps slow enough to matter — this is
+            # what lets a slow scan be diagnosed ("which step took 80s?")
+            # instead of only ever showing one opaque total at the end.
+            if step_ms > 3000:
+                log_cb(f'     ·  {label}: {step_ms/1000:.1f}s', 'dim')
+
+        if progress_cb:
+            progress_cb(100, 'Hoàn tất')
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         self._print_summary(log_cb, elapsed_ms)
@@ -1275,7 +1660,7 @@ class SecurityScanner:
         found = 0
         for line in out.splitlines():
             f = line.strip()
-            if not f or f in known_suid or _is_expected_suid_path(f) or f in _wl:
+            if not f or f in known_suid or _is_expected_suid_path(f) or _wl_hit(f, _wl):
                 continue
             self.results.append(ScanResult(
                 severity='high', category='suid', path=f,
@@ -1613,42 +1998,167 @@ class SecurityScanner:
         log_cb('', 'info')
         log_cb('◆ Scanning suspicious files in temp/user dirs...', 'info')
         found = 0
+        disguise_hits = 0
+        # Safety cap: a messy %TEMP% can accumulate tens of thousands of
+        # leftover install/update artifacts over months of use. Without a
+        # ceiling, walking + opening every single one for a header-sniff
+        # turns into a long, disk-thrashing loop — that's what was pinning
+        # the CPU/fan. 15k files per top-level dir is generous for a normal
+        # scan and still finishes in a reasonable time even on a neglected
+        # temp folder.
+        _MAX_FILES_PER_DIR = 15_000
+        # Cap how many "disguised executable" findings get their own log
+        # line — beyond this we still record them (so Auto-Fix can still
+        # act on all of them) but stop spamming the visible log, which is
+        # what made the scan feel like it was "stuck" printing forever.
+        _MAX_DISGUISE_LOG_LINES = 8
+
+        # .tmp is deliberately EXCLUDED from the magic-byte disguise check.
+        # Installers, uninstallers, and auto-updaters routinely write raw
+        # executable/DLL data into .tmp files while self-extracting
+        # (classic examples: Inno Setup's `_unins*.tmp`, InstallShield's
+        # `is-*.tmp`, Windows Installer's `DOxxxx.tmp`/`MSIxxxx.tmp`).
+        # A PE header inside a .tmp file in %TEMP% is completely normal —
+        # it is NOT a meaningful signal on its own, and treating it as one
+        # produced a flood of false positives on totally ordinary temp
+        # files. The check still applies to extensions where an executable
+        # header genuinely has no legitimate reason to appear (.dat, .png,
+        # .jpg, .txt, .log, no extension at all, etc).
+        #
+        # .vdm / .lkg are Windows Defender's own virus-definition delta
+        # file formats (mpasdlta.vdm, mpavdlta.lkg, mpengine.lkg, etc,
+        # under ProgramData\Microsoft\Windows Defender) — they are
+        # binary/PE-like containers *by design*, updated by Windows
+        # itself on every definition update. .mui is a standard
+        # resource-only PE format used throughout Windows for localized
+        # strings (mpuxagent.dll.mui etc) — completely normal, not a
+        # disguise technique. All three produced a large false-positive
+        # flood when ProgramData was added to the scan.
+        _DISGUISE_SKIP_EXTENSIONS = {'.tmp', '.vdm', '.lkg', '.mui'}
+        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
+        _scan_cache = _load_file_scan_cache()
+        _new_scan_cache = {}   # rebuilt fresh each run — entries not re-seen just age out naturally
 
         for d in dirs:
             p = Path(d)
             if not p.exists():
                 continue
+            files_seen_in_dir = 0
             try:
                 for f in _safe_walk(p):
+                    files_seen_in_dir += 1
+                    if files_seen_in_dir > _MAX_FILES_PER_DIR:
+                        log_cb(f'  ~ {d}: quá nhiều file, dừng sớm để tránh treo máy '
+                               f'(đã quét {_MAX_FILES_PER_DIR})', 'dim')
+                        break
+
                     fstr = str(f)
                     fstr_l = fstr.lower()
 
+                    if _wl_hit(fstr, _wl):
+                        continue
+
                     # ── Skip safe contexts ─────────────────────
+                    # 'windows defender' / 'programdata\microsoft\windows
+                    # defender' specifically: this is the OS's own antivirus
+                    # definition-update directory. It is entirely
+                    # Microsoft-owned, updated automatically, and full of
+                    # PE-container files by design (see .vdm/.lkg note
+                    # above) — scanning our own OS's antivirus engine for
+                    # "disguised executables" is both pointless and the
+                    # single biggest source of false positives seen so far.
                     if any(skip in fstr_l for skip in (
                         'node_modules', '/cache', '\\cache', '.git',
                         '__pycache__', '.venv', 'site-packages',
                         'subdir', '_mei', '.mount_',
+                        'windows defender', '\\microsoft\\edgeupdate',
+                        '\\microsoft\\windowsapps',
                     )):
                         continue
 
                     # ── Skip files over 50MB ───────────────────
                     try:
-                        if f.stat().st_size > 50_000_000:
+                        fsize = f.stat().st_size
+                        if fsize > 50_000_000:
                             continue
                     except OSError:
                         continue
 
-                    # ── Only scan script/executable extensions ──
-                    if f.suffix.lower() not in DANGEROUS_EXTENSIONS:
+                    # ── Real self-exclusion (path-based, not filename) ──
+                    if _is_own_app_file(fstr):
                         continue
 
+                    # ── Magic-byte sniff — runs on files with an extension
+                    #    that has no legitimate reason to contain executable
+                    #    bytes. Skips .tmp/.vdm/.lkg/.mui (see
+                    #    _DISGUISE_SKIP_EXTENSIONS note above) and the
+                    #    DANGEROUS_EXTENSIONS list (those get the full
+                    #    content/pattern scan instead).
+                    if (f.suffix.lower() not in DANGEROUS_EXTENSIONS
+                            and f.suffix.lower() not in _DISGUISE_SKIP_EXTENSIONS):
+                        try:
+                            mtime = f.stat().st_mtime
+                        except OSError:
+                            continue
+                        sig = [mtime, fsize]
+                        # Cache hit: this exact file (by path+mtime+size)
+                        # was already opened and verified clean on a
+                        # previous scan — most files in Temp/AppData don't
+                        # change between quick successive scans, so this
+                        # is what actually cuts down repeat-scan time and
+                        # variance instead of re-sniffing thousands of
+                        # unchanged files every single run.
+                        if _scan_cache.get(fstr) == sig:
+                            _new_scan_cache[fstr] = sig
+                            continue
+                        disguise_reason = _sniff_executable_disguise(f)
+                        if disguise_reason:
+                            # SCORED, not instant-flag — a bare format
+                            # mismatch alone is a weak signal on its own
+                            # (see _score_disguised_file docstring); it
+                            # only becomes a 'high' finding with
+                            # corroboration, same philosophy as the
+                            # process-risk scorer below.
+                            risk = _score_disguised_file(f, disguise_reason)
+                            if risk.severity:
+                                self.results.append(ScanResult(
+                                    severity=risk.severity, category='suspicious', path=fstr,
+                                    detail=f'Disguised executable: {f.name}',
+                                    reasons=risk.signals + [
+                                        f'Claimed extension: {f.suffix or "(none)"}',
+                                        f'Location: {fstr[:80]}'],
+                                    can_fix=True, fix_action='remove-file', fix_target=fstr,
+                                ))
+                                disguise_hits += 1
+                                icon = '⛔' if risk.severity == 'critical' else '⚠ '
+                                if disguise_hits <= _MAX_DISGUISE_LOG_LINES:
+                                    log_cb(f'  {icon} Disguised executable: {f.name}', 'warn')
+                                    log_cb(f'     Reason: {disguise_reason}', 'dim')
+                                elif disguise_hits == _MAX_DISGUISE_LOG_LINES + 1:
+                                    log_cb('  ~  (thêm nhiều file tương tự — ẩn bớt log, '
+                                           'xem đầy đủ trong danh sách kết quả)', 'dim')
+                                found += 1
+                            else:
+                                _new_scan_cache[fstr] = sig  # scored but below reporting threshold — treat as clean for caching
+                        else:
+                            _new_scan_cache[fstr] = sig  # no format mismatch at all — clean
+                        continue  # not a script extension — content-pattern
+                                  # scan below doesn't apply to it either way
+
+                    # ── Read content for pattern matching ──────
+                    # NOTE: previously hard-capped at the first 4096 bytes,
+
+                    # which is trivially bypassed by prepending a few KB of
+                    # junk/comment padding before the real payload. Read the
+                    # whole file for anything reasonably script-sized, and
+                    # only cap for the rare oversized "script" (still well
+                    # short of the full 50MB directory-scan ceiling above)
+                    # so a single pathological file can't blow up scan time.
+                    read_cap = fsize if fsize <= 2_000_000 else 2_000_000
                     try:
-                        txt = f.read_text(errors='ignore')[:4096]
+                        with open(f, 'r', errors='ignore') as fh:
+                            txt = fh.read(read_cap)
                     except (OSError, PermissionError, UnicodeDecodeError):
-                        continue
-
-                    # ── Check if file is from CyberClean itself ─
-                    if any(marker in fstr for marker in ('CyberClean', 'cyberclean')):
                         continue
 
                     # ── Pattern match ──────────────────────────
@@ -1691,6 +2201,8 @@ class SecurityScanner:
 
             except (PermissionError, OSError):
                 pass
+
+        _save_file_scan_cache(_new_scan_cache)
 
         if found == 0:
             self._ok(log_cb, 'No suspicious files found in temp/user dirs')
@@ -2003,6 +2515,7 @@ class SecurityScanner:
         }
 
         found = 0
+        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
         for hive, key_path in keys:
             hive_name = 'HKCU' if hive == winreg.HKEY_CURRENT_USER else 'HKLM'
             try:
@@ -2015,6 +2528,8 @@ class SecurityScanner:
 
                         # Skip known legitimate entries
                         if name in trusted_autorun_names:
+                            continue
+                        if _wl_hit(val, _wl):
                             continue
 
                         val_lower = val.lower()
@@ -2059,6 +2574,433 @@ class SecurityScanner:
 
         if found == 0:
             self._ok(log_cb, 'No suspicious autoruns')
+
+    # ══════════════════════════════════════════════════════
+    # WINDOWS SCHEDULED TASKS  (analog of Linux cron scan)
+    # ══════════════════════════════════════════════════════
+    def _scan_scheduled_tasks_windows(self, log_cb):
+        """
+        Scheduled Tasks are, in practice, THE most common Windows
+        persistence mechanism for real malware (far more than the
+        Run/RunOnce registry keys) precisely because most consumer
+        security tooling — including CyberClean before this check existed
+        — only looks at autorun registry keys. This is the direct
+        Windows analog of _scan_cron() on Linux.
+        """
+        log_cb('', 'info')
+        log_cb('◆ Scanning Windows Scheduled Tasks...', 'info')
+
+        # Read-only query — no attacker-controlled data is interpolated
+        # here, so the shell=True run() helper is fine for this call.
+        out = run('schtasks /query /fo LIST /v 2>nul', timeout=20)
+        if not out:
+            log_cb('  ~ Could not query Scheduled Tasks', 'dim')
+            return
+
+        # Each keyword has its own weight instead of "any match = instant
+        # HIGH" — some patterns are strong enough to stand alone
+        # (encoded/hidden PowerShell, certutil -decode), others are weak
+        # and need corroboration (running from Temp alone, or wscript/
+        # cscript alone — both have plenty of legitimate uses). All
+        # matching signals accumulate (not just the first one found),
+        # same scoring philosophy as the process scanner.
+        suspicious_kw = [
+            ('powershell -enc',       45, 'Encoded PowerShell command (obfuscation)'),
+            ('powershell -w hidden',  40, 'Hidden PowerShell window'),
+            ('powershell.exe -windowstyle hidden', 40, 'Hidden PowerShell window'),
+            ('-nop -w hidden',        40, 'No-profile hidden PowerShell (common dropper pattern)'),
+            ('\\appdata\\local\\temp\\', 25, 'Task runs from Temp folder'),
+            ('\\windows\\temp\\',     25, 'Task runs from Windows Temp folder'),
+            ('mshta ',                40, 'MSHTA execution (used by malware)'),
+            ('wscript ',              20, 'WScript execution'),
+            ('cscript ',              20, 'CScript execution'),
+            ('regsvr32 /s',           35, 'Silent RegSvr32 (COM scriptlet loading)'),
+            ('certutil -decode',      45, 'Certutil decoding (dropper pattern)'),
+            ('bitsadmin /transfer',   35, 'BITSAdmin file download'),
+            ('rundll32.exe javascript:', 45, 'Rundll32 JScript execution (fileless technique)'),
+        ]
+
+        # Known noisy legitimate task-name substrings (vendor updaters etc.)
+        trusted_task_kw = (
+            'onedrive', 'googleupdate', 'microsoft', 'nvidia', 'adobe',
+            'chromium', 'edgeupdate', 'msedge', 'windowsdefender',
+            'gamingservices', 'dropbox', 'steam',
+        )
+
+        found = 0
+        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
+        # `schtasks /v` output is a series of blocks separated by blank
+        # lines, each with "TaskName:" and "Task To Run:" fields.
+        blocks = re.split(r'\n\s*\n', out)
+        for block in blocks:
+            name_m = re.search(r'^TaskName:\s*(.+)$', block, re.M)
+            action_m = re.search(r'^Task To Run:\s*(.+)$', block, re.M)
+            if not name_m or not action_m:
+                continue
+            task_name = name_m.group(1).strip()
+            action = action_m.group(1).strip()
+            action_l = action.lower()
+
+            if any(kw in task_name.lower() for kw in trusted_task_kw):
+                continue
+            if _wl_hit(action, _wl):
+                continue
+
+            risk = _Risk()
+            for kw, weight, reason in suspicious_kw:
+                if kw in action_l:
+                    risk.add(weight, reason)
+
+            if risk.severity:
+                self.results.append(ScanResult(
+                    severity=risk.severity, category='malware', path=action,
+                    detail=f'Suspicious scheduled task: {task_name}',
+                    reasons=risk.signals + [f'Action: {action[:100]}'],
+                    # Deletion uses list-argv subprocess (no shell string
+                    # built from the task name) — see
+                    # remove_scheduled_task_windows() below. Safe even
+                    # though task_name is attacker-chosen, because argv
+                    # lists bypass shell parsing entirely.
+                    can_fix=True, fix_action='remove-scheduled-task',
+                    fix_target=task_name,
+                ))
+                icon = '⛔' if risk.severity == 'critical' else '⚠ '
+                log_cb(f'  {icon} Suspicious scheduled task: {task_name}', 'warn')
+                for sig in risk.signals:
+                    log_cb(f'     {sig}', 'dim')
+                log_cb(f'     Action: {action[:80]}', 'dim')
+                found += 1
+
+        if found == 0:
+            self._ok(log_cb, 'No suspicious Scheduled Tasks')
+
+    # ══════════════════════════════════════════════════════
+    # WINDOWS STARTUP FOLDER  (analog of XDG autostart)
+    # ══════════════════════════════════════════════════════
+    def _scan_startup_folder_windows(self, log_cb):
+        """Both the per-user and all-users Startup folders — anything
+        placed here runs on every logon, same idea as XDG autostart
+        .desktop files on Linux."""
+        log_cb('', 'info')
+        log_cb('◆ Scanning Windows Startup folder...', 'info')
+
+        appdata = os.environ.get('APPDATA', '')
+        programdata = os.environ.get('PROGRAMDATA', 'C:/ProgramData')
+        candidates = []
+        if appdata:
+            candidates.append(Path(appdata) / 'Microsoft/Windows/Start Menu/Programs/Startup')
+        candidates.append(Path(programdata) / 'Microsoft/Windows/Start Menu/Programs/Startup')
+
+        suspicious_kw = [
+            ('powershell -enc',      'Encoded PowerShell command in shortcut target'),
+            ('\\appdata\\local\\temp\\', 'Shortcut target runs from Temp folder'),
+            ('\\windows\\temp\\',    'Shortcut target runs from Windows Temp folder'),
+            ('mshta ',               'MSHTA execution'),
+            ('wscript ',             'WScript execution'),
+            ('cscript ',             'CScript execution'),
+        ]
+
+        found = 0
+        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
+        for folder in candidates:
+            if not folder.exists():
+                continue
+            try:
+                for item in folder.iterdir():
+                    if item.is_dir():
+                        continue
+                    if _wl_hit(str(item), _wl):
+                        continue
+                    name_l = item.name.lower()
+
+                    # .lnk shortcut targets can't be read without pywin32's
+                    # COM shell interface (not a guaranteed dependency here),
+                    # so treat any non-standard, unsigned-looking .lnk as a
+                    # lower-severity "review" finding rather than trying to
+                    # parse the binary shortcut format by hand.
+                    if name_l.endswith('.lnk'):
+                        self.results.append(ScanResult(
+                            severity='medium', category='suspicious', path=str(item),
+                            detail=f'Startup shortcut: {item.name}',
+                            reasons=['Runs automatically at every logon — verify this is something you installed intentionally'],
+                            can_fix=True, fix_action='remove-file', fix_target=str(item),
+                        ))
+                        log_cb(f'  ~  Startup shortcut: {item.name}', 'warn')
+                        found += 1
+                        continue
+
+                    # Script/executable dropped directly into Startup
+                    # (no shortcut wrapper at all) is a much stronger signal.
+                    if item.suffix.lower() in DANGEROUS_EXTENSIONS:
+                        try:
+                            txt = item.read_text(errors='ignore')[:2000]
+                        except (OSError, UnicodeDecodeError):
+                            txt = ''
+                        matched_reason = None
+                        for kw, reason in suspicious_kw:
+                            if kw in txt.lower():
+                                matched_reason = reason
+                                break
+                        self.results.append(ScanResult(
+                            severity='high', category='malware', path=str(item),
+                            detail=f'Executable directly in Startup folder: {item.name}',
+                            reasons=[matched_reason or 'Script/executable placed directly in Startup — runs at every logon'],
+                            can_fix=True, fix_action='remove-file', fix_target=str(item),
+                        ))
+                        log_cb(f'  ⛔  Executable in Startup folder: {item.name}', 'err')
+                        found += 1
+            except (PermissionError, OSError):
+                pass
+
+        if found == 0:
+            self._ok(log_cb, 'No suspicious Startup folder entries')
+
+    # ══════════════════════════════════════════════════════
+    # WINDOWS SERVICES  (new — no Linux equivalent scanned before
+    # either, but Services are one of the two most common real-world
+    # Windows persistence mechanisms alongside Scheduled Tasks)
+    # ══════════════════════════════════════════════════════
+    def _scan_services_windows(self, log_cb):
+        """
+        Flags two independent things via the registry (fast, no per-service
+        subprocess spawn needed):
+          1. A service binary path that isn't quoted AND has a space
+             INSIDE THE ACTUAL EXECUTABLE PATH ITSELF (not in trailing
+             command-line arguments) — the classic "unquoted service path"
+             privilege-escalation bug: Windows tries each space-delimited
+             prefix as a candidate executable, so
+             `C:\\Program Files\\My App\\service.exe` lets an attacker who
+             can write `C:\\Program.exe` hijack it.
+          2. A service binary running from a temp/user-writable directory
+             instead of Program Files / System32 — services are supposed
+             to be installed software, not something living in %TEMP%.
+        """
+        log_cb('', 'info')
+        log_cb('◆ Scanning Windows Services...', 'info')
+        try:
+            import winreg
+        except ImportError:
+            log_cb('  ~ winreg not available', 'dim')
+            return
+
+        found = 0
+        temp_markers = ('\\temp\\', '\\appdata\\local\\temp\\', '\\users\\public\\')
+        _wl = _load_user_whitelist()  # BUG FIX: this scan never consulted
+        # the whitelist before, so "Mark as safe" silently did nothing for
+        # any Services finding — the JSON got written correctly, this scan
+        # just never read it back.
+
+        # Built-in Windows services store ImagePath in several equivalent
+        # forms that all resolve to the trusted System32/SysWOW64 dirs:
+        #   \SystemRoot\System32\drivers\xxx.sys   (NT device-path form)
+        #   system32\drivers\xxx.sys               (relative, no drive)
+        #   %SystemRoot%\System32\svchost.exe      (env-var form)
+        #   C:\Windows\System32\svchost.exe        (literal — driver/service
+        #                                            installers sometimes
+        #                                            write this form too)
+        # The previous version only recognized the literal 'C:\Windows\...'
+        # form, so it treated \SystemRoot\... and %SystemRoot%\... — used
+        # by the vast majority of stock Windows services — as "not a
+        # trusted path" and flagged nearly every built-in service.
+        _TRUSTED_SVC_PREFIXES = (
+            'c:\\windows\\system32\\', 'c:\\windows\\syswow64\\',
+            '\\systemroot\\system32\\', '\\systemroot\\syswow64\\',
+            '%systemroot%\\system32\\', '%systemroot%\\syswow64\\',
+            'system32\\', 'syswow64\\',
+            '\\??\\c:\\windows\\system32\\',
+        )
+
+        try:
+            services_key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r'SYSTEM\CurrentControlSet\Services'
+            )
+        except OSError:
+            log_cb('  ~ Could not open Services registry key', 'dim')
+            return
+
+        i = 0
+        while True:
+            try:
+                svc_name = winreg.EnumKey(services_key, i)
+                i += 1
+            except OSError:
+                break
+
+            try:
+                svc_key = winreg.OpenKey(services_key, svc_name)
+            except OSError:
+                continue
+
+            try:
+                image_path, _ = winreg.QueryValueEx(svc_key, 'ImagePath')
+            except OSError:
+                winreg.CloseKey(svc_key)
+                continue
+            winreg.CloseKey(svc_key)
+
+            if not image_path:
+                continue
+            path_l = image_path.lower()
+
+            # ── Respect user whitelist (this was the missing wire) ──
+            if _wl_hit(image_path, _wl):
+                continue
+
+            # ── Extract just the executable path portion (drop trailing
+            #    command-line arguments like "-k netsvcs -p"). This is what
+            #    actually matters for the unquoted-path vulnerability: a
+            #    space in "-k netsvcs" is completely normal and irrelevant;
+            #    only a space INSIDE the folder/file path is exploitable.
+            exe_m = re.match(r'^\s*"?(.+?\.(?:exe|sys|dll))"?(?:\s|$)', image_path, re.I)
+            exe_path = exe_m.group(1) if exe_m else image_path
+            exe_path_l = exe_path.lower()
+            was_quoted = image_path.lstrip().startswith('"')
+            is_trusted_prefix = any(exe_path_l.startswith(p) for p in _TRUSTED_SVC_PREFIXES)
+
+            # ── Unquoted path + space INSIDE the exe path + not System32 ──
+            if not was_quoted and ' ' in exe_path and not is_trusted_prefix:
+                self.results.append(ScanResult(
+                    severity='medium', category='suspicious', path=image_path,
+                    detail=f'Unquoted service path: {svc_name}',
+                    reasons=[
+                        'ImagePath contains a space inside the executable '
+                        'path and is not quoted — classic unquoted-service-'
+                        'path privilege escalation vector',
+                        f'ImagePath: {image_path[:100]}',
+                    ],
+                ))
+                log_cb(f'  ~  Unquoted service path: {svc_name}', 'warn')
+                found += 1
+
+            # ── Service binary running from a temp/user-writable dir ──
+            if any(m in path_l for m in temp_markers):
+                self.results.append(ScanResult(
+                    severity='high', category='malware', path=image_path,
+                    detail=f'Service running from Temp: {svc_name}',
+                    reasons=[
+                        'Service ImagePath points into a Temp/user-writable '
+                        'directory — legitimate services install to Program '
+                        'Files or System32, not %TEMP%',
+                        f'ImagePath: {image_path[:100]}',
+                    ],
+                    # Disabling (not deleting) a service is the safer default
+                    # fix — deletion is harder to undo if this turns out to
+                    # be a misidentified legitimate service.
+                    can_fix=True, fix_action='disable-windows-service',
+                    fix_target=svc_name,
+                ))
+                log_cb(f'  ⛔  Service running from Temp: {svc_name}', 'err')
+                log_cb(f'     ImagePath: {image_path[:80]}', 'dim')
+                found += 1
+
+        winreg.CloseKey(services_key)
+        if found == 0:
+            self._ok(log_cb, 'No suspicious Windows Services')
+
+    # ══════════════════════════════════════════════════════
+    # WINDOWS AppInit_DLLs / IFEO  (analog of LD_PRELOAD)
+    # ══════════════════════════════════════════════════════
+    def _scan_appinit_ifeo_windows(self, log_cb):
+        """
+        AppInit_DLLs forces a DLL to load into every process that loads
+        user32.dll — the direct Windows equivalent of LD_PRELOAD. Image
+        File Execution Options (IFEO) "Debugger" values let an attacker
+        silently redirect execution of a target binary (classically used
+        to hijack accessibility tools like sethc.exe/utilman.exe, but
+        applicable to any .exe) to something else entirely.
+
+        Detection only (can_fix=False): unlike a Run-key autorun or a
+        single dropped file, both of these can have legitimate uses (some
+        AV/accessibility software still uses IFEO Debugger legitimately),
+        so this is surfaced for the user to review rather than auto-removed.
+        """
+        log_cb('', 'info')
+        log_cb('◆ Scanning AppInit_DLLs / IFEO hijacks...', 'info')
+        try:
+            import winreg
+        except ImportError:
+            log_cb('  ~ winreg not available', 'dim')
+            return
+
+        found = 0
+        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
+
+        # ── AppInit_DLLs ────────────────────────────────────
+        for hive, hive_name in ((winreg.HKEY_LOCAL_MACHINE, 'HKLM'),):
+            try:
+                key = winreg.OpenKey(
+                    hive, r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows'
+                )
+                try:
+                    val, _ = winreg.QueryValueEx(key, 'AppInit_DLLs')
+                except OSError:
+                    val = ''
+                try:
+                    enabled, _ = winreg.QueryValueEx(key, 'LoadAppInit_DLLs')
+                except OSError:
+                    enabled = 0
+                winreg.CloseKey(key)
+
+                if (val and str(val).strip() and int(enabled or 0) != 0
+                        and not _wl_hit(val, _wl)):
+                    self.results.append(ScanResult(
+                        severity='high', category='malware', path=val,
+                        detail='AppInit_DLLs is set (loads into every GUI process)',
+                        reasons=[
+                            'AppInit_DLLs is the Windows equivalent of '
+                            'LD_PRELOAD — the listed DLL(s) get force-loaded '
+                            'into every process that loads user32.dll',
+                            f'DLLs: {val}',
+                        ],
+                    ))
+                    log_cb(f'  ⛔  AppInit_DLLs active: {val}', 'err')
+                    found += 1
+            except OSError:
+                pass
+
+        # ── IFEO Debugger hijacks ───────────────────────────
+        try:
+            ifeo = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+            )
+        except OSError:
+            ifeo = None
+
+        if ifeo:
+            i = 0
+            while True:
+                try:
+                    target_exe = winreg.EnumKey(ifeo, i)
+                    i += 1
+                except OSError:
+                    break
+                try:
+                    sub = winreg.OpenKey(ifeo, target_exe)
+                    debugger, _ = winreg.QueryValueEx(sub, 'Debugger')
+                    winreg.CloseKey(sub)
+                except OSError:
+                    continue
+
+                if debugger and not _wl_hit(debugger, _wl):
+                    self.results.append(ScanResult(
+                        severity='critical', category='malware', path=debugger,
+                        detail=f'IFEO Debugger hijack: {target_exe}',
+                        reasons=[
+                            'A "Debugger" value under Image File Execution '
+                            f'Options silently redirects {target_exe} to run '
+                            'this program instead — classic hijack technique '
+                            '(e.g. sethc.exe/utilman.exe accessibility backdoor)',
+                            f'Redirects to: {debugger}',
+                        ],
+                    ))
+                    log_cb(f'  ⛔  IFEO hijack: {target_exe} → {debugger}', 'err')
+                    found += 1
+            winreg.CloseKey(ifeo)
+
+        if found == 0:
+            self._ok(log_cb, 'No AppInit_DLLs / IFEO hijacks found')
 
     # ══════════════════════════════════════════════════════
     # SUMMARY  (smart, tiered)
