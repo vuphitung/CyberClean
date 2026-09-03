@@ -1149,10 +1149,11 @@ class CyberCleanApp(QMainWindow):
         # Findings table
         self._lbl_findings_sec = _lbl_section(_t('lbl_findings', 'FINDINGS'))
         lay.addWidget(self._lbl_findings_sec)
-        self.scan_table = QTableWidget(0, 4)
+        self.scan_table = QTableWidget(0, 5)
         self.scan_table.setHorizontalHeaderLabels([
             _t('col_sev','SEV'), _t('col_category','CATEGORY'),
-            _t('col_path','PATH'), _t('col_detail','DETAIL')
+            _t('col_path','PATH'), _t('col_detail','DETAIL'),
+            _t('col_fix','FIX'),
         ])
         self.scan_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
@@ -1923,13 +1924,24 @@ class CyberCleanApp(QMainWindow):
             sev_label = r.severity.upper()
             if hasattr(r, 'score') and r.score:
                 sev_label = f'{sev_label} [{r.score}]'
-            for i, val in enumerate([sev_label, r.category, r.path, r.detail]):
+            # FIX column: a short badge showing whether Auto-Fix for this
+            # finding can be undone. Reads r.reversible, which scanner.py
+            # already fills in automatically from FIX_REVERSIBILITY based
+            # on fix_action — nothing to compute here. Findings with no
+            # fix_action (view-only, can_fix=False) have reversible=='',
+            # so this column stays blank for them, same as the dialog.
+            fix_badge = ''
+            if getattr(r, 'reversible', ''):
+                fix_badge = '🔄' if r.reversible.startswith('reversible') else '⚠'
+            for i, val in enumerate([sev_label, r.category, r.path, r.detail, fix_badge]):
                 ti = QTableWidgetItem(val)
                 if i == 0:
                     ti.setForeground(QColor(sev_col.get(r.severity, C['text'])))
                     # Tooltip: show full reasons list
                     if hasattr(r, 'reasons') and r.reasons:
                         ti.setToolTip('\n'.join(f'• {x}' for x in r.reasons))
+                if i == 4 and getattr(r, 'reversible', ''):
+                    ti.setToolTip(r.reversible)
                 self.scan_table.setItem(row, i, ti)
             self.scan_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, r)
 
@@ -1965,7 +1977,7 @@ class CyberCleanApp(QMainWindow):
                 detail += f' [{net.conns} conns]'
             self.scan_table.setItem(row, 3, QTableWidgetItem(detail))
 
-        fixable = [r for r in results if r.can_fix]
+        fixable = [r for r in results if self._scan_autofix_eligible(r)]
         if fixable:
             self.fix_btn.setEnabled(True)
 
@@ -1983,7 +1995,8 @@ class CyberCleanApp(QMainWindow):
         fixable = any(
             self.scan_table.item(r, 0) and
             self.scan_table.item(r, 0).data(Qt.ItemDataRole.UserRole) and
-            self.scan_table.item(r, 0).data(Qt.ItemDataRole.UserRole).can_fix
+            self._scan_autofix_eligible(
+                self.scan_table.item(r, 0).data(Qt.ItemDataRole.UserRole))
             for r in rows
         )
         self.fix_btn.setEnabled(fixable)
@@ -1991,24 +2004,101 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_safe_btn'):
             self._safe_btn.setEnabled(bool(rows))
 
+    def _scan_autofix_eligible(self, r) -> bool:
+        """Batch Auto-Fix: CRITICAL always; HIGH if can_fix. Skip MEDIUM/INFO."""
+        if not getattr(r, 'can_fix', False):
+            return False
+        if r.severity == 'critical':
+            return True
+        if r.severity == 'high':
+            return True
+        return False
+
     def _fix_scan_results(self):
         rows = set(i.row() for i in self.scan_table.selectedItems())
         if not rows:
             rows = set(range(self.scan_table.rowCount()))
+        selected = []
         to_fix = []
         for row in rows:
             item = self.scan_table.item(row, 0)
             if item:
                 r = item.data(Qt.ItemDataRole.UserRole)
-                if r and r.can_fix:
-                    to_fix.append(r)
+                if r:
+                    selected.append(r)
+                    if r.can_fix and self._scan_autofix_eligible(r):
+                        to_fix.append(r)
         if not to_fix:
+            low_conf = [r for r in selected if r.can_fix and not self._scan_autofix_eligible(r)]
+            if low_conf:
+                QMessageBox.information(
+                    self,
+                    _t('confirm_autofix', 'Auto-Fix'),
+                    _t(
+                        'autofix_medium_hint',
+                        'Các mục MEDIUM/INFO thường là script công cụ hợp lệ (pip/venv).\n'
+                        'Dùng "ĐÁNH DẤU AN TOÀN" thay vì Auto-Fix.\n\n'
+                        'MEDIUM/INFO items are often legitimate tool scripts — use Mark as Safe instead.',
+                    ),
+                )
             return
+        # Reversibility summary — the last-commit point before anything
+        # actually runs, so this is where the "not reversible" count needs
+        # to be spelled out as one line, not left for the user to infer
+        # from 5 truncated detail strings. r.reversible is already filled
+        # in by scanner.py (FIX_REVERSIBILITY map); nothing computed here.
+        not_reversible = [r for r in to_fix if r.reversible and not r.reversible.startswith('reversible')]
+        warn_line = ''
+        if not_reversible:
+            warn_line = (
+                f'\n⚠ {len(not_reversible)}/{len(to_fix)} mục KHÔNG thể hoàn tác '
+                'sau khi Auto-Fix.\n'
+                f'⚠ {len(not_reversible)}/{len(to_fix)} cannot be undone after Auto-Fix.\n'
+            )
+
+        # Summarize planned actions for the confirm dialog.
+        action_counts: dict = {}
+        for r in to_fix:
+            key = r.fix_action or ('shell:' + (r.fix_cmd or '')[:20])
+            action_counts[key] = action_counts.get(key, 0) + 1
+        action_lines = []
+        if action_counts.get('fix-suid'):
+            n = action_counts['fix-suid']
+            action_lines.append(f'• Gỡ bit SUID / strip setuid: {n} file(s)')
+        if action_counts.get('fix-writable'):
+            n = action_counts['fix-writable']
+            action_lines.append(f'• Sửa quyền ghi / fix permissions: {n} file(s)')
+        if action_counts.get('remove-file'):
+            n = action_counts['remove-file']
+            action_lines.append(
+                f'• Xóa file — KHÔNG hoàn tác / Delete file — irreversible: {n} file(s)'
+            )
+        if action_counts.get('fix-shell-rc'):
+            n = action_counts['fix-shell-rc']
+            action_lines.append(f'• Xóa dòng backdoor trong shell RC: {n} file(s)')
+        if action_counts.get('disable-systemd-unit'):
+            n = action_counts['disable-systemd-unit']
+            action_lines.append(f'• Tắt systemd --user unit: {n} unit(s)')
+        other = sum(v for k, v in action_counts.items()
+                      if k not in ('fix-suid', 'fix-writable', 'remove-file',
+                                   'fix-shell-rc', 'disable-systemd-unit'))
+        if other:
+            action_lines.append(f'• Other fixes: {other} item(s)')
+        action_block = '\n'.join(action_lines) if action_lines else '• (see list below)'
+        safety_reminder = (
+            '\n\nChỉ sửa nếu path bất thường (/tmp) hoặc bạn chắc chắn là malware.\n'
+            'Only fix if path is unexpected (/tmp) or you are sure it is malware.'
+        )
+
         msg = QMessageBox(self)
         msg.setWindowTitle(_t('confirm_autofix','Auto-Fix'))
         msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText(f'Apply {len(to_fix)} auto-fix(es)?\n\n' +
-                    '\n'.join(f'• {r.path}: {r.detail[:60]}' for r in to_fix[:5]))
+        msg.setText(
+            f'Apply {len(to_fix)} auto-fix(es)?\n'
+            + warn_line + '\n'
+            + action_block + safety_reminder + '\n\n'
+            + '\n'.join(f'• {r.path}: {r.detail[:60]}' for r in to_fix[:5])
+        )
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return

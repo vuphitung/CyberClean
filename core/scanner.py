@@ -88,7 +88,7 @@ PRESERVED from old v2.3:
   - fix_cmd / can_fix on ScanResult
 ═══════════════════════════════════════════════════════════════
 """
-import os, sys, subprocess, platform, stat, re, time, shlex
+import os, sys, subprocess, platform, stat, re, time, shlex, base64
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional, Dict
@@ -207,6 +207,34 @@ def _h(action: str, target: str = '') -> str:
 # and fix time (e.g. a symlink swap or file replacement after the scan
 # completed but before the user clicked Auto-Fix).
 FIX_ACTION_BATCHABLE = {'fix-suid', 'fix-writable', 'remove-file'}
+
+
+# ══════════════════════════════════════════════════════════════
+# FIX REVERSIBILITY — single source of truth, one entry per fix_action
+# ══════════════════════════════════════════════════════════════
+# Defined ONCE here, keyed by fix_action string, and auto-applied to every
+# ScanResult in __post_init__ (see ScanResult below). Do NOT set
+# `reversible=` by hand at any of the ~15 ScanResult(...) call sites —
+# reversibility is a property of the *action*, not of the individual
+# finding, so it belongs in exactly one map. Update an entry here and
+# every finding using that action picks it up automatically.
+#
+# 'reversible' = the fix can be undone without data loss (re-enable a
+#                service/unit, restore a permission bit).
+# 'not reversible' = the fix deletes something with no undo path.
+# Mixed actions (e.g. fix-autorun also best-effort kills a running
+# process) get a compound string instead of collapsing to one bool —
+# a single yes/no would misrepresent one half of what the action does.
+FIX_REVERSIBILITY = {
+    'fix-suid':                'reversible — restores the original permission bit',
+    'fix-writable':            'reversible — restores the original permission bit',
+    'disable-windows-service': 'reversible — service can be re-enabled',
+    'disable-systemd-unit':    'reversible — unit can be re-enabled',
+    'remove-file':             'not reversible — file is deleted',
+    'remove-scheduled-task':   'not reversible — task definition is deleted',
+    'fix-shell-rc':            'not reversible — line removed from rc file',
+    'fix-autorun':             'registry entry: not reversible · process: may restart on its own',
+}
 
 
 def fix_autorun_entry(fix_target: str) -> tuple:
@@ -550,6 +578,17 @@ class ScanResult:
     fix_cmd:   str  = ''     # display-only / legacy fixes with no untrusted data (PID, port, registry API)
     fix_action: str = ''     # NEW: structured batch action name, e.g. 'fix-suid' — set together with fix_target
     fix_target: str = ''     # NEW: raw untrusted path/name, sent to helper via stdin — never shell-interpolated
+    score:      int = 0      # NEW: raw risk score (0-100) behind the severity tier — set at construction time
+                             # from the _Risk/_ProcessRisk object that scored this finding, so the UI can show
+                             # e.g. "CRITICAL (92)" vs "CRITICAL (71)" instead of collapsing both to one label.
+    reversible: str = ''     # NEW: short human-readable note on whether Auto-Fix for this finding can be
+                             # undone. Auto-filled from FIX_REVERSIBILITY based on fix_action — never set by
+                             # hand at each call site. Stays '' when fix_action is '' (nothing to fix, nothing
+                             # to reverse), so the UI simply omits the badge/line when this is empty.
+
+    def __post_init__(self):
+        if self.fix_action and not self.reversible:
+            self.reversible = FIX_REVERSIBILITY.get(self.fix_action, '')
 
 @dataclass
 class ScanReport:
@@ -961,6 +1000,17 @@ BACKDOOR_CMDLINE_PATTERNS = [
     (r'bitsadmin.*\/transfer.*http',        'BITSAdmin file download (dropper)'),
 ]
 
+# ── PHASE A: live reverse-shell session detection ──────────────────
+# Process names that should NEVER legitimately own an ESTABLISHED
+# outbound TCP socket on their own — a normal interactive/login shell
+# doesn't open raw sockets; sshd/curl/etc own the connection, not the
+# shell itself. This is what catches the exact "cmdline is empty
+# because the payload came in over stdin" class of attack (see
+# _score_process below) — cmdline-pattern matching is structurally
+# blind to `echo <payload> | base64 -d | bash`, since bash's argv is
+# just ['bash'] in that case; nc/ncat can be a raw bind/reverse shell.
+SHELL_LIKE_PROCESS_NAMES = {'bash', 'sh', 'zsh', 'dash', 'nc', 'ncat'}
+
 # Script content patterns for file scanning.
 # These are searched inside file contents, so they can be more specific.
 MALICIOUS_SCRIPT_PATTERNS = [
@@ -978,6 +1028,61 @@ MALICIOUS_SCRIPT_PATTERNS = [
     (r'LD_PRELOAD\s*=\s*/tmp',               'LD_PRELOAD set to /tmp path (rootkit pattern)'),
     (r'chmod\s+\+x\s+/tmp/\S+\s*&&\s*/tmp/', 'Download+execute to /tmp'),
 ]
+
+
+# ══════════════════════════════════════════════════════════════
+# PHASE B: base64-obfuscated persistence — decode-and-rescan
+# ══════════════════════════════════════════════════════════════
+# Plain regex against MALICIOUS_SCRIPT_PATTERNS/BACKDOOR_CMDLINE_PATTERNS
+# only ever sees plaintext. `echo <base64> | base64 -d | bash` hides the
+# real payload behind an encoded blob that matches none of those
+# patterns as written — this is exactly the class of persistence line
+# that slipped past the shell-RC scan in the APT demo. One level of
+# decode-then-rescan closes it without having to special-case every
+# possible obfuscation scheme.
+_BASE64_BLOB_RE = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
+_BASE64_MAX_DECODE_BYTES = 4096  # size cap — this is a quick rescan, not a general decoder
+
+
+def _decode_and_rescan(text: str) -> Optional[str]:
+    """
+    If `text` mentions a base64-decode-and-execute idiom (`base64 -d` /
+    `base64 --decode` piped into a shell, or PHP's base64_decode already
+    covered separately above) AND contains a base64-looking blob, decode
+    that blob once (capped at _BASE64_MAX_DECODE_BYTES) and re-run both
+    MALICIOUS_SCRIPT_PATTERNS and BACKDOOR_CMDLINE_PATTERNS against the
+    decoded text.
+
+    Returns a description string for the first match, or None.
+
+    Deliberately gated behind the `base64 -d`/`--decode` idiom check
+    first — a bare base64-looking blob on its own (a JWT, an API key, a
+    git object hash, a docker layer digest) is extremely common in
+    legitimate config/rc files, and decoding+rescanning every such blob
+    unconditionally would be a false-positive generator, not a real
+    detector. Requiring the "decode and execute" verb alongside the blob
+    is what keeps this specific and low-noise.
+    """
+    if not re.search(r'base64\s+(-d|--decode)\b', text, re.I):
+        return None
+    m = _BASE64_BLOB_RE.search(text)
+    if not m:
+        return None
+    blob = m.group(0)[:_BASE64_MAX_DECODE_BYTES]
+    try:
+        pad = '=' * (-len(blob) % 4)
+        decoded = base64.b64decode(blob + pad, validate=False).decode('utf-8', errors='ignore')
+    except Exception:
+        return None
+    if not decoded.strip():
+        return None
+    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+        if re.search(pattern, decoded, re.I):
+            return f'base64-decoded content matches: {desc}'
+    for pattern, desc in BACKDOOR_CMDLINE_PATTERNS:
+        if re.search(pattern, decoded, re.I):
+            return f'base64-decoded content matches: {desc}'
+    return None
 
 # Ports that are commonly used by RAT/C2 frameworks and miners.
 # NOT reported for listening alone — only combined with other signals.
@@ -1090,18 +1195,26 @@ def _which(binary: str) -> bool:
         return False
 
 
-def _safe_walk(root: Path):
+def _safe_walk(root: Path, *, skip_dir: Optional[Callable[[str], bool]] = None,
+               regular_files_only: bool = False):
     """Walk without following symlinks — prevents infinite loops."""
     try:
         for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
             dirnames[:] = [
                 d for d in dirnames
                 if not os.path.islink(os.path.join(dirpath, d))
+                and not (skip_dir and skip_dir(os.path.join(dirpath, d)))
             ]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
                 if fpath.is_symlink():
                     continue
+                if regular_files_only:
+                    try:
+                        if not stat.S_ISREG(fpath.stat().st_mode):
+                            continue
+                    except OSError:
+                        continue
                 yield fpath
     except (PermissionError, OSError):
         pass
@@ -1210,6 +1323,69 @@ def _get_process_connections(pid: int) -> List[int]:
     return ports
 
 
+def _std_fds_on_socket(pid: int) -> bool:
+    """
+    Detect the single most reliable, language/binary-agnostic reverse-shell
+    signature: stdin/stdout/stderr (fd 0/1/2) pointing at a raw TCP/IP
+    socket instead of a tty/pty/pipe/file.
+
+    Why this generalizes where name-matching (SHELL_LIKE_PROCESS_NAMES)
+    doesn't: every reverse shell — bash `>& /dev/tcp/...`, Python
+    `os.dup2(sock.fileno(), 0/1/2)`, PHP `exec("/bin/sh -i <&3 >&3 2>&3")`,
+    socat `exec:...,pty`, a renamed/`exec -a`'d binary, a process that
+    scrubs its own argv or renames itself via prctl(PR_SET_NAME) — all of
+    them MUST perform this exact fd redirection to receive commands and
+    return output over the wire, regardless of name or interpreter.
+
+    CRITICAL: fd 0/1/2 resolving to *some* socket is NOT enough — that was
+    a real bug that flooded results with false positives on every
+    Linux desktop. /proc/<pid>/fd/N -> 'socket:[inode]' fires for
+    AF_UNIX (Unix domain) sockets just as much as AF_INET ones, and
+    AF_UNIX is the normal IPC mechanism for D-Bus (dbus-broker),
+    Wayland/X11 (Hyprland, Xwayland), PipeWire/PulseAudio, systemd
+    socket-activation, journald, etc. — none of that is a reverse
+    shell. We must confirm the specific fd is an actual AF_INET/AF_INET6
+    TCP socket, not just "some socket". We do that by cross-referencing
+    psutil's per-connection `fd` field (psutil already tells us, per
+    open connection, which numeric fd it's bound to and its family) --
+    this is exact, no string-parsing/guessing needed.
+    """
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        target_fds = {0, 1, 2}
+        for conn in p.connections(kind='tcp'):
+            # kind='tcp' already restricts psutil to AF_INET/AF_INET6
+            # SOCK_STREAM — AF_UNIX sockets are never returned here,
+            # regardless of what /proc/<pid>/fd/N's raw readlink says.
+            if conn.fd in target_fds:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _get_established_remotes(pid: int) -> List[tuple]:
+    """
+    Return [(remote_ip, remote_port), ...] for this process's ESTABLISHED
+    TCP connections. Separate from _get_process_connections() (which only
+    returns ports, for the existing mining-pool-port check) because the
+    live-session signal below needs the IP too, for a reason string a
+    human can actually act on ("connection to 127.0.0.1:8888" vs just
+    "8888").
+    """
+    remotes = []
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        for conn in p.connections(kind='tcp'):
+            if conn.status == 'ESTABLISHED' and conn.raddr:
+                remotes.append((conn.raddr.ip, conn.raddr.port))
+    except Exception:
+        pass
+    return remotes
+
+
 # ══════════════════════════════════════════════════════════════
 # PROCESS RISK SCORER
 # ══════════════════════════════════════════════════════════════
@@ -1260,6 +1436,7 @@ def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
     """
     r = _ProcessRisk()
     norm = _normalize_proc_name(name)
+    live_session_hit = False
 
     # ── Hard miner binary name (+60) ──────────────────────
     if norm in {n.replace('.exe', '').lower() for n in KNOWN_MINER_BINS}:
@@ -1311,6 +1488,51 @@ def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
             if any(exe_l.startswith(t) for t in weak_user_writable_roots):
                 r.add(20, f'executable running from user-writable data dir ({exe[:60]})')
 
+    # ── Live reverse-shell session (+45, UNCONDITIONAL) ───
+    # Deliberately NOT gated behind `if r.score > 0` like the mining-port
+    # check below. The whole point of this signal is to catch a process
+    # whose cmdline carries no evidence at all — e.g. a payload delivered
+    # over stdin (`... | base64 -d | bash`) leaves argv as just ['bash'],
+    # so every cmdline-pattern check above scores exactly 0 for it. One
+    # signal → 45 → 'high' alone; combine with another weak signal (e.g.
+    # temp-dir exe) to cross into 'critical', same multi-signal philosophy
+    # as the rest of this scorer.
+    #
+    # TWO independent triggers feed this, deliberately not name-gated:
+    #   (a) fd 0/1/2 → raw socket (_std_fds_on_socket) — the universal,
+    #       binary/language-agnostic reverse-shell signature. Catches
+    #       Python/PHP/socat/renamed-bash/exec-a'd/argv-scrubbed shells
+    #       that a SHELL_LIKE_PROCESS_NAMES check completely misses.
+    #   (b) name is a classic shell/netcat binary AND it holds an
+    #       ESTABLISHED outbound connection — kept as a fast, cheap
+    #       fallback for the common case, and for shells whose fds
+    #       aren't directly on the socket (e.g. piped through a pty
+    #       where fd inspection alone might miss it in some kernels).
+    # Either one alone is sufficient; we don't require both.
+    remotes = _get_established_remotes(pid)[:3]
+    fds_on_socket = _std_fds_on_socket(pid)
+    name_is_shell = norm in SHELL_LIKE_PROCESS_NAMES
+
+    if fds_on_socket or (name_is_shell and remotes):
+        # Add the +45 signal exactly ONCE regardless of how many
+        # ESTABLISHED connections this process holds — this was a real
+        # bug: the loop used to call r.add(45, ...) once per connection,
+        # so a process with 2-3 sockets open (which can happen
+        # legitimately, e.g. a script juggling several outbound calls)
+        # would score +90 or +135 instead of +45, pushing it straight to
+        # 'critical' for no additional evidence. List every remote
+        # endpoint in the reason string instead, so the "why" is still
+        # fully visible without inflating the score per endpoint.
+        if remotes:
+            remote_list = ', '.join(f'{ip}:{port}' for ip, port in remotes)
+            where = f'live outbound connection to {remote_list}'
+        else:
+            where = 'no ESTABLISHED connection visible (may be closing/pty-relayed)'
+        signal_kind = 'stdin/stdout/stderr wired directly to a network socket' if fds_on_socket \
+            else 'shell-like process name'
+        r.add(45, f'reverse-shell signature: {signal_kind}, {where}')
+        live_session_hit = True
+
     # ── Connected to mining pool port (+15) ──────────────
     if r.score > 0:   # only check connections if already suspicious (perf)
         ports = _get_process_connections(pid)
@@ -1349,6 +1571,24 @@ def _score_process(name: str, exe: str, cmd: str, pid: int) -> _ProcessRisk:
                     break
         except (OSError, ValueError):
             pass
+
+    # ── Floor for live-session signal ──────────────────────
+    # The two discounts just above (-30 installed path, -20 root-owned)
+    # exist for the general case: a binary living in /usr/bin and/or
+    # running as root is *usually* trustworthy. But /usr/bin/bash is
+    # where the REAL system bash always lives — an attacker riding a
+    # reverse shell through the legitimate system bash doesn't need a
+    # fake binary anywhere else, so those two discounts stack almost
+    # every time this exact signal fires and were measured (in a live
+    # test against a real ESTABLISHED /dev/tcp session run as root) to
+    # cancel +45 down to -5 — silently dropping the finding entirely
+    # (severity None, never even reported). A live outbound socket
+    # owned by a shell binary is decisive on its own regardless of
+    # where that binary lives or which user runs it, so once the signal
+    # has fired, floor the total at 40 ('high') so no combination of
+    # existing discounts can erase it.
+    if live_session_hit and r.score < 40:
+        r.score = 40
 
     return r
 
@@ -1404,6 +1644,23 @@ _VENDOR_NAME_HINTS = (
 )
 
 _RANDOM_NAME_RE = re.compile(r'^[a-f0-9]{10,}$|^[a-z0-9]{16,}$', re.I)
+# Python/Node mkstemp temp files — not attacker-chosen random names.
+_TEMPFILE_STEM_RE = re.compile(r'^tmp[0-9a-zA-Z_]{4,12}$|^tmp[0-9a-f]{6,}$', re.I)
+
+# Trusted locations for pip/pipx/conda entry-point scripts (shebang, no .py ext).
+_TRUSTED_TOOL_BIN_MARKERS = (
+    '/.local/bin/', '/.local/share/pipx/', '/pipx/venvs/',
+    '/conda/', '/miniconda/', '/anaconda/',
+    '/.venv/bin/', '/venv/bin/',
+)
+# Editor/IDE paths — shebang .mjs/.sh wrappers are normal here.
+_TRUSTED_SHEBANG_PATH_MARKERS = (
+    '/.config/cursor/', '/.config/code/', '/.vscode/', '/.cursor/',
+)
+
+
+def _is_tempfile_stem(stem: str) -> bool:
+    return bool(_TEMPFILE_STEM_RE.match(stem))
 
 
 def _score_disguised_file(f: Path, disguise_reason: str) -> '_Risk':
@@ -1419,19 +1676,177 @@ def _score_disguised_file(f: Path, disguise_reason: str) -> '_Risk':
 
     try:
         mtime = f.stat().st_mtime
-        if (time.time() - mtime) < 86400:
-            r.add(20, 'modified within the last 24 hours')
+        # Recent mtime is weak alone — only nudge temp-dir files (+5, not +20).
+        if (time.time() - mtime) < 86400 and _is_temp_scan_path(str(f)):
+            r.add(5, 'recently modified file in temp directory')
     except OSError:
         pass
 
-    if _RANDOM_NAME_RE.match(f.stem):
+    if _RANDOM_NAME_RE.match(f.stem) and not _is_tempfile_stem(f.stem):
         r.add(15, 'filename looks randomly generated (hash/hex-like)')
 
     fstr_l = str(f).lower()
     if any(v in fstr_l for v in _VENDOR_NAME_HINTS):
         r.add(-25, 'path contains a recognizable vendor/product name')
 
+    # Editor/IDE + pip console scripts: shebang without extension is normal.
+    if _is_trusted_shebang_path(str(f)) and _is_shebang_only_disguise(disguise_reason):
+        r.add(-50, 'editor/tool script in trusted path')
+
     return r
+
+
+def _is_trusted_tool_bin_path(fstr: str) -> bool:
+    p = _norm_scan_path(fstr)
+    return any(m in p for m in _TRUSTED_TOOL_BIN_MARKERS)
+
+
+def _is_trusted_shebang_path(fstr: str) -> bool:
+    p = _norm_scan_path(fstr)
+    if _is_trusted_tool_bin_path(fstr):
+        return True
+    return any(m in p for m in _TRUSTED_SHEBANG_PATH_MARKERS)
+
+
+def _is_shebang_only_disguise(disguise_reason: str) -> bool:
+    return 'shebang' in disguise_reason.lower()
+
+
+def _is_binary_magic_disguise(disguise_reason: str) -> bool:
+    dl = disguise_reason.lower()
+    return 'elf' in dl or 'pe executable' in dl or 'mz header' in dl
+
+
+def _is_temp_scan_path(fstr: str) -> bool:
+    p = _norm_scan_path(fstr)
+    return p.startswith('/tmp/') or p.startswith('/dev/shm/') or p.startswith('/var/tmp/')
+
+
+_DISGUISE_CONTENT_READ_CAP = 65536
+
+
+def _read_disguise_content(f: Path, cap: int = _DISGUISE_CONTENT_READ_CAP) -> str:
+    try:
+        fsize = f.stat().st_size
+        read_cap = min(fsize, cap) if fsize else cap
+        with open(f, 'r', errors='ignore') as fh:
+            return fh.read(read_cap)
+    except OSError:
+        return ''
+
+
+def _match_malicious_content(txt: str) -> Optional[str]:
+    for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
+        if re.search(pattern, txt, re.I):
+            return desc
+    for pattern, desc in BACKDOOR_CMDLINE_PATTERNS:
+        if re.search(pattern, txt, re.I):
+            return desc
+    return _decode_and_rescan(txt)
+
+
+def _resolve_shebang_disguise(
+    f: Path, fstr: str, disguise_reason: str, risk: '_Risk',
+) -> Optional[tuple]:
+    """
+    Content-gated verdict for shebang-only disguise hits.
+    Returns (severity, can_fix, detail, extra_reasons, display_score) or None to skip.
+    """
+    if _is_trusted_shebang_path(fstr):
+        return None
+    if not risk.severity:
+        return None
+
+    txt = _read_disguise_content(f)
+    content_match = _match_malicious_content(txt)
+    extra = [
+        f'Claimed extension: {f.suffix or "(none)"}',
+        f'Location: {fstr[:80]}',
+    ]
+
+    if content_match:
+        return (
+            'critical', True,
+            f'Malicious disguised script: {f.name}',
+            extra + [f'Content pattern: {content_match}', disguise_reason],
+            max(risk.score, 70),
+        )
+
+    if _is_temp_scan_path(fstr):
+        return (
+            'info', False,
+            f'Temp file with script header — benign content: {f.name}',
+            extra + [
+                'Shebang in temp file — content scan found no malicious patterns',
+                'Low confidence — often legitimate temp/editor output; review before deleting',
+            ],
+            min(risk.score, 35),
+        )
+
+    return (
+        'info', False,
+        f'Possible disguised script — verify path (often pip/tool entry points): {f.name}',
+        extra + [
+            'Shebang with non-script extension — no malicious patterns in content',
+            'Low confidence — often legitimate tool/pip scripts; review path before deleting',
+        ],
+        min(risk.score, 35),
+    )
+
+# ── Suspicious-files scan — hard limits (never hang UI) ───────
+# Step deadline is checked every file in the walk loop; dir pruning
+# avoids enumerating package caches (pip/npm/go-build…) that contain
+# tens of thousands of .py/.sh files each needing stat()+read+regex.
+_SUSPICIOUS_FILES_STEP_TIMEOUT_S = 55
+_SUSPICIOUS_MAX_FILES_PER_DIR    = 12_000
+_SUSPICIOUS_MAX_WALK_TOTAL       = 25_000
+_SUSPICIOUS_MAX_CONTENT_SCANS_PER_DIR  = 1_500
+_SUSPICIOUS_MAX_CONTENT_SCANS_TOTAL    = 2_500
+
+# Normalized path substrings — explicit names, never bare '/cache'
+# (/.cache/pip does NOT match a '/cache' substring check).
+_SUSPICIOUS_SKIP_PATH_MARKERS = (
+    '/node_modules/', '/__pycache__/', '/.venv/', '/venv/',
+    '/site-packages/', '/.git/', '/.hg/', '/.svn/',
+    '_mei', '.mount_', 'subdir',
+    'windows defender', '\\microsoft\\edgeupdate', '\\microsoft\\windowsapps',
+    '/.cache/pip/', '/.cache/pip-tools/', '/.cache/uv/', '/.cache/npm/',
+    '/.cache/yarn/', '/.cache/pnpm/', '/.cache/go-build/',
+    '/.cache/node-gyp/', '/.cache/ms-playwright/', '/.cache/huggingface/',
+    '/.cache/torch/', '/.cache/pypoetry/', '/.cache/pre-commit/',
+    '/.cache/mypy/', '/.cache/pytest/', '/.cache/pipenv/', '/.cache/poetry/',
+    '/.cache/bazel/', '/.cache/ccache/', '/.cache/nix/', '/.cache/flatpak/',
+    '/.cargo/registry/', '/.cargo/git/', '/.rustup/', '/go/pkg/mod/',
+    '/.gem/', '/.composer/cache/', '/.local/share/pnpm/',
+    '/.npm/_cacache/', '/.npm/_npx/',
+    '/.local/bin/', '/.local/share/pipx/', '/pipx/venvs/',
+    '/conda/', '/miniconda/', '/anaconda/',
+    '/.vscode/extensions/', '/.cursor/extensions/',
+    '/.config/code/user/globalstorage/', '/.config/cursor/user/globalstorage/',
+)
+
+
+def _norm_scan_path(p: str) -> str:
+    return p.replace('\\', '/').lower()
+
+
+def _should_skip_suspicious_path(fstr: str) -> bool:
+    p = _norm_scan_path(fstr)
+    return any(m in p for m in _SUSPICIOUS_SKIP_PATH_MARKERS)
+
+
+def _should_skip_suspicious_dir(dirpath: str) -> bool:
+    """Prune entire subtrees during os.walk (cheap — before stat storm)."""
+    p = _norm_scan_path(dirpath)
+    if not p.endswith('/'):
+        p += '/'
+    return _should_skip_suspicious_path(p)
+
+
+def _is_low_priority_suspicious_root(d: str) -> bool:
+    """~/.cache is scanned last; skip if step time budget is almost gone."""
+    return _norm_scan_path(d).endswith('/.cache')
+
 
 SCAN_DIRS_LINUX   = ['/tmp', '/var/tmp', '/dev/shm',
                      str(Path.home() / '.local/bin'),
@@ -1465,6 +1880,11 @@ class SecurityScanner:
     def __init__(self):
         self.results: List[ScanResult] = []
         self._ok_count = 0
+        # PIDs already reported by the live-session signal in
+        # _scan_running_processes — _scan_network_linux checks this set
+        # so the same bash-with-established-connection isn't reported
+        # twice (once as a process finding, once as a network finding).
+        self._flagged_shell_pids: set = set()
 
     def scan(self, log_cb: Callable[[str, str], None],
              progress_cb: Optional[Callable[[int, str], None]] = None) -> List[ScanResult]:
@@ -1479,6 +1899,7 @@ class SecurityScanner:
         """
         self.results = []
         self._ok_count = 0
+        self._flagged_shell_pids = set()
         self.step_timings: List[tuple] = []   # [(label, ms), ...]
         t0 = time.monotonic()
 
@@ -1579,6 +2000,29 @@ class SecurityScanner:
 
                 # ── Fast trusted check first ───────────────────
                 is_trusted, trust_reason = _is_trusted_process(name, exe, pid)
+
+                # ── Trust override for live reverse-shell sessions ──
+                # Many trust grants are by NAME (TRUSTED_PROCESS_NAMES) or
+                # by PATH (TRUSTED_PATH_PREFIXES, e.g. /usr/bin/python3) —
+                # both legitimate 99.9% of the time, which is exactly why
+                # a renamed/exec-a'd shell, or a python/php/socat reverse
+                # shell running from a normal installed path, used to be
+                # skipped here before _score_process ever ran. Two
+                # independent checks below cover this without needing to
+                # trust the process's claimed name at all:
+                #   (a) fd 0/1/2 wired directly to a raw socket — the
+                #       universal reverse-shell fd signature, works no
+                #       matter what the process is named or written in.
+                #   (b) classic shell/netcat name + live ESTABLISHED conn
+                #       — cheap fallback for the common case.
+                # Either one strips the trust grant so scoring can run.
+                if is_trusted:
+                    if _std_fds_on_socket(pid):
+                        is_trusted = False
+                    elif _normalize_proc_name(name) in SHELL_LIKE_PROCESS_NAMES:
+                        if _get_established_remotes(pid):
+                            is_trusted = False
+
                 if is_trusted:
                     trusted_skip += 1
                     continue
@@ -1588,6 +2032,9 @@ class SecurityScanner:
 
                 if risk.severity is None:
                     continue  # not suspicious enough
+
+                if _normalize_proc_name(name) in SHELL_LIKE_PROCESS_NAMES:
+                    self._flagged_shell_pids.add(pid)
 
                 found_any = True
                 _kill = _safe_kill_cmd(pid)
@@ -1622,6 +2069,7 @@ class SecurityScanner:
                     reasons=risk.signals,
                     can_fix=bool(_kill),
                     fix_cmd=_kill,
+                    score=risk.score,
                 ))
 
                 log_cb(f'  {icon} [{label}] {display_name}  PID={pid}', 'err' if risk.severity == 'critical' else 'warn')
@@ -1645,6 +2093,7 @@ class SecurityScanner:
         known_suid = {
             '/usr/bin/sudo', '/usr/bin/su', '/usr/bin/passwd', '/usr/bin/newgrp',
             '/usr/bin/suexec', '/usr/bin/chsh', '/usr/bin/chfn', '/usr/bin/gpasswd',
+            '/usr/bin/chage', '/bin/chage',
             '/usr/bin/pkexec', '/usr/lib/polkit-1/polkit-agent-helper-1',
             '/bin/ping', '/usr/bin/ping', '/usr/bin/traceroute',
             '/usr/bin/mount', '/usr/bin/umount', '/usr/sbin/unix_chkpwd',
@@ -1716,16 +2165,21 @@ class SecurityScanner:
                 for f in _safe_walk(p):
                     try:
                         txt = f.read_text(errors='ignore')
+                        matched_desc = None
                         for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                             if re.search(pattern, txt, re.I):
-                                self.results.append(ScanResult(
-                                    severity='critical', category='cron', path=str(f),
-                                    detail=f'Cron backdoor: {desc} in {f.name}',
-                                    reasons=[f'Pattern matched in {f}', desc],
-                                ))
-                                log_cb(f'  ⛔  Cron backdoor [{desc}]: {f}', 'err')
-                                found += 1
+                                matched_desc = desc
                                 break
+                        if matched_desc is None:
+                            matched_desc = _decode_and_rescan(txt)
+                        if matched_desc is not None:
+                            self.results.append(ScanResult(
+                                severity='critical', category='cron', path=str(f),
+                                detail=f'Cron backdoor: {matched_desc} in {f.name}',
+                                reasons=[f'Pattern matched in {f}', matched_desc],
+                            ))
+                            log_cb(f'  ⛔  Cron backdoor [{matched_desc}]: {f}', 'err')
+                            found += 1
                     except (PermissionError, OSError):
                         log_cb(f'  ~ {f.name}: permission denied — run as root for full scan', 'dim')
                         partial = True
@@ -1734,15 +2188,21 @@ class SecurityScanner:
                 partial = True
 
         crontab = run('crontab -l 2>/dev/null')
+        matched_desc = None
         for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
             if re.search(pattern, crontab, re.I):
-                self.results.append(ScanResult(
-                    severity='critical', category='cron', path='user crontab',
-                    detail=f'Cron backdoor: {desc}',
-                    reasons=[desc],
-                ))
-                log_cb(f'  ⛔  Cron backdoor in user crontab: {desc}', 'err')
-                found += 1
+                matched_desc = desc
+                break
+        if matched_desc is None:
+            matched_desc = _decode_and_rescan(crontab)
+        if matched_desc is not None:
+            self.results.append(ScanResult(
+                severity='critical', category='cron', path='user crontab',
+                detail=f'Cron backdoor: {matched_desc}',
+                reasons=[matched_desc],
+            ))
+            log_cb(f'  ⛔  Cron backdoor in user crontab: {matched_desc}', 'err')
+            found += 1
 
         if found == 0:
             suffix = ' (partial — run as root for full scan)' if partial else ''
@@ -1784,42 +2244,55 @@ class SecurityScanner:
                 # user's entire shell configuration along with the one
                 # malicious line.
                 for lineno, line in enumerate(lines, start=1):
+                    matched_desc = None
                     for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                         if re.search(pattern, line, re.I):
-                            # NUL-separated structured target, same pattern
-                            # as fix_autorun_entry()'s registry fix_target:
-                            # path \0 line_number \0 exact_line_text. The
-                            # exact line text is re-verified by the fixer
-                            # immediately before editing (TOCTOU guard —
-                            # the file could have changed between scan
-                            # time and the user clicking Auto-Fix).
-                            fix_tgt = '\x00'.join([str(f), str(lineno), line])
-                            # System-wide files (/etc/...) are reported but
-                            # not auto-fixed — see fix_shell_rc_line()'s
-                            # docstring for why. can_fix reflects that
-                            # honestly rather than offering a fix button
-                            # that will always decline when clicked.
-                            is_system_wide = str(f) in (
-                                '/etc/bash.bashrc', '/etc/profile', '/etc/zsh/zshrc',
-                            )
-                            extra_reason = (['System-wide file — remove manually, affects all users']
-                                            if is_system_wide else [])
-                            self.results.append(ScanResult(
-                                severity='critical', category='persistence', path=str(f),
-                                detail=f'Shell startup file backdoor: {desc} in {f.name}:{lineno}',
-                                reasons=[f'Line {lineno}: {line.strip()[:100]}', desc,
-                                         'Runs on every new interactive shell'] + extra_reason,
-                                can_fix=not is_system_wide,
-                                fix_action='fix-shell-rc' if not is_system_wide else '',
-                                fix_target=fix_tgt if not is_system_wide else '',
-                            ))
-                            log_cb(f'  ⛔  Shell RC backdoor [{desc}]: {f}:{lineno}', 'err')
-                            if is_system_wide:
-                                log_cb(f'     Tự sửa thủ công — file hệ thống dùng chung, ảnh hưởng mọi user', 'dim')
-                            else:
-                                log_cb(f'     TỰ SỬA: chỉ xóa dòng này, giữ nguyên phần còn lại của {f.name} (có thể fix)', 'dim')
-                            found += 1
-                            break  # one pattern match is enough per line
+                            matched_desc = desc
+                            break
+                    if matched_desc is None:
+                        # PHASE B: plaintext patterns found nothing — try
+                        # one level of base64 decode-and-rescan before
+                        # giving up on this line. Catches persistence
+                        # lines like `... | base64 -d | bash` where the
+                        # actual reverse-shell command is hidden inside
+                        # the encoded blob and never appears in plaintext.
+                        matched_desc = _decode_and_rescan(line)
+                    if matched_desc is None:
+                        continue
+                    desc = matched_desc
+                    # NUL-separated structured target, same pattern
+                    # as fix_autorun_entry()'s registry fix_target:
+                    # path \0 line_number \0 exact_line_text. The
+                    # exact line text is re-verified by the fixer
+                    # immediately before editing (TOCTOU guard —
+                    # the file could have changed between scan
+                    # time and the user clicking Auto-Fix).
+                    fix_tgt = '\x00'.join([str(f), str(lineno), line])
+                    # System-wide files (/etc/...) are reported but
+                    # not auto-fixed — see fix_shell_rc_line()'s
+                    # docstring for why. can_fix reflects that
+                    # honestly rather than offering a fix button
+                    # that will always decline when clicked.
+                    is_system_wide = str(f) in (
+                        '/etc/bash.bashrc', '/etc/profile', '/etc/zsh/zshrc',
+                    )
+                    extra_reason = (['System-wide file — remove manually, affects all users']
+                                    if is_system_wide else [])
+                    self.results.append(ScanResult(
+                        severity='critical', category='persistence', path=str(f),
+                        detail=f'Shell startup file backdoor: {desc} in {f.name}:{lineno}',
+                        reasons=[f'Line {lineno}: {line.strip()[:100]}', desc,
+                                 'Runs on every new interactive shell'] + extra_reason,
+                        can_fix=not is_system_wide,
+                        fix_action='fix-shell-rc' if not is_system_wide else '',
+                        fix_target=fix_tgt if not is_system_wide else '',
+                    ))
+                    log_cb(f'  ⛔  Shell RC backdoor [{desc}]: {f}:{lineno}', 'err')
+                    if is_system_wide:
+                        log_cb(f'     Tự sửa thủ công — file hệ thống dùng chung, ảnh hưởng mọi user', 'dim')
+                    else:
+                        log_cb(f'     TỰ SỬA: chỉ xóa dòng này, giữ nguyên phần còn lại của {f.name} (có thể fix)', 'dim')
+                    found += 1
 
             except (PermissionError, OSError):
                 log_cb(f'  ~ {f}: permission denied', 'dim')
@@ -1870,19 +2343,24 @@ class SecurityScanner:
                     if not exec_line:
                         continue
 
+                    matched_desc = None
                     for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                         if re.search(pattern, exec_line, re.I):
-                            self.results.append(ScanResult(
-                                severity='critical', category='persistence', path=str(f),
-                                detail=f'Autostart backdoor: {desc} in {f.name}',
-                                reasons=[f'Exec= line: {exec_line[:100]}', desc,
-                                         'Runs automatically on every graphical login'],
-                                can_fix=True, fix_action='remove-file', fix_target=str(f),
-                            ))
-                            log_cb(f'  ⛔  Autostart backdoor [{desc}]: {f}', 'err')
-                            log_cb(f'     TỰ SỬA: xóa {f.name} (có thể fix)', 'dim')
-                            found += 1
+                            matched_desc = desc
                             break
+                    if matched_desc is None:
+                        matched_desc = _decode_and_rescan(exec_line)
+                    if matched_desc is not None:
+                        self.results.append(ScanResult(
+                            severity='critical', category='persistence', path=str(f),
+                            detail=f'Autostart backdoor: {matched_desc} in {f.name}',
+                            reasons=[f'Exec= line: {exec_line[:100]}', matched_desc,
+                                     'Runs automatically on every graphical login'],
+                            can_fix=True, fix_action='remove-file', fix_target=str(f),
+                        ))
+                        log_cb(f'  ⛔  Autostart backdoor [{matched_desc}]: {f}', 'err')
+                        log_cb(f'     TỰ SỬA: xóa {f.name} (có thể fix)', 'dim')
+                        found += 1
 
                     # Separate from malware-pattern matching: also flag an
                     # Exec= that points into a world-writable temp
@@ -1999,81 +2477,63 @@ class SecurityScanner:
         log_cb('◆ Scanning suspicious files in temp/user dirs...', 'info')
         found = 0
         disguise_hits = 0
-        # Safety cap: a messy %TEMP% can accumulate tens of thousands of
-        # leftover install/update artifacts over months of use. Without a
-        # ceiling, walking + opening every single one for a header-sniff
-        # turns into a long, disk-thrashing loop — that's what was pinning
-        # the CPU/fan. 15k files per top-level dir is generous for a normal
-        # scan and still finishes in a reasonable time even on a neglected
-        # temp folder.
-        _MAX_FILES_PER_DIR = 15_000
-        # Cap how many "disguised executable" findings get their own log
-        # line — beyond this we still record them (so Auto-Fix can still
-        # act on all of them) but stop spamming the visible log, which is
-        # what made the scan feel like it was "stuck" printing forever.
         _MAX_DISGUISE_LOG_LINES = 8
 
         # .tmp is deliberately EXCLUDED from the magic-byte disguise check.
-        # Installers, uninstallers, and auto-updaters routinely write raw
-        # executable/DLL data into .tmp files while self-extracting
-        # (classic examples: Inno Setup's `_unins*.tmp`, InstallShield's
-        # `is-*.tmp`, Windows Installer's `DOxxxx.tmp`/`MSIxxxx.tmp`).
-        # A PE header inside a .tmp file in %TEMP% is completely normal —
-        # it is NOT a meaningful signal on its own, and treating it as one
-        # produced a flood of false positives on totally ordinary temp
-        # files. The check still applies to extensions where an executable
-        # header genuinely has no legitimate reason to appear (.dat, .png,
-        # .jpg, .txt, .log, no extension at all, etc).
-        #
-        # .vdm / .lkg are Windows Defender's own virus-definition delta
-        # file formats (mpasdlta.vdm, mpavdlta.lkg, mpengine.lkg, etc,
-        # under ProgramData\Microsoft\Windows Defender) — they are
-        # binary/PE-like containers *by design*, updated by Windows
-        # itself on every definition update. .mui is a standard
-        # resource-only PE format used throughout Windows for localized
-        # strings (mpuxagent.dll.mui etc) — completely normal, not a
-        # disguise technique. All three produced a large false-positive
-        # flood when ProgramData was added to the scan.
+        # (See full comment in git history — Inno Setup / MSI temp PE files.)
         _DISGUISE_SKIP_EXTENSIONS = {'.tmp', '.vdm', '.lkg', '.mui'}
-        _wl = _load_user_whitelist()  # was missing — 'Mark as safe' did nothing here before
+        _wl = _load_user_whitelist()
         _scan_cache = _load_file_scan_cache()
-        _new_scan_cache = {}   # rebuilt fresh each run — entries not re-seen just age out naturally
+        _new_scan_cache = {}
+
+        _deadline = time.monotonic() + _SUSPICIOUS_FILES_STEP_TIMEOUT_S
+        files_walked_total = 0
+        content_scans_total = 0
+        timed_out = False
+        walk_cap_hit = False
+        content_cap_global = False
 
         for d in dirs:
+            if timed_out or walk_cap_hit:
+                break
+
+            remaining = _deadline - time.monotonic()
+            if _is_low_priority_suspicious_root(d) and remaining < 12:
+                log_cb(f'  ~ {d}: bỏ qua — ưu tiên /tmp trước, sắp hết thời gian bước này',
+                       'dim')
+                continue
+
             p = Path(d)
             if not p.exists():
                 continue
             files_seen_in_dir = 0
+            content_scans_in_dir = 0
+            content_cap_warned_dir = False
+            content_cap_warned_global = False
+
             try:
-                for f in _safe_walk(p):
+                for f in _safe_walk(p, skip_dir=_should_skip_suspicious_dir,
+                                    regular_files_only=True):
+                    if time.monotonic() >= _deadline:
+                        timed_out = True
+                        break
+
                     files_seen_in_dir += 1
-                    if files_seen_in_dir > _MAX_FILES_PER_DIR:
+                    files_walked_total += 1
+                    if files_seen_in_dir > _SUSPICIOUS_MAX_FILES_PER_DIR:
                         log_cb(f'  ~ {d}: quá nhiều file, dừng sớm để tránh treo máy '
-                               f'(đã quét {_MAX_FILES_PER_DIR})', 'dim')
+                               f'(đã quét {_SUSPICIOUS_MAX_FILES_PER_DIR})', 'dim')
+                        break
+                    if files_walked_total > _SUSPICIOUS_MAX_WALK_TOTAL:
+                        log_cb(f'  ~ Duyệt quá {_SUSPICIOUS_MAX_WALK_TOTAL} file — '
+                               f'dừng walk toàn bước', 'dim')
+                        walk_cap_hit = True
                         break
 
                     fstr = str(f)
-                    fstr_l = fstr.lower()
-
                     if _wl_hit(fstr, _wl):
                         continue
-
-                    # ── Skip safe contexts ─────────────────────
-                    # 'windows defender' / 'programdata\microsoft\windows
-                    # defender' specifically: this is the OS's own antivirus
-                    # definition-update directory. It is entirely
-                    # Microsoft-owned, updated automatically, and full of
-                    # PE-container files by design (see .vdm/.lkg note
-                    # above) — scanning our own OS's antivirus engine for
-                    # "disguised executables" is both pointless and the
-                    # single biggest source of false positives seen so far.
-                    if any(skip in fstr_l for skip in (
-                        'node_modules', '/cache', '\\cache', '.git',
-                        '__pycache__', '.venv', 'site-packages',
-                        'subdir', '_mei', '.mount_',
-                        'windows defender', '\\microsoft\\edgeupdate',
-                        '\\microsoft\\windowsapps',
-                    )):
+                    if _should_skip_suspicious_path(fstr):
                         continue
 
                     # ── Skip files over 50MB ───────────────────
@@ -2084,16 +2544,10 @@ class SecurityScanner:
                     except OSError:
                         continue
 
-                    # ── Real self-exclusion (path-based, not filename) ──
                     if _is_own_app_file(fstr):
                         continue
 
-                    # ── Magic-byte sniff — runs on files with an extension
-                    #    that has no legitimate reason to contain executable
-                    #    bytes. Skips .tmp/.vdm/.lkg/.mui (see
-                    #    _DISGUISE_SKIP_EXTENSIONS note above) and the
-                    #    DANGEROUS_EXTENSIONS list (those get the full
-                    #    content/pattern scan instead).
+                    # ── Magic-byte sniff (cheap header read) ───
                     if (f.suffix.lower() not in DANGEROUS_EXTENSIONS
                             and f.suffix.lower() not in _DISGUISE_SKIP_EXTENSIONS):
                         try:
@@ -2101,59 +2555,100 @@ class SecurityScanner:
                         except OSError:
                             continue
                         sig = [mtime, fsize]
-                        # Cache hit: this exact file (by path+mtime+size)
-                        # was already opened and verified clean on a
-                        # previous scan — most files in Temp/AppData don't
-                        # change between quick successive scans, so this
-                        # is what actually cuts down repeat-scan time and
-                        # variance instead of re-sniffing thousands of
-                        # unchanged files every single run.
                         if _scan_cache.get(fstr) == sig:
                             _new_scan_cache[fstr] = sig
                             continue
                         disguise_reason = _sniff_executable_disguise(f)
                         if disguise_reason:
-                            # SCORED, not instant-flag — a bare format
-                            # mismatch alone is a weak signal on its own
-                            # (see _score_disguised_file docstring); it
-                            # only becomes a 'high' finding with
-                            # corroboration, same philosophy as the
-                            # process-risk scorer below.
                             risk = _score_disguised_file(f, disguise_reason)
-                            if risk.severity:
-                                self.results.append(ScanResult(
-                                    severity=risk.severity, category='suspicious', path=fstr,
-                                    detail=f'Disguised executable: {f.name}',
-                                    reasons=risk.signals + [
-                                        f'Claimed extension: {f.suffix or "(none)"}',
-                                        f'Location: {fstr[:80]}'],
-                                    can_fix=True, fix_action='remove-file', fix_target=fstr,
-                                ))
-                                disguise_hits += 1
-                                icon = '⛔' if risk.severity == 'critical' else '⚠ '
-                                if disguise_hits <= _MAX_DISGUISE_LOG_LINES:
-                                    log_cb(f'  {icon} Disguised executable: {f.name}', 'warn')
-                                    log_cb(f'     Reason: {disguise_reason}', 'dim')
-                                elif disguise_hits == _MAX_DISGUISE_LOG_LINES + 1:
-                                    log_cb('  ~  (thêm nhiều file tương tự — ẩn bớt log, '
-                                           'xem đầy đủ trong danh sách kết quả)', 'dim')
-                                found += 1
+                            if _is_binary_magic_disguise(disguise_reason):
+                                if not risk.severity:
+                                    _new_scan_cache[fstr] = sig
+                                    continue
+                                disp_sev = (risk.severity if risk.severity in ('critical', 'high')
+                                              else 'high')
+                                can_fix = True
+                                display_score = max(risk.score, 40)
+                                detail = f'Disguised executable: {f.name}'
+                                reasons = list(risk.signals) + [
+                                    f'Claimed extension: {f.suffix or "(none)"}',
+                                    f'Location: {fstr[:80]}',
+                                ]
                             else:
-                                _new_scan_cache[fstr] = sig  # scored but below reporting threshold — treat as clean for caching
+                                # Shebang-only: never HIGH from format+mtime alone —
+                                # require malicious content (or skip trusted paths).
+                                if (content_scans_total >= _SUSPICIOUS_MAX_CONTENT_SCANS_TOTAL
+                                        or content_scans_in_dir >= _SUSPICIOUS_MAX_CONTENT_SCANS_PER_DIR):
+                                    _new_scan_cache[fstr] = sig
+                                    continue
+                                content_scans_in_dir += 1
+                                content_scans_total += 1
+                                resolved = _resolve_shebang_disguise(
+                                    f, fstr, disguise_reason, risk)
+                                if resolved is None:
+                                    _new_scan_cache[fstr] = sig
+                                    continue
+                                disp_sev, can_fix, detail, extra_reasons, display_score = resolved
+                                reasons = list(risk.signals) + extra_reasons
+                            if (not can_fix
+                                    and not any('Low confidence' in x for x in reasons)):
+                                reasons.append(
+                                    'Low confidence — often legitimate tool/pip scripts; '
+                                    'review path before deleting'
+                                )
+                            self.results.append(ScanResult(
+                                severity=disp_sev, category='suspicious', path=fstr,
+                                detail=detail,
+                                reasons=reasons,
+                                can_fix=can_fix,
+                                fix_action='remove-file' if can_fix else '',
+                                fix_target=fstr if can_fix else '',
+                                score=display_score,
+                            ))
+                            disguise_hits += 1
+                            icon = '⛔' if disp_sev == 'critical' else ('⚠ ' if disp_sev != 'info' else '~ ')
+                            if disguise_hits <= _MAX_DISGUISE_LOG_LINES:
+                                log_cb(f'  {icon} {detail}', 'warn' if disp_sev != 'info' else 'dim')
+                                log_cb(f'     Reason: {disguise_reason}', 'dim')
+                            elif disguise_hits == _MAX_DISGUISE_LOG_LINES + 1:
+                                log_cb('  ~  (thêm nhiều file tương tự — ẩn bớt log, '
+                                       'xem đầy đủ trong danh sách kết quả)', 'dim')
+                            found += 1
                         else:
-                            _new_scan_cache[fstr] = sig  # no format mismatch at all — clean
-                        continue  # not a script extension — content-pattern
-                                  # scan below doesn't apply to it either way
+                            _new_scan_cache[fstr] = sig
+                        continue
 
-                    # ── Read content for pattern matching ──────
-                    # NOTE: previously hard-capped at the first 4096 bytes,
+                    # ── Content pattern scan (expensive) ───────
+                    try:
+                        mtime = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    sig = [mtime, fsize]
+                    if _scan_cache.get(fstr) == sig:
+                        _new_scan_cache[fstr] = sig
+                        continue
 
-                    # which is trivially bypassed by prepending a few KB of
-                    # junk/comment padding before the real payload. Read the
-                    # whole file for anything reasonably script-sized, and
-                    # only cap for the rare oversized "script" (still well
-                    # short of the full 50MB directory-scan ceiling above)
-                    # so a single pathological file can't blow up scan time.
+                    if content_cap_global:
+                        continue
+
+                    if content_scans_total >= _SUSPICIOUS_MAX_CONTENT_SCANS_TOTAL:
+                        if not content_cap_warned_global:
+                            log_cb(f'  ~ Đã đạt giới hạn {_SUSPICIOUS_MAX_CONTENT_SCANS_TOTAL} '
+                                   f'file content-scan toàn bước — bỏ qua phần còn lại', 'dim')
+                            content_cap_warned_global = True
+                        content_cap_global = True
+                        continue
+                    if content_scans_in_dir >= _SUSPICIOUS_MAX_CONTENT_SCANS_PER_DIR:
+                        if not content_cap_warned_dir:
+                            log_cb(f'  ~ {d}: quá nhiều file script cần đọc nội dung, '
+                                   f'dừng content-scan thư mục này '
+                                   f'(đã quét {_SUSPICIOUS_MAX_CONTENT_SCANS_PER_DIR})', 'dim')
+                            content_cap_warned_dir = True
+                        continue
+
+                    content_scans_in_dir += 1
+                    content_scans_total += 1
+
                     read_cap = fsize if fsize <= 2_000_000 else 2_000_000
                     try:
                         with open(f, 'r', errors='ignore') as fh:
@@ -2161,29 +2656,27 @@ class SecurityScanner:
                     except (OSError, PermissionError, UnicodeDecodeError):
                         continue
 
-                    # ── Pattern match ──────────────────────────
+                    matched_desc = None
                     for pattern, desc in MALICIOUS_SCRIPT_PATTERNS:
                         if re.search(pattern, txt, re.I):
-                            # SECURITY: this filename was found specifically because
-                            # it looked malicious — it is exactly the kind of
-                            # attacker-influenced string that must never be
-                            # interpolated into a shell command (see module-level
-                            # SECURITY NOTE at the top of this file). Use the
-                            # structured fix_action/fix_target path (stdin-based on
-                            # Linux via run_fix_action, os.remove() on Windows via
-                            # remove_file_windows) instead of building a shell string.
-                            self.results.append(ScanResult(
-                                severity='critical', category='malware', path=fstr,
-                                detail=f'Malicious script: {f.name}',
-                                reasons=[f'Pattern: {desc}', f'Location: {fstr[:80]}'],
-                                can_fix=True, fix_action='remove-file', fix_target=fstr,
-                            ))
-                            log_cb(f'  ⛔  Malicious script: {f.name}', 'err')
-                            log_cb(f'     Reason: {desc}', 'dim')
-                            found += 1
+                            matched_desc = desc
                             break
+                    if matched_desc is None:
+                        matched_desc = _decode_and_rescan(txt)
+                    if matched_desc is not None:
+                        desc = matched_desc
+                        self.results.append(ScanResult(
+                            severity='critical', category='malware', path=fstr,
+                            detail=f'Malicious script: {f.name}',
+                            reasons=[f'Pattern: {desc}', f'Location: {fstr[:80]}'],
+                            can_fix=True, fix_action='remove-file', fix_target=fstr,
+                        ))
+                        log_cb(f'  ⛔  Malicious script: {f.name}', 'err')
+                        log_cb(f'     Reason: {desc}', 'dim')
+                        found += 1
+                    else:
+                        _new_scan_cache[fstr] = sig
 
-                    # ── Executable in /tmp (Linux) — low severity ──
                     if OS == 'Linux' and fstr.startswith('/tmp') and found == 0:
                         try:
                             if f.stat().st_mode & stat.S_IXUSR:
@@ -2203,6 +2696,20 @@ class SecurityScanner:
                 pass
 
         _save_file_scan_cache(_new_scan_cache)
+
+        if timed_out:
+            log_cb(
+                f'  ~ Bước File nghi ngờ quá lâu — đã bỏ qua phần còn lại '
+                f'({content_scans_total} file đã quét nội dung, '
+                f'{files_walked_total} file đã duyệt)',
+                'warn',
+            )
+        else:
+            log_cb(
+                f'  ✓  Suspicious-files step done '
+                f'({files_walked_total} paths walked, {content_scans_total} deep-scanned)',
+                'ok',
+            )
 
         if found == 0:
             self._ok(log_cb, 'No suspicious files found in temp/user dirs')
@@ -2270,8 +2777,50 @@ class SecurityScanner:
                     log_cb(f'  ~  Mining pool port {port} ({label}): {line.strip()}', 'warn')
                     found += 1
 
+        # ── PHASE A: shell-like process with ESTABLISHED connection ──
+        # `ss -tlnp` above only ever shows LISTEN sockets — a reverse
+        # shell (`bash -i >& /dev/tcp/...`) is the opposite direction:
+        # an OUTBOUND connection from this machine, which never shows up
+        # in a LISTEN-only view no matter how many times it's re-run.
+        # `ss -tnp` (no -l) lists connected sockets instead. This is a
+        # standalone network-side check that reports the same class of
+        # finding _score_process's live-session signal already covers —
+        # dedupe against self._flagged_shell_pids so a bash process
+        # already reported once (as a process finding) doesn't also show
+        # up a second time here as a separate network finding.
+        estab_out = run('ss -tnp 2>/dev/null', timeout=8)
+        for line in estab_out.splitlines():
+            if 'ESTAB' not in line:
+                continue
+            m_name = re.search(r'users:\(\("([^"]+)"', line)
+            proc_name = m_name.group(1) if m_name else ''
+            if _normalize_proc_name(proc_name) not in SHELL_LIKE_PROCESS_NAMES:
+                continue
+            pid = _extract_pid(line)
+            if pid and pid in self._flagged_shell_pids:
+                continue  # already reported as a process finding
+            m_raddr = re.search(r'ESTAB\S*\s+\S+\s+\S+\s+\S+\s+(\S+):(\d+)', line)
+            raddr = f'{m_raddr.group(1)}:{m_raddr.group(2)}' if m_raddr else 'unknown'
+            kill = _safe_kill_cmd(pid) if pid else ''
+            self.results.append(ScanResult(
+                severity='high', category='network', path=line.strip(),
+                detail=f'Shell-like process ({proc_name}) with live outbound connection to {raddr}'
+                       + (f' — PID {pid}' if pid else ''),
+                reasons=[
+                    f'{proc_name} does not normally own its own outbound TCP socket',
+                    f'Remote endpoint: {raddr}',
+                    'AUTO-FIX: kills owning process' if kill else 'Manual kill required (own-user processes only)',
+                ],
+                can_fix=bool(kill),
+                fix_cmd=kill,
+            ))
+            log_cb(f'  ⚠  Live {proc_name} session -> {raddr}' + (f' PID={pid}' if pid else ''), 'warn')
+            if pid:
+                self._flagged_shell_pids.add(pid)
+            found += 1
+
         if found == 0:
-            self._ok(log_cb, 'No suspicious listening ports')
+            self._ok(log_cb, 'No suspicious listening ports or live shell connections')
 
     # ══════════════════════════════════════════════════════
     # NETWORK — WINDOWS
@@ -2663,6 +3212,7 @@ class SecurityScanner:
                     # lists bypass shell parsing entirely.
                     can_fix=True, fix_action='remove-scheduled-task',
                     fix_target=task_name,
+                    score=risk.score,
                 ))
                 icon = '⛔' if risk.severity == 'critical' else '⚠ '
                 log_cb(f'  {icon} Suspicious scheduled task: {task_name}', 'warn')

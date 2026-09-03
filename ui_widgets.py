@@ -540,11 +540,6 @@ class CyberTerminal(QWidget):
         'info': ('#3d6678', ''),
         'warn': ('#ffd740', '  ⚠  '),
         'text': ('#7eb8cc', ''),
-        # Was missing entirely — fell back to the default ('#7eb8cc', '')
-        # bright text color, same as normal log lines. That's why the
-        # per-step timing line looked exactly as "loud" as a real finding
-        # instead of reading as a subdued, secondary detail.
-        'dim':  ('#3d6678', ''),
     }
 
     def __init__(self, parent=None):
@@ -975,7 +970,10 @@ class _OneClickWorker(QThread):
 
 class _ScanWorker(QThread):
     log      = pyqtSignal(str, str)
-    progress = pyqtSignal(int, str)   # (percent, current category label)
+    progress = pyqtSignal(int, str)   # (percent, current category label) — main.py
+                                       # connects to this at self._scan_worker.progress
+                                       # .connect(...); it was missing here entirely,
+                                       # which is why that connect() raised AttributeError.
     done     = pyqtSignal(list, list)
 
     def __init__(self):
@@ -1028,7 +1026,7 @@ class _ScanWorker(QThread):
             net_results = []
         self.log.emit('', 'info')
         self.log.emit(f'  {_t("log_scan_all_done", "All scan steps finished.")}', 'head')
-        self.progress.emit(100, 'Hoàn tất')
+        self.progress.emit(100, _t('log_scan_all_done', 'Done'))
         self.done.emit(results, net_results)
 
 
