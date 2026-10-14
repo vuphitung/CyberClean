@@ -9,7 +9,7 @@ Contains:
   • Custom widgets  (SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton,
                      CyberTerminal)
   • QThread workers (SysInfoWorker, CleanWorker, _SmartOnWorker, _SmartOffWorker,
-                     _OneClickWorker, _ScanWorker, _UninstallWorker, _AutoCleanWorker)
+                     _OneClickWorker, _UninstallWorker, _AutoCleanWorker)
   • UI helper functions (_btn, _lbl_section, _lbl_val, _card, _divider)
 
 main.py imports everything from here:
@@ -25,7 +25,7 @@ import platform
 from datetime import datetime
 
 from PyQt6.QtCore  import (
-    Qt, QThread, QRectF, QPointF, QSize, pyqtSignal,
+    Qt, QThread, QRectF, QPointF, QSize, pyqtSignal, QObject, QEvent,
     QPropertyAnimation, QEasingCurve, QTimer, pyqtProperty,
 )
 from PyQt6.QtGui   import (
@@ -34,7 +34,7 @@ from PyQt6.QtGui   import (
 )
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton,
-    QHBoxLayout, QVBoxLayout, QSizePolicy,
+    QHBoxLayout, QVBoxLayout, QSizePolicy, QTableWidget,
 )
 
 # i18n runtime log translator (lazy import to avoid circular)
@@ -58,34 +58,40 @@ IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX   = platform.system() == 'Linux'
 
 # ═════════════════════════════════════════════════════════════
-# DESIGN TOKENS
+# DESIGN TOKENS  — ui-ux-pro-max / Cyberpunk HUD
+# Primary stays electric cyan (product identity). Success uses
+# matrix green from the design-system palette. Muted text is
+# lifted to WCAG AA on the dark surfaces (~4.5:1+).
 # ═════════════════════════════════════════════════════════════
 C = {
-    'bg':       '#050a0f',
-    'bg2':      '#09121a',
-    'bg3':      '#0d1a26',
-    'bg4':      '#112032',
-    'cyan':     '#00e5ff',
-    'cyan2':    '#00bcd4',
-    'cyan_dim': '#004d5c',
-    'red':      '#ff3d5a',
-    'red_dim':  '#3d0010',
-    'yellow':   '#ffd740',
-    'yel_dim':  '#3d2d00',
-    'green':    '#00e676',
-    'grn_dim':  '#00280f',
-    'purple':   '#d050ff',
-    'text':     '#def0f8',
-    'text2':    '#7eb8cc',
-    'text3':    '#3d6678',
-    'dim':      '#2a4a5a',
-    'border':   '#0a1e2d',
-    'border2':  '#0f2a3d',
-    'border3':  '#1a3a52',
-    'accent':   '#00e5ff',
+    'bg':       '#07090B',
+    'bg2':      '#0C1114',
+    'bg3':      '#12181C',
+    'bg4':      '#182026',
+    'cyan':     '#00E8FF',
+    'cyan2':    '#22D3EE',
+    'cyan_dim': '#06343A',
+    'red':      '#FF4D5A',
+    'red_dim':  '#3A0B12',
+    'yellow':   '#F5C542',
+    'yel_dim':  '#3A2E0A',
+    'green':    '#00FF41',
+    'grn_dim':  '#063016',
+    'purple':   '#C084FC',
+    'text':     '#E8F1F4',
+    'text2':    '#B4C9D4',
+    'text3':    '#8BA3B0',
+    'dim':      '#5C7380',
+    'border':   '#152028',
+    'border2':  '#1C2A33',
+    'border3':  '#2A3D48',
+    'accent':   '#00E8FF',
+    'ring':     '#00E8FF',
+    'radius':   '8px',
 }
 
-MONO    = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Share Tech Mono',monospace"
+UI      = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
+MONO    = "'JetBrains Mono','Cascadia Code','Fira Code','Consolas','Share Tech Mono',monospace"
 DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2','Share Tech Mono',monospace"
 
 
@@ -93,7 +99,9 @@ DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2','Share Tech Mono',monospace"
 # PURE-CODE NAV ICONS — drawn with QPainter, zero file deps
 # ═════════════════════════════════════════════════════════════
 
-def _make_icon(draw_fn, size=20, color='#00e5ff') -> QIcon:
+def _make_icon(draw_fn, size=20, color=None) -> QIcon:
+    if color is None:
+        color = C['cyan']
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
@@ -119,17 +127,6 @@ def _icon_clean(p: QPainter, col: QColor, s: int):
     for dx, dy in [(-0.14, 0.22), (-0.07, 0.24), (0.0, 0.25), (0.07, 0.24), (0.14, 0.22)]:
         p.drawLine(QPointF(cx, cy), QPointF(cx + dx*s, cy + dy*s))
     p.drawLine(QPointF(s*0.12, s*0.62), QPointF(s*0.52, s*0.62))
-
-
-def _icon_scanner(p: QPainter, col: QColor, s: int):
-    pen = QPen(col, 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    cx, cy, r = s*0.42, s*0.42, s*0.26
-    p.drawEllipse(QPointF(cx, cy), r, r)
-    p.drawLine(QPointF(cx + r*0.72, cy + r*0.72), QPointF(s*0.92, s*0.92))
-    pen2 = QPen(col, 0.9); pen2.setCapStyle(Qt.PenCapStyle.RoundCap); p.setPen(pen2)
-    p.drawLine(QPointF(cx, cy - r*0.55), QPointF(cx, cy + r*0.55))
-    p.drawLine(QPointF(cx - r*0.55, cy), QPointF(cx + r*0.55, cy))
 
 
 def _icon_uninstall(p: QPainter, col: QColor, s: int):
@@ -176,10 +173,41 @@ def _icon_booster(p: QPainter, col: QColor, s: int):
     ]))
 
 
+def _icon_deep_clean(p: QPainter, col: QColor, s: int):
+    """Danh sách có ô tick: bạn chọn từng mục."""
+    pen = QPen(col, 1.25, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    for i, y in enumerate((0.20, 0.47, 0.74)):
+        box = QRectF(s * 0.10, s * (y - 0.09), s * 0.18, s * 0.18)
+        p.drawRoundedRect(box, 1.5, 1.5)
+        p.drawLine(QPointF(s * 0.40, s * y), QPointF(s * (0.90 if i != 2 else 0.74), s * y))
+    # dấu tick trong ô đầu tiên
+    p.drawLine(QPointF(s * 0.135, s * 0.205), QPointF(s * 0.185, s * 0.25))
+    p.drawLine(QPointF(s * 0.185, s * 0.25), QPointF(s * 0.265, s * 0.145))
+
+
+def _icon_advisor(p: QPainter, col: QColor, s: int):
+    """Biểu đồ tròn có một lát tách ra: dung lượng đang nằm ở đâu."""
+    pen = QPen(col, 1.25, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    r = s * 0.34
+    c = QPointF(s * 0.46, s * 0.56)
+    p.drawArc(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), 90 * 16, 270 * 16)         # phần còn lại
+    p.drawLine(c, QPointF(c.x(), c.y() - r))
+    p.drawLine(c, QPointF(c.x() - r, c.y()))
+    # lát tách ra (lệch lên-phải)
+    off = s * 0.07
+    c2 = QPointF(c.x() + off, c.y() - off)
+    accent = QColor(col); accent.setAlphaF(0.20)
+    p.setBrush(QBrush(accent))
+    p.drawPie(QRectF(c2.x() - r, c2.y() - r, 2 * r, 2 * r), 0, 90 * 16)
+
+
 _ICON_FN = {
+    'deep_clean':  _icon_deep_clean,
+    'advisor':     _icon_advisor,
     'dashboard':   _icon_dashboard,
     'smart_clean': _icon_clean,
-    'scanner':     _icon_scanner,
     'uninstaller': _icon_uninstall,
     'history':     _icon_history,
     'rollback':    _icon_rollback,
@@ -197,13 +225,13 @@ def _nav_icon(name: str, active=False, size=18) -> QIcon:
 # SPARKLINE CHART
 # ═════════════════════════════════════════════════════════════
 class SparklineChart(QWidget):
-    def __init__(self, color='#00e5ff', max_points=50, parent=None):
+    def __init__(self, color=None, max_points=50, parent=None):
         super().__init__(parent)
-        self.color   = QColor(color)
+        self.color   = QColor(color or C['cyan'])
         self.max_pts = max_points
         self.data    = []
-        self.setMinimumHeight(56)
-        self.setMaximumHeight(56)
+        self.setMinimumHeight(72)
+        self.setMaximumHeight(72)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet('background:transparent;')
 
@@ -260,7 +288,7 @@ class DiskRing(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.percent = 0.0
-        self.setFixedSize(88, 88)
+        self.setFixedSize(96, 96)
 
     def set_percent(self, v):
         self.percent = v; self.update()
@@ -268,24 +296,24 @@ class DiskRing(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect  = QRectF(9, 9, 70, 70)
+        rect  = QRectF(10, 10, 76, 76)
         color = C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan']
 
-        bg_pen = QPen(QColor(C['bg3'])); bg_pen.setWidth(8)
+        bg_pen = QPen(QColor(C['bg3'])); bg_pen.setWidth(9)
         bg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(bg_pen); p.drawArc(rect, 0, 360 * 16)
 
         inner_pen = QPen(QColor(C['border2'])); inner_pen.setWidth(1)
-        p.setPen(inner_pen); p.drawArc(QRectF(13, 13, 62, 62), 0, 360 * 16)
+        p.setPen(inner_pen); p.drawArc(QRectF(16, 16, 64, 64), 0, 360 * 16)
 
-        fill_pen = QPen(QColor(color)); fill_pen.setWidth(8)
+        fill_pen = QPen(QColor(color)); fill_pen.setWidth(9)
         fill_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(fill_pen)
         p.drawArc(rect, 90 * 16, -int((self.percent / 100.0) * 360 * 16))
 
         p.setPen(QPen(QColor(color)))
-        p.setFont(QFont('Cascadia Code' if IS_WINDOWS else 'Share Tech Mono', 13, QFont.Weight.Bold))
-        p.drawText(QRectF(0, 0, 88, 88), Qt.AlignmentFlag.AlignCenter, f'{round(self.percent)}%')
+        p.setFont(QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code', 14, QFont.Weight.Bold))
+        p.drawText(QRectF(0, 0, 96, 96), Qt.AlignmentFlag.AlignCenter, f'{round(self.percent)}%')
         p.end()
 
 
@@ -331,22 +359,27 @@ class HexLogoWidget(QWidget):
 def _btn(text, color='cyan', small=False, icon_only=False):
     col     = C[color]
     col_dim = C.get(color + '_dim', C['bg3'])
-    pad     = '5px 12px' if small else '8px 22px'
-    sz      = '10px'     if small else '11px'
+    pad     = '7px 14px' if small else '9px 20px'
+    sz      = '12px'     if small else '13px'
+    minh    = '32px'     if small else '36px'
     btn = QPushButton(text)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setMinimumHeight(32 if small else 36)
     btn.setStyleSheet(f"""
         QPushButton {{
             color:{col};
-            border:1px solid {col}40;
+            border:1px solid {col}55;
             background:{col_dim};
-            font-family:{MONO}; font-size:{sz};
-            letter-spacing:1.5px; padding:{pad};
-            border-radius:2px; font-weight:600;
+            font-family:{UI}; font-size:{sz};
+            letter-spacing:0.6px; padding:{pad};
+            border-radius:{C['radius']}; font-weight:600;
+            min-height:{minh};
         }}
-        QPushButton:hover   {{ background:{col}20; border-color:{col}80; color:{col}; }}
+        QPushButton:hover   {{ background:{col}22; border-color:{col}90; color:{col}; }}
         QPushButton:pressed {{ background:{col}35; border-color:{col}; }}
         QPushButton:checked {{ background:{col}25; border-color:{col}; color:{col}; }}
-        QPushButton:disabled {{ color:{C['dim']}; border-color:{C['dim']}30; background:transparent; }}
+        QPushButton:focus   {{ border:2px solid {C['ring']}; }}
+        QPushButton:disabled {{ color:{C['dim']}; border-color:{C['dim']}40; background:transparent; }}
     """)
     return btn
 
@@ -354,8 +387,8 @@ def _btn(text, color='cyan', small=False, icon_only=False):
 def _lbl_section(text):
     l = QLabel(text)
     l.setStyleSheet(
-        f'color:{C["text3"]};font-size:10px;letter-spacing:3px;'
-        f'font-family:{MONO};padding:10px 0 5px 0;font-weight:700;'
+        f'color:{C["text3"]};font-size:11px;letter-spacing:1.6px;'
+        f'font-family:{UI};padding:8px 0 4px 0;font-weight:700;'
     )
     return l
 
@@ -377,11 +410,11 @@ def _card(border_color=None, accent_color=None):
             f'QFrame{{background:{C["bg2"]};'
             f'border-top:1px solid {bc};border-right:1px solid {bc};'
             f'border-bottom:1px solid {bc};border-left:3px solid {accent_color};'
-            f'border-radius:3px;}}'
+            f'border-radius:{C["radius"]};}}'
         )
     else:
         f.setStyleSheet(
-            f'QFrame{{background:{C["bg2"]};border:1px solid {bc};border-radius:3px;}}'
+            f'QFrame{{background:{C["bg2"]};border:1px solid {bc};border-radius:{C["radius"]};}}'
         )
     return f
 
@@ -404,21 +437,21 @@ class StatCard(QFrame):
         self.color = color
         col = C[color]
         self.setStyleSheet(
-            f'QFrame{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:3px;}}'
+            f'QFrame{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:{C["radius"]};}}'
         )
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(6)
 
         self.lbl_name = QLabel(label)
         self.lbl_name.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;letter-spacing:3px;'
-            f'font-family:{MONO};font-weight:700;'
+            f'color:{C["text3"]};font-size:11px;letter-spacing:1.4px;'
+            f'font-family:{UI};font-weight:700;'
         )
         self.lbl_val = QLabel(init_val)
         self.lbl_val.setStyleSheet(
-            f'color:{col};font-size:24px;font-weight:700;'
-            f'font-family:{MONO};letter-spacing:1px;'
+            f'color:{col};font-size:22px;font-weight:700;'
+            f'font-family:{MONO};letter-spacing:0.5px;'
         )
         lay.addWidget(self.lbl_name)
         lay.addWidget(self.lbl_val)
@@ -427,9 +460,67 @@ class StatCard(QFrame):
         self.lbl_val.setText(text)
         col = C.get(color or self.color, C[self.color])
         self.lbl_val.setStyleSheet(
-            f'color:{col};font-size:24px;font-weight:700;'
-            f'font-family:{MONO};letter-spacing:1px;'
+            f'color:{col};font-size:22px;font-weight:700;'
+            f'font-family:{MONO};letter-spacing:0.5px;'
         )
+
+
+# ═════════════════════════════════════════════════════════════
+# EMPTY TABLE OVERLAY
+# ═════════════════════════════════════════════════════════════
+class EmptyStateBinder(QObject):
+    """Shows a helpful empty state over a QTableWidget when it has no rows."""
+
+    def __init__(self, table: QTableWidget, title: str, body: str, parent=None):
+        super().__init__(parent or table)
+        self._table = table
+        overlay = QLabel(table.viewport())
+        overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay.setWordWrap(True)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.setStyleSheet(
+            f'QLabel{{background:transparent;color:{C["text2"]};'
+            f'font-family:{UI};padding:32px;}}'
+        )
+        self._overlay = overlay
+        self.set_copy(title, body)
+        table.viewport().installEventFilter(self)
+        model = table.model()
+        if model is not None:
+            model.rowsInserted.connect(self.sync)
+            model.rowsRemoved.connect(self.sync)
+            model.modelReset.connect(self.sync)
+        self.sync()
+
+    def set_copy(self, title: str, body: str):
+        self._overlay.setText(
+            f'<div style="font-size:15px;font-weight:600;color:{C["text"]};'
+            f'margin-bottom:8px;">{title}</div>'
+            f'<div style="font-size:13px;line-height:1.5;color:{C["text3"]};'
+            f'max-width:420px;">{body}</div>'
+        )
+        self.sync()
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self._table.viewport() and event.type() in (
+                QEvent.Type.Resize, QEvent.Type.Show
+            ):
+                self.sync()
+        except RuntimeError:
+            return False
+        return False
+
+    def sync(self, *args):
+        try:
+            vp = self._table.viewport()
+            self._overlay.setGeometry(vp.rect())
+            empty = self._table.rowCount() == 0
+            self._overlay.setVisible(empty)
+            if empty:
+                self._overlay.raise_()
+        except RuntimeError:
+            return
 
 
 # ═════════════════════════════════════════════════════════════
@@ -444,47 +535,48 @@ class NavButton(QWidget):
         self._icon_name = icon_name
         self._label_str = label
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(40)
+        self.setFixedHeight(44)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._bar = QFrame(self)
-        self._bar.setFixedWidth(2)
+        self._bar.setFixedWidth(3)
         self._bar.setStyleSheet('background:transparent;border:none;')
 
         self._icon_lbl = QLabel(self)
-        self._icon_lbl.setFixedSize(18, 18)
+        self._icon_lbl.setFixedSize(20, 20)
         self._icon_lbl.setStyleSheet('background:transparent;border:none;')
 
         self._text_lbl = QLabel(label, self)
         self._text_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
-            f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+            f'color:{C["text3"]};font-family:{UI};font-size:12px;'
+            f'letter-spacing:0.4px;font-weight:600;background:transparent;border:none;'
         )
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 8, 0); lay.setSpacing(0)
         lay.addWidget(self._bar); lay.addSpacing(12)
         lay.addWidget(self._icon_lbl); lay.addSpacing(10)
         lay.addWidget(self._text_lbl); lay.addStretch()
         self._update_icon()
 
     def _update_icon(self):
-        ico = _nav_icon(self._icon_name, active=self._active, size=18)
-        self._icon_lbl.setPixmap(ico.pixmap(18, 18))
+        ico = _nav_icon(self._icon_name, active=self._active, size=20)
+        self._icon_lbl.setPixmap(ico.pixmap(20, 20))
 
     def set_active(self, active: bool):
         self._active = active
         if active:
-            self._bar.setStyleSheet(f'background:{C["cyan"]};border:none;border-radius:1px;')
+            self._bar.setStyleSheet(f'background:{C["cyan"]};border:none;border-radius:2px;')
             self._text_lbl.setStyleSheet(
-                f'color:{C["cyan"]};font-family:{MONO};font-size:10px;'
-                f'letter-spacing:1.5px;font-weight:700;background:transparent;border:none;'
+                f'color:{C["cyan"]};font-family:{UI};font-size:12px;'
+                f'letter-spacing:0.4px;font-weight:700;background:transparent;border:none;'
             )
-            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}0e;}}')
+            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}14;}}')
         else:
             self._bar.setStyleSheet('background:transparent;border:none;')
             self._text_lbl.setStyleSheet(
-                f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
-                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+                f'color:{C["text3"]};font-family:{UI};font-size:12px;'
+                f'letter-spacing:0.4px;font-weight:600;background:transparent;border:none;'
             )
             self.setStyleSheet('QWidget{background:transparent;}')
         self._update_icon()
@@ -495,16 +587,16 @@ class NavButton(QWidget):
     def enterEvent(self, _):
         if not self._active:
             self._text_lbl.setStyleSheet(
-                f'color:{C["text2"]};font-family:{MONO};font-size:10px;'
-                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+                f'color:{C["text"]};font-family:{UI};font-size:12px;'
+                f'letter-spacing:0.4px;font-weight:600;background:transparent;border:none;'
             )
-            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}08;}}')
+            self.setStyleSheet(f'QWidget{{background:{C["cyan"]}0d;}}')
 
     def leaveEvent(self, _):
         if not self._active:
             self._text_lbl.setStyleSheet(
-                f'color:{C["text3"]};font-family:{MONO};font-size:10px;'
-                f'letter-spacing:1.5px;font-weight:600;background:transparent;border:none;'
+                f'color:{C["text3"]};font-family:{UI};font-size:12px;'
+                f'letter-spacing:0.4px;font-weight:600;background:transparent;border:none;'
             )
             self.setStyleSheet('QWidget{background:transparent;}')
 
@@ -533,13 +625,14 @@ class CyberTerminal(QWidget):
 
     # Level → (hex_color, prefix_icon)
     _LEVEL = {
-        'ok':   ('#00e676', '  ✓  '),
-        'err':  ('#ff3d5a', '  ✗  '),
-        'dry':  ('#ffd740', '  ~  '),
-        'head': ('#00e5ff', ''),
-        'info': ('#3d6678', ''),
-        'warn': ('#ffd740', '  ⚠  '),
-        'text': ('#7eb8cc', ''),
+        'ok':   (C['green'], '  ✓  '),
+        'err':  (C['red'],   '  ✗  '),
+        'dry':  (C['yellow'],'  ~  '),
+        'head': (C['cyan'],  ''),
+        'info': (C['text3'], ''),
+        'warn': (C['yellow'],'  !  '),
+        'text': (C['text2'], ''),
+        'dim':  (C['text3'], ''),
     }
 
     def __init__(self, parent=None):
@@ -552,18 +645,18 @@ class CyberTerminal(QWidget):
 
         # ── header bar ──────────────────────────────────────────────────
         hdr = QFrame()
-        hdr.setFixedHeight(26)
+        hdr.setFixedHeight(32)
         hdr.setStyleSheet(
             f'QFrame{{background:{C["bg3"]};'
             f'border-top:1px solid {C["border2"]};'
             f'border-left:1px solid {C["border2"]};'
             f'border-right:1px solid {C["border2"]};'
             f'border-bottom:1px solid {C["border3"]};'
-            f'border-top-left-radius:3px;border-top-right-radius:3px;}}'
+            f'border-top-left-radius:{C["radius"]};border-top-right-radius:{C["radius"]};}}'
         )
         hdr_lay = QHBoxLayout(hdr)
-        hdr_lay.setContentsMargins(10, 0, 10, 0); hdr_lay.setSpacing(6)
-        for col in ('#ff3d5a', '#ffd740', '#00e676'):
+        hdr_lay.setContentsMargins(12, 0, 12, 0); hdr_lay.setSpacing(6)
+        for col in (C['red'], C['yellow'], C['green']):
             dot = QFrame(); dot.setFixedSize(9, 9)
             dot.setStyleSheet(
                 f'QFrame{{background:{col}30;border:1px solid {col}60;'
@@ -573,7 +666,7 @@ class CyberTerminal(QWidget):
         hdr_lay.addStretch()
         self._hdr_lbl = QLabel('TERMINAL OUTPUT')
         self._hdr_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:8px;letter-spacing:3px;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:10px;letter-spacing:2px;font-family:{UI};font-weight:600;'
         )
         hdr_lay.addWidget(self._hdr_lbl)
         hdr_lay.addStretch()
@@ -591,14 +684,14 @@ class CyberTerminal(QWidget):
                 border-left: 1px solid {C["border2"]};
                 border-right: 1px solid {C["border2"]};
                 border-bottom: 1px solid {C["border2"]};
-                border-bottom-left-radius: 3px;
-                border-bottom-right-radius: 3px;
+                border-bottom-left-radius: {C["radius"]};
+                border-bottom-right-radius: {C["radius"]};
                 border-top: none;
                 font-family: {MONO};
-                font-size: 11px;
-                padding: 10px 14px;
+                font-size: 12px;
+                padding: 12px 16px;
                 selection-background-color: {C["cyan"]}25;
-                line-height: 1.5;
+                line-height: 1.55;
             }}
             QScrollBar:vertical {{
                 background: {C["bg2"]};
@@ -626,7 +719,7 @@ class CyberTerminal(QWidget):
 
     def append_log(self, msg: str, level: str = 'text'):
         """Append một dòng log có màu theo level."""
-        col, _prefix = self._LEVEL.get(level, ('#7eb8cc', ''))
+        col, _prefix = self._LEVEL.get(level, (C['text2'], ''))
 
         # Trim log nếu vượt quá MAX_LOG_LINES
         # QTextDocument.blockCount() = số dòng hiện tại
@@ -716,7 +809,16 @@ class CleanWorker(QThread):
         from utils.sysinfo import fmt_size
         CLEANER = self._cleaner
         total_freed = 0; rollback = []; summary = []
+        total_planned = 0; measured_sum = 0; has_measured = False
         steps = len(self.targets)
+
+        def _report_extras(result):
+            """Cảnh báo (app đang chạy, snapshot...) hiện màu vàng — KHÔNG phải lỗi đỏ."""
+            for n in getattr(result, 'notes', []) or []:
+                self.log.emit(_tlog(f'  ⚠  {n}'), 'warn')
+            sk = getattr(result, 'skipped', []) or []
+            if sk and not self.dry:
+                self.log.emit(_tlog(f'  –  {len(sk)} item(s) skipped (in use / changed since the scan)'), 'dry')
 
         # FIX v2.5: outer try/except guarantees done is ALWAYS emitted.
         # Without this, an unexpected exception (e.g. fmt_size crash, import error)
@@ -771,6 +873,8 @@ class CleanWorker(QThread):
                         self.log.emit(f'  ~  ~{fmt_size(result.freed_bytes)}', 'dry')
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} items'), 'dry')
+                    _report_extras(result)
+                    total_planned += result.freed_bytes
                     if result.freed_bytes > 0:
                         summary.append(f'{tid}:{fmt_size(result.freed_bytes)}')
             else:
@@ -819,7 +923,13 @@ class CleanWorker(QThread):
                             CLEANER._cache_set(tid, res)
                             return res, False
                         else:
-                            res = CLEANER.clean(tid, dry=self.dry)
+                            # "Preview == execute": nếu vừa DRY-RUN xong thì chạy ĐÚNG plan đó.
+                            # Engine kiểm tra lại từng mục ngay trước khi xóa nên thứ nào đã đổi bị bỏ qua.
+                            prev_plan = None
+                            if not self.dry and hasattr(CLEANER, '_cache_get'):
+                                cached = CLEANER._cache_get(tid)
+                                prev_plan = getattr(cached, 'plan', None) if cached is not None else None
+                            res = CLEANER.clean(tid, dry=self.dry, plan=prev_plan)
                             if not self.dry and hasattr(CLEANER, '_cache_invalidate'):
                                 CLEANER._cache_invalidate(tid)
                             return res, False
@@ -857,7 +967,12 @@ class CleanWorker(QThread):
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} removed'), 'ok')
 
+                    _report_extras(result)
                     total_freed += result.freed_bytes
+                    total_planned += getattr(result, 'planned_bytes', 0) or result.freed_bytes
+                    if getattr(result, 'measured_bytes', None) is not None:
+                        measured_sum += max(result.measured_bytes, 0)
+                        has_measured = True
                     rollback    += result.rollback
                     if result.freed_bytes > 0:
                         summary.append(f'{tid}:{fmt_size(result.freed_bytes)}')
@@ -870,7 +985,9 @@ class CleanWorker(QThread):
         label = 'ESTIMATED' if self.dry else 'FREED'
         self.log.emit(_tlog(f'TOTAL {label}: {fmt_size(total_freed)}'), 'ok')
         self.done.emit({'freed': total_freed, 'dry': self.dry,
-                        'summary': ' | '.join(summary), 'rollback': rollback})
+                        'summary': ' | '.join(summary), 'rollback': rollback,
+                        'planned': total_planned,
+                        'measured': measured_sum if has_measured else None})
 
 
 class _SmartOnWorker(QThread):
@@ -918,30 +1035,30 @@ class _SmartOffWorker(QThread):
 class _OneClickWorker(QThread):
     done = pyqtSignal(str, bool)
 
-    def __init__(self):
+    def __init__(self, cleaner=None):
         super().__init__()
         self._stop_requested = False
+        self._cleaner = cleaner
 
     def stop(self):
         self._stop_requested = True
 
     def run(self):
-        import subprocess as _sp, shutil as _sh
-        HELPER  = '/usr/local/bin/cyber-clean-helper'
+        import shutil as _sh, subprocess as _sp
         results = []
         if IS_LINUX:
+            from core import privileged as P
             for action, label in [
                 ('swappiness',    'Swappiness→10'),
                 ('fstrim',        'SSD TRIM'),
                 ('journal',       'Journal'),
                 ('paccache',      'Paccache'),
-                ('compact-memory','Compact RAM'),
+                ('compact-memory', 'Compact RAM'),
             ]:
                 if action == 'paccache' and not _sh.which('paccache'):
                     continue
-                r = _sp.run(f'sudo -n {HELPER} {action}', shell=True,
-                            capture_output=True, text=True, timeout=60)
-                results.append((label, r.returncode == 0))
+                r = P.run_helper(action, timeout=120, use_pkexec=False)
+                results.append((label, r.ok))
             try:
                 from core.booster import free_ram
                 free_ram(lambda m, l='text': None)
@@ -949,13 +1066,20 @@ class _OneClickWorker(QThread):
             except Exception:
                 pass
         elif platform.system() == 'Windows':
-            for cmd, label in [
-                ('ipconfig /flushdns', 'Flush DNS'),
-                ('del /q /f /s "%TEMP%\\*" 2>nul', 'Clear TEMP'),
-            ]:
-                r = _sp.run(cmd, shell=True, capture_output=True, text=True,
-                            timeout=30, creationflags=0x08000000)
-                results.append((label, r.returncode == 0))
+            try:
+                r = _sp.run(['ipconfig', '/flushdns'], capture_output=True, text=True, timeout=30,
+                            creationflags=0x08000000)
+                results.append(('Flush DNS', r.returncode == 0))
+            except Exception:
+                results.append(('Flush DNS', False))
+            # Trước đây: `del /q /f /s "%TEMP%\\*"` xóa MỌI file trong %TEMP% (bỏ qua mọi guard tuổi/ứng dụng/junction).
+            # Nay dùng đúng target win_temp (có guard) — cùng đường đi với tab Clean.
+            if self._cleaner is not None:
+                try:
+                    res = self._cleaner.clean('win_temp', dry=False)
+                    results.append(('Clear TEMP', res.error is None))
+                except Exception:
+                    results.append(('Clear TEMP', False))
             try:
                 from core.booster import free_ram
                 free_ram(lambda m, l='text': None)
@@ -966,68 +1090,6 @@ class _OneClickWorker(QThread):
         summary  = (f'✓ {ok_count}/{len(results)}  ' +
                     '  ·  '.join(f'{"✓" if ok else "~"}{n}' for n, ok in results))
         self.done.emit(summary, ok_count > 0)
-
-
-class _ScanWorker(QThread):
-    log      = pyqtSignal(str, str)
-    progress = pyqtSignal(int, str)   # (percent, current category label) — main.py
-                                       # connects to this at self._scan_worker.progress
-                                       # .connect(...); it was missing here entirely,
-                                       # which is why that connect() raised AttributeError.
-    done     = pyqtSignal(list, list)
-
-    def __init__(self):
-        super().__init__()
-        self._stop_requested = False
-
-    def stop(self):
-        self._stop_requested = True
-
-    def run(self):
-        try:
-            from core.scanner import SecurityScanner
-            sc      = SecurityScanner()
-            results = sc.scan(
-                lambda m, l: self.log.emit(_tlog(m), l),
-                progress_cb=lambda p, l: self.progress.emit(p, l),
-            )
-        except Exception as e:
-            self.log.emit(f'  ✗  Scanner error: {e}', 'err')
-            results = []
-        try:
-            from core.analyzer import get_network_processes
-            self.progress.emit(97, 'Kết nối mạng (tiến trình)')
-            self.log.emit('  ⟳  ' + _tlog('Scanning active network processes...'), 'head')
-            net_results = get_network_processes()
-            # FIX: previously nothing was logged after this call — if the
-            # user was watching the log pane (not the results table or the
-            # scan button), the last visible line stayed
-            # "Scanning active network processes..." forever, even though
-            # get_network_processes() had already returned. This made a
-            # perfectly successful scan look indistinguishable from a hang.
-            # get_network_processes() itself has a 6s internal timeout and
-            # always returns (see analyzer.py docstring), so by the time we
-            # reach this line the network step is genuinely finished —
-            # we just never said so out loud.
-            suspicious = sum(1 for n in net_results if getattr(n, 'suspicious', False))
-            if suspicious:
-                self.log.emit(
-                    f'  ⚠  {_t("log_net_complete_warn", "Network scan complete")} — '
-                    f'{suspicious} {_t("log_net_suspicious_count", "suspicious connection(s) found")}',
-                    'warn'
-                )
-            else:
-                self.log.emit(
-                    f'  ✓  {_t("log_net_complete_ok", "Network scan complete — no suspicious connections")}',
-                    'ok'
-                )
-        except Exception as e:
-            self.log.emit(f'  ~  {_t("log_net_skipped", "Network scan skipped")}: {e}', 'warn')
-            net_results = []
-        self.log.emit('', 'info')
-        self.log.emit(f'  {_t("log_scan_all_done", "All scan steps finished.")}', 'head')
-        self.progress.emit(100, _t('log_scan_all_done', 'Done'))
-        self.done.emit(results, net_results)
 
 
 class _UninstallWorker(QThread):
@@ -1217,8 +1279,8 @@ class DiskDeltaWidget(QWidget):
 
         # ── colours ──────────────────────────────────────────────────
         col_bg      = QColor(C['bg2'])
-        col_used    = QColor('#0d3a52')          # dark teal
-        col_used_hi = QColor('#00bcd4')          # cyan edge
+        col_used    = QColor('#0A3A44')
+        col_used_hi = QColor(C['cyan2'])
         col_free    = QColor('#081820')          # near-black
         col_freed   = QColor(C['green'])         # bright green
         col_freed_d = QColor('#005522')          # freed dim
@@ -1253,7 +1315,7 @@ class DiskDeltaWidget(QWidget):
         # ── used segment ─────────────────────────────────────────────
         if used_px > 0:
             g = QLinearGradient(bar_x, bar_y, bar_x + used_px, bar_y)
-            g.setColorAt(0.0, QColor('#082535'))
+            g.setColorAt(0.0, QColor('#082028'))
             g.setColorAt(0.85, col_used)
             g.setColorAt(1.0, col_used_hi)
             p.fillRect(bar_x, bar_y, used_px, bh, QBrush(g))
@@ -1271,9 +1333,9 @@ class DiskDeltaWidget(QWidget):
             sx = fx + sp
             if fx <= sx <= fx + freed_px + self._SCAN_W:
                 sg = QLinearGradient(sx, bar_y, sx + self._SCAN_W * 4, bar_y)
-                sg.setColorAt(0.0, QColor(0, 230, 118, 0))
-                sg.setColorAt(0.5, QColor(0, 230, 118, 180))
-                sg.setColorAt(1.0, QColor(0, 230, 118, 0))
+                sg.setColorAt(0.0, QColor(0, 255, 65, 0))
+                sg.setColorAt(0.5, QColor(0, 255, 65, 180))
+                sg.setColorAt(1.0, QColor(0, 255, 65, 0))
                 p.fillRect(sx, bar_y, self._SCAN_W * 4, bh, QBrush(sg))
 
         # ── bar top highlight line ────────────────────────────────────
@@ -1402,6 +1464,11 @@ class DiskDeltaWidget(QWidget):
 
 
 class _AutoCleanWorker(QThread):
+    """
+    Chạy nền khi máy rảnh. CHỈ nhận target tầng AUTO có cờ `scheduled`; cleaner cũng tự từ chối
+    (clean(..., unattended=True)) mọi thứ khác — hai lớp chặn độc lập. Chế độ unattended dùng
+    ngưỡng tuổi nghiêm hơn và không bao giờ bật hộp thoại mật khẩu khi người dùng không có mặt.
+    """
     done = pyqtSignal(int, int)
 
     def __init__(self, safe_targets, cleaner):
@@ -1415,14 +1482,23 @@ class _AutoCleanWorker(QThread):
 
     def run(self):
         total_freed = 0; cleaned = 0
-        for tid in self._safe_targets:
-            if self._stop_requested:
-                break
-            try:
-                result       = self._cleaner.clean(tid, dry=False)
-                total_freed += result.freed_bytes
-                cleaned     += 1
-            except Exception:
-                pass
+        try:
+            from core import privileged as P
+            P.set_unattended(True)                      # thread-local: không pkexec / sudo -v khi chạy nền
+        except Exception:
+            P = None
+        try:
+            for tid in self._safe_targets:
+                if self._stop_requested:
+                    break
+                try:
+                    result       = self._cleaner.clean(tid, dry=False, unattended=True)
+                    if result.error is None:
+                        total_freed += result.freed_bytes
+                        cleaned     += 1
+                except Exception:
+                    pass
+        finally:
+            if P is not None:
+                P.set_unattended(False)
         self.done.emit(total_freed, cleaned)
-

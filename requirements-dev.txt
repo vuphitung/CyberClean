@@ -1,0 +1,4 @@
+# Dev / CI: python -m pip install -r requirements-dev.txt && python -m pytest
+-r requirements.txt
+pytest>=8.0
+pyflakes>=3.0

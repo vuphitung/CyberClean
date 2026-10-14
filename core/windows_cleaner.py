@@ -1,37 +1,35 @@
 """
-CyberClean v2.4 — Windows Cleaner
+CyberClean — Windows Cleaner (3.1)
 ════════════════════════════════════════════════════════════════
 
-WHAT CHANGED vs v2.3:
+3.1 — tiers + shared engine (see core/base_cleaner.py, core/engine.py, rules/windows.toml):
 
-NEW targets:
-  win_winsxs        — WinSxS component store analysis + DISM /StartComponentCleanup
-                      (does NOT touch live components; DISM only removes superseded ones)
-  win_font_cache    — FontCache*.dat / FNTCACHE.DAT (auto-rebuilds on next boot)
-  win_shader_cache  — DirectX / GPU shader cache per-user (safe; rebuilt on next launch)
-  vivaldi_cache     — Vivaldi browser cache
-  coccoc_cache      — Cốc Cốc browser cache (common in Vietnam / SE Asia)
+  AUTO    win_temp · win_thumbcache · win_error_reports · win_dns  + browser caches (rules)
+  REVIEW  win_recycle · win_prefetch · win_updates · win_delivery · win_font_cache · win_shader_cache ·
+          win_winsxs · win_eventlog · win_crash_dumps + dev_cache (rules) — shown as explicit items,
+          never pre-ticked, never run unattended.
 
-IMPROVED:
-  _win_temp         — also scans %SYSTEMROOT%\\Temp separately with same guards
-  _browser_cache    — handles multi-profile Chrome/Edge/Brave more robustly:
-                      iterates all profile dirs (Profile 1, Profile 2…) not just Default
-  _win_updates      — guards against partial stop failure: if 'net stop wuauserv' fails
-                      (e.g. not admin), skip delete instead of crashing
+  win_temp / win_error_reports go through the engine: age is judged by the NEWEST file inside an item
+  (a folder an installer is still extracting into is skipped), junctions/symlinks are never followed,
+  freed bytes are measured, locked files are "skipped", not errors.
+  Per-browser targets (chrome/edge/brave/opera/vivaldi/coccoc) were replaced by one Chromium rule that
+  also covers Electron apps; it only ever touches cache folders — never cookies / Local Storage / IndexedDB.
 
-FIX (v2.4):
-  _win_winsxs       — never deletes anything directly; only calls DISM which has its own
-                      safety logic. Estimate = Dism /Online /Cleanup-Image /AnalyzeComponentStore
-                      Parse "Component Store Size (Estimated Reduction)" line.
-  _win_font_cache   — stops FontCache service before delete, restarts after.
-                      Without this, files are locked and delete fails silently.
-  All browser paths — extended to Profile 1 / Profile 2 etc. via glob instead of
-                      hardcoded /Default only.
+  Windows-only calls (DISM, wevtutil, services, MoveFileEx) are unchanged apart from: dosvc is restarted
+  after cleaning, Delivery Optimization keeps its root folder (service ACLs), Windows Update cleaning is
+  skipped while TiWorker/wusa/msiexec run, thumbcache files held by Explorer are reported as "deleted on
+  next boot" instead of being counted as freed.
+
+NOTE: this file could not be executed on a real Windows machine while producing 3.1.0.
 """
 
-import os, re, shutil, subprocess, time, stat as _stat
+import os, re, shutil, subprocess, time
 from pathlib import Path
-from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
+from typing import Dict, List
+from . import engine as E
+from . import rules as R
+from .base_cleaner import (BaseCleaner, PlanCleanerMixin, CleanTarget, CleanResult,
+                           ReviewItem, ReviewScan)
 
 _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
 
@@ -202,7 +200,17 @@ def _chromium_profile_cache_dirs(base: Path, cache_subfolders: list) -> list:
     return dirs
 
 
-class WindowsCleaner(BaseCleaner):
+class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
+    """
+    Tiers (see base_cleaner.py):
+      auto   — win_temp, win_thumbcache, win_error_reports, win_dns + browser caches (rules/windows.toml)
+      review — everything that stops services, forces a rebuild (slower next launch / next boot),
+               deletes user data (Recycle Bin) or removes diagnostics (event logs, crash dumps).
+               Shown as ONE item the user must explicitly tick; never run in the background.
+    Untested on a real Windows box in this build — the Windows-only calls (DISM, wevtutil, services,
+    MoveFileEx) are unchanged; what changed is tiering, guards (age/lock/running/junction) and
+    reporting. Rule-driven caches go through the same engine as Linux (unit-tested).
+    """
 
     # DISM component-store analysis (win_winsxs) can take 10-40s on its own
     # and the store barely changes minute to minute, so give it a much
@@ -212,62 +220,96 @@ class WindowsCleaner(BaseCleaner):
         'win_winsxs': 900,   # 15 min
     }
 
-    def get_targets(self):
+    def __init__(self):
+        self.ctx = R.RuleContext.detect()
+        try:
+            self.ruleset = R.load_default(self.ctx)
+            self._rules_error = ''
+        except Exception as e:                          # luật hỏng → vẫn chạy phần còn lại
+            self.ruleset = R.RuleSet()
+            self._rules_error = str(e)
+        self._targets: Dict[str, CleanTarget] = {}
+        self._refresh_targets()
+
+    # ── target registry ─────────────────────────────────
+    def _code_targets(self) -> List[CleanTarget]:
         return [
-            CleanTarget('win_temp',         'Windows Temp',
-                '%TEMP% and C:\\Windows\\Temp — files older than 24h',       'safe'),
-            CleanTarget('win_prefetch',     'Prefetch Cache',
-                'App launch prefetch (.pf files older than 7 days)',          'safe',    needs_root=True),
-            CleanTarget('win_recycle',      'Recycle Bin',
-                'All items in Recycle Bin',                                   'caution'),
-            CleanTarget('win_updates',      'Windows Update Cache',
-                'Downloaded update files in SoftwareDistribution\\Download',  'safe',    needs_root=True),
-            CleanTarget('win_delivery',     'Delivery Optimization',
-                'Windows Update P2P cache in DeliveryOptimization',           'safe',    needs_root=True),
-            CleanTarget('win_thumbcache',   'Thumbnail Cache',
-                'Explorer thumbcache_*.db — auto-rebuilds',                   'safe'),
-            CleanTarget('win_font_cache',   'Font Cache',
-                'FontCache*.dat — auto-rebuilds on next boot',                'safe',    needs_root=True),
+            CleanTarget('win_temp', 'Windows Temp',
+                '%TEMP% and C:\\Windows\\Temp — items untouched for 24 h+, not locked, not in a protected app dir',
+                'safe'),
+            CleanTarget('win_thumbcache', 'Thumbnail Cache',
+                'Explorer thumbcache_*.db — auto-rebuilds', 'safe', scheduled=False),
+            CleanTarget('win_error_reports', 'Windows Error Reports',
+                'WER report archives older than 7 days', 'safe'),
+            CleanTarget('win_dns', 'DNS Cache',
+                'Flush the DNS resolver cache (frees no disk space)', 'safe', needs_root=True, scheduled=False),
+            # ── review: one explicit opt-in item each ──
+            CleanTarget('win_recycle', 'Recycle Bin',
+                'Permanently empties the Recycle Bin on all drives', 'caution', tier='review'),
+            CleanTarget('win_prefetch', 'Prefetch Cache',
+                'App-launch prefetch (.pf older than 7 days) — apps start slower once while it rebuilds',
+                'caution', needs_root=True, tier='review'),
+            CleanTarget('win_updates', 'Windows Update Cache',
+                'SoftwareDistribution\\Download — stops Windows Update services while cleaning',
+                'caution', needs_root=True, tier='review'),
+            CleanTarget('win_delivery', 'Delivery Optimization',
+                'Windows Update P2P cache — stops the DoSvc service while cleaning',
+                'caution', needs_root=True, tier='review'),
+            CleanTarget('win_font_cache', 'Font Cache',
+                'FontCache*.dat — rebuilt on next boot (troubleshooting item)', 'caution',
+                needs_root=True, tier='review'),
             CleanTarget('win_shader_cache', 'GPU Shader Cache',
-                'DirectX/GPU per-user shader cache — rebuilt on next launch', 'safe'),
-            CleanTarget('win_dns',          'DNS Cache',
-                'Flush Windows DNS resolver cache',                           'safe',    needs_root=True),
-            CleanTarget('win_winsxs',       'WinSxS Cleanup',
-                'DISM removes superseded components only — safe',             'caution', needs_root=True),
-            CleanTarget('win_eventlog',     'Event Logs',
-                'Clear all Windows Event Viewer logs (wevtutil)',             'caution', needs_root=True),
-            CleanTarget('win_error_reports','Windows Error Reports',
-                'App crash dumps and WER report files',                       'safe'),
-            CleanTarget('win_crash_dumps',  'Crash Dumps (Minidump)',
-                'C:\\Windows\\Minidump + %LOCALAPPDATA%\\CrashDumps',         'safe',
-                needs_root=True),
-            CleanTarget('chrome_cache',     'Chrome Cache',
-                'All Chrome profiles — cache auto-rebuilds',                  'safe'),
-            CleanTarget('firefox_cache',    'Firefox Cache',
-                'All Firefox profiles — cache auto-rebuilds',                 'safe'),
-            CleanTarget('edge_cache',       'Edge Cache',
-                'All Edge profiles — cache auto-rebuilds',                    'safe'),
-            CleanTarget('brave_cache',      'Brave Cache',
-                'All Brave profiles — cache auto-rebuilds',                   'safe'),
-            CleanTarget('opera_cache',      'Opera / Opera GX Cache',
-                'Opera and Opera GX caches — auto-rebuild',                   'safe'),
-            CleanTarget('vivaldi_cache',    'Vivaldi Cache',
-                'Vivaldi browser cache — auto-rebuilds',                      'safe'),
-            CleanTarget('coccoc_cache',     'Cốc Cốc Cache',
-                'Cốc Cốc browser cache — auto-rebuilds',                      'safe'),
+                'DirectX/GPU shader caches — first launch of each game stutters while it rebuilds',
+                'caution', tier='review'),
+            CleanTarget('win_winsxs', 'WinSxS Cleanup',
+                'DISM removes superseded components only — slow, may need a reboot', 'caution',
+                needs_root=True, tier='review'),
+            CleanTarget('win_eventlog', 'Event Logs',
+                'Clears ALL Windows Event Viewer logs (wevtutil) — removes diagnostics', 'caution',
+                needs_root=True, tier='review'),
+            CleanTarget('win_crash_dumps', 'Crash Dumps (Minidump)',
+                'Minidump + MEMORY.DMP + CrashDumps — the only evidence of a BSOD', 'caution',
+                needs_root=True, tier='review'),
         ]
 
+    def _refresh_targets(self) -> None:
+        by: Dict[str, CleanTarget] = {}
+        for td in self.ruleset.target_defs(self.ctx):
+            by[td.id] = CleanTarget(td.id, td.name, td.desc, td.safety, needs_root=td.needs_root,
+                                    tier=td.tier, scheduled=td.scheduled)
+        for ct in self._code_targets():
+            by[ct.id] = ct
+        self._targets = by
+
+    ORDER = ['win_temp', 'chromium_cache', 'firefox_cache', 'win_thumbcache', 'win_error_reports', 'win_dns',
+             'win_recycle', 'win_prefetch', 'win_updates', 'win_delivery', 'win_font_cache',
+             'win_shader_cache', 'win_winsxs', 'win_eventlog', 'win_crash_dumps', 'dev_cache']
+
+    def get_targets(self):
+        order = {tid: i for i, tid in enumerate(self.ORDER)}
+        return sorted(self._targets.values(), key=lambda t: (t.tier != 'auto', order.get(t.id, 999)))
+
     def estimate(self, target_id):
-        return self._run_target(target_id, dry=True).freed_bytes
+        return self.clean(target_id, dry=True).freed_bytes
 
-    def clean(self, target_id, dry=True):
-        return self._run_target(target_id, dry=dry)
+    def clean(self, target_id, dry=True, *, unattended=False, plan=None):
+        r = CleanResult(target_id=target_id, dry=dry)
+        tgt = self._targets.get(target_id)
+        if tgt is None:
+            r.error = f'Unknown target: {target_id}'
+            return r
+        if unattended and not tgt.scheduled:
+            r.error = 'Not allowed to run unattended'
+            return r
+        if not dry and tgt.tier != 'auto':
+            r.error = 'Review targets are cleaned from the Review dialog'
+            return r
+        return self._run_target(target_id, dry, unattended, plan)
 
-    def _run_target(self, tid, dry):
-        r = CleanResult(target_id=tid)
+    def _run_target(self, tid, dry, unattended=False, plan=None):
+        r = CleanResult(target_id=tid, dry=dry)
         try:
             fn = {
-                'win_temp':          self._win_temp,
                 'win_prefetch':      self._win_prefetch,
                 'win_recycle':       self._win_recycle,
                 'win_updates':       self._win_updates,
@@ -278,20 +320,62 @@ class WindowsCleaner(BaseCleaner):
                 'win_dns':           self._win_dns,
                 'win_winsxs':        self._win_winsxs,
                 'win_eventlog':      self._win_eventlog,
-                'win_error_reports': self._win_error_reports,
                 'win_crash_dumps':   self._win_crash_dumps,
-                'chrome_cache':      lambda d: self._browser_cache('chrome_cache',  d),
-                'firefox_cache':     lambda d: self._browser_cache('firefox_cache', d),
-                'edge_cache':        lambda d: self._browser_cache('edge_cache',    d),
-                'brave_cache':       lambda d: self._browser_cache('brave_cache',   d),
-                'opera_cache':       lambda d: self._browser_cache('opera_cache',   d),
-                'vivaldi_cache':     lambda d: self._browser_cache('vivaldi_cache', d),
-                'coccoc_cache':      lambda d: self._browser_cache('coccoc_cache',  d),
             }.get(tid)
             if fn:
                 r = fn(dry)
+                r.dry = dry
+            elif self.has_rules(tid) or tid in ('win_temp', 'win_error_reports'):
+                label = self._targets[tid].name if tid in self._targets else tid
+                r = self.clean_rule_target(tid, dry, unattended, plan, label=label)
+            else:
+                r.error = f'No implementation for target {tid}'
         except Exception as e:
             r.error = str(e)
+        return r
+
+    # ── plans for engine-driven targets ───────────────────
+    def build_plan(self, target_id, *, unattended=False):
+        if target_id == 'win_temp':
+            return self._temp_plan(unattended)
+        if target_id == 'win_error_reports':
+            return self._wer_plan(unattended)
+        return PlanCleanerMixin.build_plan(self, target_id, unattended=unattended)
+
+    # ── review (monolithic targets = a single explicit item) ──
+    _MONOLITH_RISK = {'win_recycle': 'high', 'win_eventlog': 'high', 'win_crash_dumps': 'medium'}
+
+    def review_scan(self, target_id, progress_cb=None):
+        tgt = self._targets.get(target_id)
+        if tgt is None or tgt.tier != 'review':
+            raise ValueError(f'{target_id} is not a review target')
+        if self.has_rules(target_id):
+            return PlanCleanerMixin.review_scan(self, target_id, progress_cb)
+        est = self._run_target(target_id, True)
+        scan = ReviewScan(target_id, permanent=target_id != 'win_prefetch')
+        scan.items.append(ReviewItem(
+            id='all', label=tgt.name, size=est.freed_bytes, files=est.files_removed, detail=tgt.desc,
+            risk=self._MONOLITH_RISK.get(target_id, 'medium'),
+            blocked=est.error or '', payload={}))
+        scan.notes = list(est.notes)
+        if target_id in ('win_recycle', 'win_eventlog'):
+            scan.warning = 'This cannot be undone. Nothing is selected by default.'
+        return scan
+
+    def review_clean(self, target_id, item_ids, dry=False):
+        tgt = self._targets.get(target_id)
+        if tgt is None or tgt.tier != 'review':
+            r = CleanResult(target_id, dry=dry)
+            r.error = f'{target_id} is not a review target'
+            return r
+        if self.has_rules(target_id):
+            return PlanCleanerMixin.review_clean(self, target_id, item_ids, dry)
+        if 'all' not in item_ids:
+            return CleanResult(target_id, dry=dry)
+        r = self._run_target(target_id, dry)
+        r.dry = dry
+        if not dry:
+            self._cache_invalidate(target_id)
         return r
 
     # ── Temp ──────────────────────────────────────────────────
@@ -333,47 +417,55 @@ class WindowsCleaner(BaseCleaner):
             return True
         return False
 
-    def _win_temp(self, dry):
-        r = CleanResult('win_temp')
-        dirs = list({
-            _expand_env_path('TEMP', 'C:/Windows/Temp'),
-            _expand_env_path('TMP',  'C:/Windows/Temp'),
-            Path('C:/Windows/Temp'),
-            Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'Temp',
-        })
+    def _temp_dirs(self) -> List[Path]:
+        dirs, seen = [], set()
+        for d in (_expand_env_path('TEMP', 'C:/Windows/Temp'), _expand_env_path('TMP', 'C:/Windows/Temp'),
+                  Path('C:/Windows/Temp'), Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'Temp'):
+            key = str(d).lower().replace('/', '\\').rstrip('\\')
+            if key in seen or key in ('c:', 'c:\\windows', 'c:\\users'):
+                continue
+            seen.add(key)
+            if d.exists():
+                dirs.append(d)
+        return dirs
+
+    def _temp_plan(self, unattended: bool) -> "E.Plan":
+        """
+        Cùng một bộ guard cho dry-run và chạy thật. Khác bản cũ:
+          • tuổi tính theo thứ MỚI NHẤT bên trong (không chỉ mtime thư mục cấp 1) —
+            thư mục installer đang giải nén sẽ không bị xóa nữa;
+          • junction/symlink không bị đi theo (size không còn tính theo đích của junction);
+          • số byte 'đã giải phóng' đo thật, không cộng cả phần xóa không được.
+        """
+        plan = E.Plan('win_temp')
+        guards = E.Guards()
         now = time.time()
-
-        for d in dirs:
-            if not d.exists():
-                continue
-            safe_path = str(d).lower().replace(os.sep, '/')
-            if safe_path.rstrip('/') in ('c:', 'c:/', 'c:/windows', 'c:/users'):
-                continue
-
+        for d in self._temp_dirs():
             try:
                 free_bytes = shutil.disk_usage(str(d.anchor)).free
             except OSError:
                 free_bytes = None
-
-            for item in list(d.iterdir()):
+            base_age = 3 * 86400 if unattended else 86400
+            if free_bytes is not None and free_bytes < 2 * 1024**3:
+                base_age = max(base_age, 172800)       # đĩa gần đầy: Chrome/Discord giải nén update vào %TEMP%
+            pol = E.Policy(min_age_sec=base_age)
+            for e in E.iter_dir(d):
+                name = e.name.lower()
                 try:
-                    if self._temp_item_should_skip(item, now, free_bytes):
-                        continue
-                    if dry:
-                        r.freed_bytes += _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                        continue
-                    if item.is_file() and _is_locked_win(item):
-                        continue
-                    sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                    if item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink(missing_ok=True)
-                    r.freed_bytes   += sz
-                    r.files_removed += 1
-                except (PermissionError, OSError):
-                    pass
-        return r
+                    is_dir = e.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir and name.startswith(self._TEMP_SKIP_DIR_PREFIXES):
+                    continue
+                if not is_dir and Path(e.name).suffix.lower() in self._TEMP_SKIP_EXTENSIONS:
+                    continue
+                item, why = E.make_item(e.path, pol, now=now, guards=guards, group='win_temp',
+                                        label=e.path, note='temp file — safe to remove')
+                if item is not None:
+                    plan.items.append(item)
+                elif why and why != 'gone':
+                    plan.skipped.append((e.path, why))
+        return plan
 
     # ── Prefetch ──────────────────────────────────────────────
     def _win_prefetch(self, dry):
@@ -427,6 +519,12 @@ class WindowsCleaner(BaseCleaner):
             return r
         size_before = _dir_size_safe(sd)
         r.freed_bytes = size_before
+        busy = E.Guards().running(['tiworker', 'wusa', 'msiexec', 'trustedinstaller'])
+        if busy:
+            # Dừng dịch vụ Windows Update giữa lúc đang cài update có thể làm hỏng trạng thái servicing.
+            r.notes.append(f'{busy} is running (an update/installer is in progress) — try again later.')
+            r.freed_bytes = 0
+            return r
         if not dry and is_admin():
             # Use 'sc stop' — more reliable than 'net stop' on managed/office machines.
             # Also stop BITS (Background Intelligent Transfer) which holds file locks.
@@ -466,10 +564,12 @@ class WindowsCleaner(BaseCleaner):
                 finally:
                     _start_svc('bits')
                     _start_svc('wuauserv')
+                    _start_svc('dosvc')               # đã dừng ở trên — trước đây không bao giờ bật lại
                 r.freed_bytes = _real_freed(size_before, sd)
             else:
                 _start_svc('bits')
                 _start_svc('wuauserv')
+                _start_svc('dosvc')
                 r.error = (
                     'Could not stop Windows Update service — '
                     'try running CyberClean as Administrator'
@@ -491,7 +591,11 @@ class WindowsCleaner(BaseCleaner):
             # shutil.rmtree raises unexpectedly (mirrors the _win_updates pattern).
             run_win('net stop dosvc /y', timeout=10)
             try:
-                shutil.rmtree(do_path, ignore_errors=True)
+                for child in E.iter_dir(do_path):          # giữ thư mục gốc: nó mang ACL riêng của dịch vụ
+                    try:
+                        E.remove_path(child.path)
+                    except OSError:
+                        pass
             finally:
                 run_win('net start dosvc', timeout=10)
             r.freed_bytes = _real_freed(size_before, do_path)
@@ -523,7 +627,8 @@ class WindowsCleaner(BaseCleaner):
             MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
 
             deleted = 0
-            locked  = 0
+            delayed = 0
+            delayed_bytes = 0
             for f in files:
                 try:
                     sz = f.stat().st_size
@@ -539,24 +644,24 @@ class WindowsCleaner(BaseCleaner):
                         # File is locked by Explorer — schedule for next boot
                         ok = _kernel32.MoveFileExW(str(f), None, MOVEFILE_DELAY_UNTIL_REBOOT)
                         if ok:
-                            locked += 1  # will be cleaned on next boot
+                            delayed += 1
+                            delayed_bytes += sz
                             r.rollback.append({
                                 'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                                 'type': 'thumbcache', 'path': str(f),
-                                'size': sz, 'note': 'scheduled for deletion on next boot',
+                                'size': 0, 'note': 'scheduled for deletion on next boot',
                             })
-                        # Either way, count in estimate (will be gone after reboot)
-                        deleted += sz
                 except OSError:
                     pass
 
+            # Chỉ tính phần ĐÃ giải phóng. Phần bị Explorer giữ không phải lỗi và chưa giải phóng
+            # cho tới khi khởi động lại → ghi chú (không còn là r.error màu đỏ, không còn cộng vào freed).
             r.freed_bytes   = deleted
             r.files_removed = len([f for f in files if not f.exists()])
-            if locked > 0:
-                r.error = (
-                    f'{locked} file(s) scheduled for deletion on next Windows boot '
-                    '(still locked by Explorer — no action needed, fully automatic).'
-                )
+            if delayed:
+                r.notes.append(
+                    f'{delayed} file(s) ({delayed_bytes // (1024 * 1024)} MB) are held by Explorer and will be '
+                    'deleted on the next Windows boot — that space is NOT freed yet.')
         return r
 
     # ── Font Cache (NEW) ──────────────────────────────────────
@@ -804,135 +909,26 @@ class WindowsCleaner(BaseCleaner):
         return r
 
     # ── Error Reports ─────────────────────────────────────────
-    def _win_error_reports(self, dry):
-        r = CleanResult('win_error_reports')
+    def _wer_plan(self, unattended: bool) -> "E.Plan":
+        plan = E.Plan('win_error_reports')
+        guards = E.Guards()
         _local = os.environ.get('LOCALAPPDATA', '')
         wer_dirs = []
         if _local:
-            wer_dirs += [
-                Path(_local) / 'Microsoft/Windows/WER/ReportArchive',
-                Path(_local) / 'Microsoft/Windows/WER/ReportQueue',
-            ]
-        wer_dirs += [
-            Path('C:/ProgramData/Microsoft/Windows/WER/ReportArchive'),
-            Path('C:/ProgramData/Microsoft/Windows/WER/ReportQueue'),
-        ]
-        existing = [d for d in wer_dirs if d.exists()]
-        size_before = sum(_dir_size_safe(d) for d in existing)
-        r.freed_bytes = size_before
-        if not dry:
-            for d in existing:
-                for item in list(d.iterdir()):
-                    try:
-                        sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
-                        r.rollback.append({
-                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                            'type': 'win_error_reports', 'path': str(item),
-                            'size': sz, 'note': 'crash dump — safe to remove',
-                        })
-                        if item.is_dir():
-                            shutil.rmtree(item, ignore_errors=True)
-                        else:
-                            item.unlink(missing_ok=True)
-                        r.files_removed += 1
-                    except (PermissionError, OSError):
-                        pass
-            size_after  = sum(_dir_size_safe(d) for d in existing if d.exists())
-            r.freed_bytes = max(0, size_before - size_after)
-        return r
-
-    # ── Browser Cache ─────────────────────────────────────────
-    def _browser_cache(self, tid, dry):
-        r = CleanResult(tid)
-        _lc = os.environ.get('LOCALAPPDATA', '')
-        _rm = os.environ.get('APPDATA', '')
-        if not _lc and not _rm:
-            return r
-
-        # FIX: Bảo vệ Local Storage, IndexedDB, Databases của Discord/Slack/Teams.
-        # Đây là nơi lưu cấu hình audio device, login token, server list.
-        # Xóa nhầm → mất mic, mất đăng nhập, mất cài đặt.
-        # Chỉ xóa GPUCache và Cache (rebuild được), KHÔNG xóa Local Storage.
-        _COMMS_PROTECTED_DIRS = {
-            'local storage', 'indexeddb', 'databases',
-            'localstorage', 'session storage',
-            'leveldb', 'protobuf', 'syncdata',
-            'account manager', 'preferences',
-        }
-
-        def _is_safe_cache_dir(path_obj) -> bool:
-            name_low = path_obj.name.lower()
-            # Không xóa nếu tên thư mục là dữ liệu quan trọng
-            if name_low in _COMMS_PROTECTED_DIRS:
-                return False
-            # Không xóa nếu là thư mục của comms apps (Discord, Slack, Teams)
-            _COMMS_APPS = {'discord', 'slack', 'msteams', 'teams', 'zoom',
-                           'telegram', 'signal', 'skype', 'zalo'}
-            for part in path_obj.parts:
-                if part.lower() in _COMMS_APPS:
-                    return False
-            return True
-        local   = Path(_lc) if _lc else Path('C:/Users/Default/AppData/Local')
-        roaming = Path(_rm) if _rm else Path('C:/Users/Default/AppData/Roaming')
-
-        CHROMIUM_CACHE_SUBS = ['Cache', 'Code Cache', 'GPUCache']
-
-        if tid == 'firefox_cache':
-            cache_paths = []
-            for base in [local / 'Mozilla/Firefox/Profiles',
-                         roaming / 'Mozilla/Firefox/Profiles']:
-                if base.exists():
-                    for profile_dir in base.iterdir():
-                        if profile_dir.is_dir():
-                            c2 = profile_dir / 'cache2'
-                            if c2.exists():
-                                cache_paths.append(c2)
-
-        elif tid == 'opera_cache':
-            cache_paths = []
-            for opera_dir in [
-                roaming / 'Opera Software/Opera Stable',
-                roaming / 'Opera Software/Opera GX Stable',
-                local  / 'Opera Software/Opera Stable',
-                local  / 'Opera Software/Opera GX Stable',
-            ]:
-                for sub in CHROMIUM_CACHE_SUBS:
-                    p = opera_dir / sub
-                    if p.exists():
-                        cache_paths.append(p)
-
-        else:
-            # All Chromium-based browsers — iterate all profiles
-            base_map = {
-                'chrome_cache':  local / 'Google/Chrome/User Data',
-                'edge_cache':    local / 'Microsoft/Edge/User Data',
-                'brave_cache':   local / 'BraveSoftware/Brave-Browser/User Data',
-                'vivaldi_cache': local / 'Vivaldi/User Data',
-                'coccoc_cache':  local / 'CocCoc/Browser/User Data',
-            }
-            base = base_map.get(tid)
-            cache_paths = _chromium_profile_cache_dirs(base, CHROMIUM_CACHE_SUBS) if base else []
-
-        # Accumulate — parallel scan for speed on multiple profile dirs
-        total_freed = 0
-        if cache_paths:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=min(len(cache_paths), 4)) as ex:
-                futures = {ex.submit(_dir_size_safe, p): p for p in cache_paths}
-                for fut in as_completed(futures):
-                    try:
-                        sz = fut.result(timeout=10)
-                    except Exception:
-                        sz = 0
-                    r.freed_bytes += sz
-            if not dry:
-                for cache_path in cache_paths:
-                    before = _dir_size_safe(cache_path)
-                    shutil.rmtree(cache_path, ignore_errors=True)
-                    total_freed += _real_freed(before, cache_path)
-        if not dry:
-            r.freed_bytes = total_freed
-        return r
+            wer_dirs += [Path(_local) / 'Microsoft/Windows/WER/ReportArchive',
+                         Path(_local) / 'Microsoft/Windows/WER/ReportQueue']
+        wer_dirs += [Path('C:/ProgramData/Microsoft/Windows/WER/ReportArchive'),
+                     Path('C:/ProgramData/Microsoft/Windows/WER/ReportQueue')]
+        pol = E.Policy(min_age_sec=7 * 86400)
+        for d in wer_dirs:
+            if not d.exists():
+                continue
+            for e in E.iter_dir(d):
+                item, why = E.make_item(e.path, pol, guards=guards, group='win_error_reports',
+                                        label=e.path, note='crash report — safe to remove')
+                if item is not None:
+                    plan.items.append(item)
+        return plan
 
     # ── Crash Dumps (Minidump) ────────────────────────────
     def _win_crash_dumps(self, dry):

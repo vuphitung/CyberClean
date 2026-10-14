@@ -1,0 +1,4 @@
+PRETTY_NAME="Kali GNU/Linux Rolling"
+NAME="Kali GNU/Linux"
+ID=kali
+ID_LIKE=debian

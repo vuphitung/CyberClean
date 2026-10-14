@@ -51,7 +51,7 @@ NEW: _bypass_compositor_on/off() — FPS unlocker
 
 ═══════════════════════════════════════════════════════════════
 """
-import os, sys, ctypes, shutil, subprocess, glob, platform, struct, signal, atexit
+import os, re, sys, ctypes, shutil, subprocess, glob, platform, struct, signal, atexit
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Dict, List
@@ -1052,7 +1052,20 @@ def _is_protected(proc_name: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════
-# CRASH CLEANUP — restore cgroup/nice even on SIGKILL via atexit
+# CRASH CLEANUP — restore cgroup/nice/registry state on normal exit,
+# SIGTERM, or SIGHUP.
+#
+# IMPORTANT LIMITATION: this does NOT cover SIGKILL (kill -9), a hard
+# crash (segfault), a power loss, or Windows Task Manager "End task"
+# forcing termination via TerminateProcess. Per POSIX, SIGKILL cannot
+# be caught, blocked, or handled by any user-space code — this is a
+# kernel guarantee, not something atexit/signal.signal() can work
+# around. Only functions registered here run, and only for the exit
+# paths Python can actually observe (normal interpreter exit, SIGTERM,
+# SIGHUP). Any system changes NOT registered via _register_cleanup()
+# below (e.g. game_mode_on()'s registry/sysctl/cgroup changes) will
+# persist until the user restores them manually or reboots, if the
+# app is ever force-killed instead of exiting normally.
 # ══════════════════════════════════════════════════════════════
 
 _CLEANUP_REGISTRY: List[Callable] = []  # list of callback() to run on exit
@@ -1060,6 +1073,20 @@ _CLEANUP_REGISTRY: List[Callable] = []  # list of callback() to run on exit
 def _register_cleanup(fn: Callable):
     """Register a no-arg cleanup function to run on app exit or signal."""
     _CLEANUP_REGISTRY.append(fn)
+
+def _unregister_cleanup(fn: Callable):
+    """
+    Remove a previously-registered cleanup function. Callers that already
+    restored everything through their own normal *_off() path should call
+    this afterward so _CLEANUP_REGISTRY doesn't grow by one entry (holding
+    a full `saved` dict — PIDs, service lists, etc.) every time a mode is
+    toggled on/off within one session. Safe to call even if fn was never
+    registered or was already removed.
+    """
+    try:
+        _CLEANUP_REGISTRY.remove(fn)
+    except ValueError:
+        pass
 
 def _run_all_cleanups():
     for fn in _CLEANUP_REGISTRY:
@@ -1126,14 +1153,12 @@ def _run_no_shell(argv: list, stdin_data: str = None, timeout=30):
 
 
 def _run_helper(action, timeout=30):
+    """Gọi action của helper đặc quyền (Linux). Không shell; không bao giờ bật prompt giữa game."""
     if IS_WINDOWS:
         return _run(action, timeout)
-    out, code = _run(f"sudo -n {HELPER} {action} 2>/dev/null", timeout)
-    if code == 0:
-        return out, 0
-    if os.geteuid() == 0:
-        return _run(action, timeout)
-    return "", 1
+    from core import privileged as _P
+    r = _P.run_helper(action, timeout=timeout, use_pkexec=False)
+    return (r.out if r.ok else ""), (0 if r.ok else (r.code or 1))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1380,8 +1405,8 @@ def _has_active_children(pid: int) -> bool:
 # Run BEFORE kill_bloat and BEFORE CPU jail in game_mode_on so the rogue
 # process doesn't steal cores from the game.
 #
-# Threshold: 85% CPU sustained over 0.2s sample — avoids false kills
-# during legitimate short bursts (initial render, config reload).
+# Threshold: 85% CPU on EVERY sample across ~2 s (not a single 0.4 s window) — avoids false
+# kills during legitimate short bursts (initial render, config reload, workspace redraw).
 
 _WIDGET_SUSPECTS = {
     "eww",        # Elkowar's Wacky Widgets — most common runaway
@@ -1397,91 +1422,97 @@ _WIDGET_SUSPECTS = {
 }
 
 _WIDGET_CPU_THRESHOLD = 85.0   # % — sustained above this = zombie loop
+_WIDGET_PRECHECK_SEC  = 0.3    # lần đo nhanh: không có ứng viên nào cao → xong ngay (không làm chậm Game Mode)
+_WIDGET_CONFIRM_SAMPLES = 4    # xác nhận: 4 mẫu × 0.5 s = ~2 s CPU liên tục, TẤT CẢ phải vượt ngưỡng
+_WIDGET_CONFIRM_STEP  = 0.5
+_WIDGET_MIN_AGE_SEC   = 8.0    # tiến trình vừa khởi động (render đầu, đọc config) chưa bị xét
+_WIDGET_TERM_WAIT_SEC = 1.0    # SIGTERM trước, chờ rồi mới SIGKILL
 
-def _kill_runaway_widgets(log) -> int:
+
+def _kill_runaway_widgets(log, _sleep=None) -> int:
     """
     Kill UI widget processes that are stuck in a CPU-consuming loop.
 
-    Strategy:
-    1. Find processes whose name matches _WIDGET_SUSPECTS
-    2. Warm up cpu_percent (0.2s) — short enough to not delay game mode
-    3. Kill only if STILL above threshold on TWO consecutive samples
-       0.2s apart (avoids killing legitimate startup/reload bursts —
-       see fix note below)
-    4. SIGKILL not SIGTERM — a looping process ignores SIGTERM
+    Trước đây: chỉ ~0.4 s lấy mẫu (hai mẫu cách nhau 0.2 s) rồi SIGKILL — quá mỏng: một lần reload config
+    hoặc đổi workspace cũng đủ vượt ngưỡng 85% trong ~0.4 s. Nay:
+      1. Chỉ xét tiến trình CỦA USER HIỆN TẠI (chạy bằng root không được giết widget của người khác).
+      2. Bỏ qua tiến trình mới khởi động < 8 s.
+      3. Đo nhanh 0.3 s; không ai vượt ngưỡng → kết thúc (trường hợp thường gặp, gần như không tốn thời gian).
+      4. Ứng viên bị nghi phải vượt ngưỡng ở CẢ 4 mẫu liên tiếp cách nhau 0.5 s (~2 s liên tục).
+      5. SIGTERM trước (cho phép dọn socket Wayland), chờ 1 s, còn sống mới SIGKILL.
 
     Returns count of processes killed.
     """
     if not IS_LINUX or not HAS_PSUTIL:
         return 0
+    import time as _t
+    sleep = _sleep or _t.sleep
+    me = os.getuid()
+    now = _t.time()
 
-    killed = 0
     candidates = []
-
-    # Pass 1: find widget processes and start CPU measurement
-    for p in psutil.process_iter(["pid", "name"]):
+    for p in psutil.process_iter(["pid", "name", "create_time"]):
         try:
             nm = (p.info["name"] or "").lower()
-            if nm in _WIDGET_SUSPECTS:
-                p.cpu_percent(interval=0)   # warm up — start measurement
-                candidates.append(p)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            if nm not in _WIDGET_SUSPECTS:
+                continue
+            if p.uids().real != me:
+                continue
+            if now - (p.info.get("create_time") or 0) < _WIDGET_MIN_AGE_SEC:
+                continue
+            p.cpu_percent(interval=0)             # warm-up
+            candidates.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-
     if not candidates:
         return 0
 
-    # Short sleep — just enough to get valid CPU reading
-    import time as _t
-    _t.sleep(0.2)
-
-    # Pass 2: first real reading. A single sample above threshold is not
-    # enough to conclude "runaway" — normal events like a config reload
-    # (waybar) or a workspace-switch redraw (conky) legitimately spike
-    # CPU for a couple hundred ms and would otherwise get killed right as
-    # the user starts their game, silently losing their status bar/widget
-    # until they notice and restart it manually.
-    still_high = []
+    sleep(_WIDGET_PRECHECK_SEC)
+    suspects = []
     for p in candidates:
         try:
-            cpu = p.cpu_percent(interval=0)
-            if cpu > _WIDGET_CPU_THRESHOLD:
-                still_high.append(p)
+            if p.cpu_percent(interval=0) > _WIDGET_CPU_THRESHOLD:
+                suspects.append(p)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-
-    if not still_high:
+    if not suspects:
         return 0
 
-    # FIX (important): require a SECOND consecutive high reading before
-    # killing. A genuine infinite loop stays pegged across both samples;
-    # a legitimate startup/reload burst naturally drops back down by now.
-    _t.sleep(0.2)
+    # Xác nhận bền vững: mọi mẫu đều phải cao, một mẫu thấp = loại khỏi danh sách
+    last_cpu = {}
+    for _ in range(_WIDGET_CONFIRM_SAMPLES):
+        sleep(_WIDGET_CONFIRM_STEP)
+        still = []
+        for p in suspects:
+            try:
+                cpu = p.cpu_percent(interval=0)
+                if cpu > _WIDGET_CPU_THRESHOLD:
+                    last_cpu[p.pid] = cpu
+                    still.append(p)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        suspects = still
+        if not suspects:
+            return 0
 
-    # Pass 3: confirm and kill only processes still above threshold
-    for p in still_high:
+    killed = 0
+    for p in suspects:
         try:
-            cpu = p.cpu_percent(interval=0)
-            nm  = p.name()
-            if cpu > _WIDGET_CPU_THRESHOLD:
-                # Double-check: not already a zombie
-                try:
-                    status = p.status()
-                    if status == psutil.STATUS_ZOMBIE:
-                        # Already zombie — just reap, no SIGKILL needed
-                        log(f"  ✕ Zombie widget (Z state): {nm} (pid {p.pid}) — already dead", "warn")
-                        continue
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-
-                # True runaway loop — SIGKILL (SIGTERM is ignored by looping procs)
+            nm = p.name()
+            if p.status() == psutil.STATUS_ZOMBIE:
+                log(f"  ✕ Zombie widget (Z state): {nm} (pid {p.pid}) — already dead", "warn")
+                continue
+            p.terminate()
+            try:
+                p.wait(timeout=_WIDGET_TERM_WAIT_SEC)
+            except psutil.TimeoutExpired:
                 p.kill()
-                killed += 1
-                log(f"  ✕ Killed runaway widget: {nm} (pid {p.pid}, {cpu:.0f}% CPU sustained)", "warn")
-                log(f"    → Restart {nm} manually after gaming session", "ok")
+            killed += 1
+            log(f"  ✕ Stopped runaway widget: {nm} (pid {p.pid}, ~{last_cpu.get(p.pid, 0):.0f}% CPU for "
+                f"{_WIDGET_CONFIRM_SAMPLES * _WIDGET_CONFIRM_STEP:.0f}s)", "warn")
+            log(f"    → Restart {nm} manually after gaming session", "ok")
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-
     return killed
 
 
@@ -2568,13 +2599,22 @@ def _restore_realtime_scheduling(saved: dict, log):
 # Needs root (CAP_SYS_RESOURCE) or helper.
 
 def _protect_game_from_oom(game_pids: list, log, saved: dict):
-    """Set oom_score_adj=-1000 so OOM killer never terminates the game."""
+    """
+    Set oom_score_adj=-1000 so the OOM killer never terminates the game.
+
+    Hạ oom_score_adj xuống dưới giá trị hiện tại cần CAP_SYS_RESOURCE (root); user thường chỉ nâng lên được.
+    Trước đây có nhánh `sudo -n tee /proc/PID/oom_score_adj <<< -1000`, nhưng sudoers chỉ cho phép helper và
+    `<<<` không có trong /bin/sh nên nhánh đó không bao giờ chạy — và cố tình KHÔNG thêm action helper tương
+    ứng: một action "đánh dấu tiến trình bất tử với OOM killer" là quyền không nên trao cho mọi tiến trình
+    của user, và nếu game rò rỉ RAM thì OOM killer sẽ giết compositor/DE thay vì game.
+    """
     if not IS_LINUX:
         return
     from pathlib import Path as _P
 
     orig_scores = {}
     protected = 0
+    denied = 0
 
     for pid in game_pids:
         adj_file = _P(f"/proc/{pid}/oom_score_adj")
@@ -2584,19 +2624,12 @@ def _protect_game_from_oom(game_pids: list, log, saved: dict):
             orig_scores[pid] = orig
             protected += 1
         except (OSError, PermissionError):
-            # Try via helper (needs root)
-            try:
-                out, code = _run(
-                    f"sudo -n tee /proc/{pid}/oom_score_adj <<< -1000", timeout=3
-                )
-                if code == 0:
-                    orig_scores[pid] = "0"
-                    protected += 1
-            except Exception:
-                pass
+            denied += 1
 
     if protected:
         log(f"  + OOM protection: {protected} game processes marked unkillable", "ok")
+    elif denied:
+        log("  ~ OOM protection skipped (needs root — lowering oom_score_adj requires CAP_SYS_RESOURCE)", "warn")
     saved["oom_protected"] = orig_scores
 
 
@@ -3101,6 +3134,22 @@ def _restore_screensaver(saved: dict, log):
 # Temporarily switches DNS to 1.1.1.1/1.0.0.1 (Cloudflare) for lower latency.
 # Reduces DNS lookup time in online games. Opt-in: may break corporate/VPN DNS.
 # Requires admin to change DNS via netsh.
+#
+# STATUS: fully implemented and tested in isolation, but NOT currently called
+# from anywhere (Game Mode / Smart Boost do not invoke it). Changing a user's
+# system DNS is impactful enough that it needs its own explicit opt-in toggle
+# in the UI before being wired into any automatic flow — don't call
+# _boost_dns_windows() from a default-on path without adding that toggle and
+# making sure _restore_dns_windows() runs reliably even if the app crashes
+# mid-boost (e.g. persist `changed` to the same saved-state dict Game Mode
+# already restores from, the way swappiness/nice do elsewhere in this file).
+
+# Tên adapter / địa chỉ DNS đi vào câu lệnh `netsh ... name="<adapter>"` chạy qua shell. Chúng được đọc từ output
+# của chính netsh nên một adapter đặt tên kiểu `x" & calc & "` (cần quyền admin để đổi tên) sẽ thành chèn lệnh.
+# Chỉ chấp nhận ký tự bình thường của tên adapter; tên lạ thì BỎ QUA adapter đó thay vì cố trích dẫn.
+_ADAPTER_NAME_RE = re.compile(r"^[\w .\-()#*+@]{1,128}$")
+_IP_TEXT_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]{2,39})$")
+
 
 def _boost_dns_windows(log) -> list:
     """
@@ -3135,6 +3184,9 @@ def _boost_dns_windows(log) -> list:
                 adapters.append(adapter)
 
         for adapter in adapters:
+            if not _ADAPTER_NAME_RE.match(adapter):
+                log(f"  ~ DNS: skipped adapter with unusual characters in its name ({adapter!r})", "warn")
+                continue
             # Read current DNS
             dns_out = subprocess.run(
                 f'netsh interface ip show dns name="{adapter}"',
@@ -3155,7 +3207,14 @@ def _boost_dns_windows(log) -> list:
             )
             if r1.returncode == 0:
                 changed.append((adapter, orig_dns))
-                log(f"  + DNS: {adapter} → 1.1.1.1/1.0.0.1 (Cloudflare)", "ok")
+                if r2.returncode == 0:
+                    log(f"  + DNS: {adapter} → 1.1.1.1/1.0.0.1 (Cloudflare)", "ok")
+                else:
+                    # Primary DNS switched fine but the secondary (backup) DNS
+                    # entry failed to add — still a working, faster DNS setup,
+                    # just without a fallback resolver. Report accurately
+                    # instead of claiming both succeeded.
+                    log(f"  + DNS: {adapter} → 1.1.1.1 (secondary 1.0.0.1 failed, primary only)", "ok")
 
         if changed:
             # Flush DNS cache
@@ -3172,6 +3231,8 @@ def _restore_dns_windows(changed: list, log):
     if not IS_WINDOWS or not changed:
         return
     for adapter, orig_dns in changed:
+        if not _ADAPTER_NAME_RE.match(adapter):
+            continue
         try:
             if not orig_dns:
                 subprocess.run(
@@ -3179,8 +3240,16 @@ def _restore_dns_windows(changed: list, log):
                     shell=True, capture_output=True, creationflags=0x08000000, timeout=5
                 )
             else:
+                _ip = orig_dns[0].split()[-1]
+                if not _IP_TEXT_RE.match(_ip):
+                    # không đọc được địa chỉ cũ một cách đáng tin → trả về DHCP thay vì đặt giá trị lạ
+                    subprocess.run(
+                        f'netsh interface ip set dns name="{adapter}" dhcp',
+                        shell=True, capture_output=True, creationflags=0x08000000, timeout=5
+                    )
+                    continue
                 subprocess.run(
-                    f'netsh interface ip set dns name="{adapter}" static {orig_dns[0].split()[-1]}',
+                    f'netsh interface ip set dns name="{adapter}" static {_ip}',
                     shell=True, capture_output=True, creationflags=0x08000000, timeout=5
                 )
         except Exception:
@@ -3621,6 +3690,56 @@ def game_mode_on(log) -> dict:
         saved["nagle_changed"] = _disable_nagle(log)
 
     log(f"✓ GAME MODE ON — {jailed} apps jailed", "ok")
+
+    # Register cleanup for crash recovery (SIGTERM/SIGHUP — see the
+    # CRASH CLEANUP section above for what this can't cover). Mirrors
+    # eco_mode_on()'s _eco_cleanup registration below. Uses a no-op log
+    # callback since there's no UI thread left to receive log lines when
+    # this runs from atexit/a signal handler.
+    def _game_mode_crash_cleanup():
+        _noop = lambda *_a, **_kw: None
+        if saved.get("frozen") and IS_LINUX:
+            restore_bloat(saved["frozen"], _noop)
+        if IS_LINUX:
+            _restore_screensaver(saved, _noop)
+            _restore_io_scheduler(saved, _noop)
+            _restore_gpu_performance(saved, _noop)
+            _bypass_compositor_off(saved, _noop)
+            _restore_realtime_scheduling(saved, _noop)
+            _restore_game_oom(saved, _noop)
+            _restore_game_core_affinity(saved, _noop)
+            _restore_thp(saved, _noop)
+        if IS_WINDOWS:
+            if saved.get("services"):
+                _restore_windows_services(saved["services"], _noop)
+            if saved.get("nagle_changed"):
+                _restore_nagle(saved["nagle_changed"], _noop)
+            _timer_resolution_restore(saved.get("timer_set", False), _noop)
+            _restore_gamedvr(saved.get("gamedvr_orig"), _noop)
+            if saved.get("dns_changed"):
+                _restore_dns_windows(saved["dns_changed"], _noop)
+            _bypass_compositor_off(saved, _noop)
+        for pid, orig_nice in saved.get("game_priority", {}).items():
+            try:
+                psutil.Process(pid).nice(orig_nice)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        for pid, orig in saved.get("nice", {}).items():
+            try:
+                psutil.Process(pid).nice(orig)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        for pid, orig in saved.get("affinity", {}).items():
+            try:
+                psutil.Process(pid).cpu_affinity(orig)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        if saved.get("power") is not None:
+            _restore_kernel_performance(saved["power"], _noop)
+
+    _register_cleanup(_game_mode_crash_cleanup)
+    saved["_crash_cleanup_fn"] = _game_mode_crash_cleanup
+
     return saved
 
 
@@ -3681,6 +3800,9 @@ def game_mode_off(saved: dict, log):
 
     if saved.get("power") is not None:
         _restore_kernel_performance(saved["power"], log)
+
+    if saved.get("_crash_cleanup_fn"):
+        _unregister_cleanup(saved["_crash_cleanup_fn"])
 
     log("✓ GAME MODE OFF — system restored", "ok")
 

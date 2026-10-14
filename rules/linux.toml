@@ -1,0 +1,376 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberClean — luật dọn rác cho Linux (schema 1)
+#
+# Hai bản ghi:  [[target]] = thứ hiện trong UI   ·   [[rule]] = nơi cần dọn
+# Tier:   auto   → chắc chắn tái tạo được, tick sẵn, được phép chạy nền
+#         review → liệt kê từng mục cho người dùng tự chọn, KHÔNG BAO GIỜ tick sẵn
+#                  và KHÔNG BAO GIỜ chạy nền
+#
+# Mọi rule đều đi qua core/engine.py: tuổi · tiến trình đang chạy · file đang mở ·
+# symlink · mount · socket/FIFO · hardlink. Rule chỉ MÔ TẢ dữ liệu, không chứa lệnh.
+# Muốn thêm app? Thêm một [[rule]] vào đây (hoặc vào ~/.config/cyber-clean/rules.d/).
+# ─────────────────────────────────────────────────────────────────────────────
+schema = 1
+
+# ═══════════════════════════════ AUTO ═══════════════════════════════════════
+
+[[target]]
+id    = "chromium_cache"
+name  = "Browser & Electron Caches (Chromium)"
+desc  = "Chrome, Brave, Edge, Vivaldi, Opera, VS Code, Discord, Slack… — cache only, never cookies or logins"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "chromium-family"
+target = "chromium_cache"
+kind   = "chromium"
+os     = ["linux"]
+note   = "cache — rebuilt when the app starts"
+user_data = [
+  "~/.config/google-chrome", "~/.config/google-chrome-beta", "~/.config/google-chrome-unstable",
+  "~/.config/chromium", "~/.config/microsoft-edge", "~/.config/microsoft-edge-beta",
+  "~/.config/microsoft-edge-dev", "~/.config/BraveSoftware/Brave-Browser", "~/.config/vivaldi",
+  "~/.config/opera", "~/.config/yandex-browser",
+  "~/.cache/google-chrome", "~/.cache/google-chrome-beta", "~/.cache/chromium",
+  "~/.cache/microsoft-edge", "~/.cache/BraveSoftware/Brave-Browser", "~/.cache/vivaldi", "~/.cache/opera",
+  "~/snap/chromium/common/chromium", "~/snap/chromium/common/.cache/chromium",
+  "~/.var/app/com.google.Chrome/config/google-chrome", "~/.var/app/com.google.Chrome/cache/google-chrome",
+  "~/.var/app/org.chromium.Chromium/config/chromium", "~/.var/app/org.chromium.Chromium/cache/chromium",
+  "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+  "~/.var/app/com.brave.Browser/cache/BraveSoftware/Brave-Browser",
+  "~/.var/app/com.microsoft.Edge/config/microsoft-edge", "~/.var/app/com.microsoft.Edge/cache/microsoft-edge",
+]
+# App Electron bất kỳ (VS Code, Cursor, Discord, Slack, Obsidian...) — chỉ nhận thư mục có
+# dấu hiệu Chromium user-data (Local State / Local Storage / Preferences+Cookies).
+discover = [
+  "~/.config/*", "~/.var/app/*/config/*", "~/.var/app/*/cache/*",
+  "~/snap/*/common/.config/*", "~/snap/*/common/.cache/*",
+]
+subpaths = [
+  "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+  "GraphiteDawnCache", "GrShaderCache", "ShaderCache",
+  "Service Worker/CacheStorage", "Service Worker/ScriptCache",
+]
+# KHÔNG BAO GIỜ động tới (test tự kiểm tra không có subpath nào trùng danh sách này).
+never = [
+  "Cookies", "Local Storage", "IndexedDB", "Session Storage", "Login Data", "Web Data", "History",
+  "Preferences", "Secure Preferences", "Local State", "Extensions", "Extension State", "databases",
+  "leveldb", "Network", "Bookmarks", "Favicons", "Sync Data", "Storage", "File System",
+]
+min_age_days       = 0
+sched_min_age_days = 7      # chạy nền: chỉ dọn cache của app không dùng ≥ 7 ngày
+
+[[target]]
+id    = "firefox_cache"
+name  = "Firefox Cache"
+desc  = "cache2 / startupCache of every profile (incl. Flatpak & Snap) — rebuilt automatically"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "firefox"
+target = "firefox_cache"
+kind   = "firefox"
+os     = ["linux"]
+cache_roots = [
+  "~/.cache/mozilla/firefox", "~/.var/app/org.mozilla.firefox/cache/mozilla/firefox",
+  "~/snap/firefox/common/.cache/mozilla/firefox", "~/.cache/librewolf", "~/.cache/waterfox",
+]
+subpaths = ["cache2", "startupCache", "thumbnails", "OfflineCache", "jumpListCache"]
+closed   = ["firefox", "firefox-bin", "firefox-esr", "librewolf", "waterfox", "firefox-developer-edition"]
+note     = "cache — rebuilt when the browser starts"
+sched_min_age_days = 7
+
+[[target]]
+id    = "thumbnails"
+name  = "Thumbnails"
+desc  = "File-manager previews — rebuilt on demand"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "thumbnails"
+target = "thumbnails"
+os     = ["linux"]
+mode   = "old_files"
+basis  = "atime"
+paths  = ["~/.cache/thumbnails", "~/.thumbnails"]
+note   = "preview image — rebuilt when the folder is opened"
+sched_min_age_days = 30
+
+[[target]]
+id    = "pip_cache"
+name  = "Pip Cache"
+desc  = "~/.cache/pip — downloaded wheels, fetched again when needed"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "pip"
+target = "pip_cache"
+os     = ["linux"]
+mode   = "contents"
+basis  = "atime"
+paths  = ["~/.cache/pip"]
+closed = ["pip", "pip3"]
+sched_min_age_days = 14
+
+[[target]]
+id    = "tmp_files"
+name  = "Temp Files"
+desc  = "/tmp and /var/tmp: untouched for 3+ days, not in use, no sockets inside"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "tmp-children"
+target = "tmp_files"
+os     = ["linux"]
+mode   = "children"
+paths  = ["/tmp"]
+disk_only = true
+min_age_days = 3
+sched_min_age_days = 7
+note   = "old temp file"
+# Phòng thủ nhiều lớp: các thư mục runtime nổi tiếng không bao giờ bị liệt kê (engine cũng
+# đã tự bỏ mọi thư mục chứa socket/FIFO, thư mục của user khác và thư mục đang mở).
+skip_names = [
+  ".X11-unix", ".ICE-unix", ".font-unix", ".XIM-unix", ".Test-unix", ".X*-lock", ".s.PGSQL.*",
+  "systemd-private-*", "snap-private-tmp", "snap.*", "ssh-*", "tmux-*", ".mount_*", ".org.chromium.*",
+  ".com.google.Chrome.*", "runtime-*", "pulse-*", "pipewire-*", "wayland-*", "dbus-*", ".esd-*",
+  "hsperfdata_*", "KSMserver*", "cyberclean*", "CyberClean*", "plasma-*", "qtsingleapp-*",
+]
+
+[[rule]]
+id     = "vartmp-children"
+target = "tmp_files"
+os     = ["linux"]
+mode   = "children"
+paths  = ["/var/tmp"]
+min_age_days = 14
+sched_min_age_days = 30
+note   = "old temp file (survives reboot)"
+skip_names = ["systemd-private-*", "snap-private-tmp", "cyberclean*", "CyberClean*"]
+
+[[target]]
+id    = "aur_cache"
+name  = "AUR Build Cache"
+desc  = "~/.cache/yay and ~/.cache/paru — only while yay/paru/makepkg/pacman are not running"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+requires_any = ["yay", "paru"]
+
+[[rule]]
+id     = "aur"
+target = "aur_cache"
+os     = ["linux"]
+mode   = "contents"
+paths  = ["~/.cache/yay", "~/.cache/paru"]
+# vcs.json = yay nhớ commit của các gói -git đã cài; xóa sẽ làm yay không còn báo cập nhật cho chúng.
+keep   = ["vcs.json", "completion.cache"]
+closed = ["yay", "paru", "makepkg", "pacman", "fakeroot"]
+note   = "build dirs + built packages — fetched/built again on install"
+sched_min_age_days = 7
+
+[[target]]
+id    = "crash_reports"
+name  = "Crash Reports"
+desc  = "Core dumps, apport, systemd-coredump — only files older than 1 hour"
+tier  = "auto"
+safety = "safe"
+os    = ["linux"]
+
+[[rule]]
+id     = "crash-user-apport"
+target = "crash_reports"
+os     = ["linux"]
+mode   = "contents"
+paths  = ["~/.local/share/apport"]
+min_age_days = 1
+note   = "user crash report"
+
+[[rule]]
+id     = "crash-core-files"
+target = "crash_reports"
+os     = ["linux"]
+mode   = "tree"
+paths  = ["~/core", "/tmp/core.*"]
+min_age_days = 1
+note   = "raw core dump"
+
+# ═══════════════════════════════ REVIEW ═════════════════════════════════════
+
+[[target]]
+id    = "dev_cache"
+name  = "Developer Caches"
+desc  = "npm, yarn, pnpm, gradle, maven, cargo, go, JetBrains… — pick items; re-downloaded on the next build"
+tier  = "review"
+safety = "caution"
+os    = ["linux"]
+
+[[rule]]
+id = "dev-npm"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.npm/_cacache", "~/.npm/_logs"]
+note = "npm package cache"
+
+[[rule]]
+id = "dev-yarn"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/yarn", "~/.yarn/berry/cache"]
+note = "yarn cache"
+
+[[rule]]
+id = "dev-pnpm"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.local/share/pnpm/store", "~/.pnpm-store"]
+note = "pnpm store — hard-linked into node_modules, so less space is freed than shown"
+
+[[rule]]
+id = "dev-gradle"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.gradle/caches"]
+note = "Gradle dependency + build cache (close the Gradle daemon / IDE first)"
+
+[[rule]]
+id = "dev-maven"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.m2/repository"]
+risk = "high"
+note = "CAUTION: also holds libraries you `mvn install`-ed locally — NOT re-downloadable from the network"
+
+[[rule]]
+id = "dev-cargo"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cargo/registry/cache"]
+note = "downloaded crates (src/ is kept)"
+
+[[rule]]
+id = "dev-go-mod"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/go/pkg/mod/cache"]
+note = "Go module download cache (read-only files are handled specially)"
+
+[[rule]]
+id = "dev-go-build"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/go-build"]
+note = "Go build cache"
+
+[[rule]]
+id = "dev-cypress"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/Cypress"]
+risk = "medium"
+note = "Cypress binary (~500 MB/version) — re-downloaded when you run tests"
+
+[[rule]]
+id = "dev-playwright"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/ms-playwright"]
+risk = "medium"
+note = "Playwright browsers — need `npx playwright install` again"
+
+[[rule]]
+id = "dev-jetbrains"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/JetBrains"]
+risk = "medium"
+note = "IDE index cache — the IDE re-indexes projects (close the IDE first)"
+
+[[rule]]
+id = "dev-node-gyp"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/node-gyp", "~/.cache/electron"]
+note = "header node-gyp / binary Electron"
+
+[[rule]]
+id = "dev-python-tools"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/pre-commit", "~/.cache/uv", "~/.cache/pypoetry", "~/.cache/pipenv", "~/.cache/typescript"]
+note = "pre-commit / uv / poetry / pipenv / tsserver"
+
+[[rule]]
+id = "dev-compiler-cache"
+target = "dev_cache"
+mode = "contents"
+paths = ["~/.cache/ccache", "~/.ccache", "~/.cache/sccache"]
+risk = "medium"
+note = "ccache/sccache — the next build will be slower"
+
+[[target]]
+id    = "app_cache"
+name  = "Other App Caches (~/.cache)"
+desc  = "Unrecognised folders in ~/.cache, unused for 14+ days — nothing is selected by default"
+tier  = "review"
+safety = "caution"
+os    = ["linux"]
+
+[[rule]]
+id     = "app-cache-children"
+target = "app_cache"
+os     = ["linux"]
+mode   = "children"
+paths  = ["~/.cache"]
+skip_claimed = true
+min_age_days = 14
+risk   = "medium"
+note   = "unknown owner app — check before deleting"
+# Danh sách 'chỉ để ẩn' (không còn là đường dẫn xóa): thứ mà xóa là gây hại / rebuild rất lâu.
+skip_names = [
+  "mesa_shader_cache", "mesa", "nvidia", "amdgpu", "radeon", "intel", "vulkan", "radv", "anv", "iris",
+  "nouveau", "d3d", "dxvk", "vkd3d", "fontconfig", "mozilla", "google-chrome", "chromium",
+  "microsoft-edge", "BraveSoftware", "brave", "opera", "vivaldi", "yay", "paru", "thumbnails",
+  "hyprland", "sway", "i3", "openbox", "xfwm4", "kwin", "mutter", "marco", "swww", "swaybg",
+  "hyprpaper", "wpaperd", "mpvpaper", "feh", "nitrogen", "variety", "wbg", "xwallpaper", "wal",
+  "wallust", "matugen", "pywal", "lutgen", "wpg", "chameleon", "plasma*", "ksycoca*", "kioexec",
+  "gnome-software", "gnome-shell", "gnome-session", "discover", "tracker", "tracker3", "ibus",
+  "fcitx", "fcitx5", "pipewire", "wireplumber", "pulse", "pulseaudio", "gstreamer-1.0", "obexd",
+  "waybar", "polybar", "eww", "ags", "rofi", "wofi", "fuzzel", "tofi", "anyrun", "dunst", "mako",
+  "swaync", "fnott", "cliphist", "wl-clipboard", "gvfs", "dconf", "glib-2.0", "thunderbird",
+  "evolution", "geary", "zsh", "prezto", "lutris", "winetricks",
+  # model/dataset cache rất lớn, tải lại rất lâu → để Advisor nhắc, không cho xóa hàng loạt
+  "huggingface", "torch", "transformers",
+  # cache chứa trạng thái khó dựng lại (borg: index kho lưu trữ hàng giờ)
+  "borg", "restic", "rclone", "duplicity", "baloo", "keepassxc",
+]
+
+[[target]]
+id    = "flatpak_cache"
+name  = "Flatpak App Caches"
+desc  = "~/.var/app/*/cache of each app — nothing is selected by default"
+tier  = "review"
+safety = "caution"
+os    = ["linux"]
+requires_any = ["flatpak"]
+
+[[rule]]
+id     = "flatpak-app-cache"
+target = "flatpak_cache"
+os     = ["linux"]
+mode   = "contents"
+paths  = ["~/.var/app/*/cache"]
+sandbox_check = true
+min_age_days = 7
+risk   = "medium"
+note   = "Flatpak app cache (the app must be closed)"

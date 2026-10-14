@@ -7,6 +7,8 @@
 #   Uninstall: sudo cyberclean --uninstall
 
 set -e
+set -o pipefail
+umask 022
 
 APP="CyberClean"
 REPO="vuphitung/CyberClean"
@@ -17,6 +19,15 @@ INSTALL_DIR="/opt/CyberClean"
 ICON_DEST="/usr/share/icons/hicolor/256x256/apps/cyberclean.png"
 DESKTOP_DEST="/usr/share/applications/cyberclean.desktop"
 HELPER="/usr/local/bin/cyber-clean-helper"
+SUDOERS_FILE="/etc/sudoers.d/cyberclean"
+
+# Khóa công khai Ed25519 của release — PHẢI khớp CYBERCLEAN_PUBLIC_KEY_B64 trong utils/updater.py
+# và RELEASE_PUBKEY_PEM trong packaging/cyber-clean-helper (tests/test_helper.py kiểm tra cả ba).
+read -r -d '' RELEASE_PUBKEY_PEM <<'PEM' || true
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA0HIxLhJ7mZ31Bv7p6t1DK8gGC4/eyS6myJNYz9LYms0=
+-----END PUBLIC KEY-----
+PEM
 
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 RED='\033[0;31m'; NC='\033[0m'
@@ -38,7 +49,7 @@ if [[ "$1" == "--uninstall" ]]; then
     rm -f "$ICON_DEST"     2>/dev/null || true
     rm -f "$DESKTOP_DEST"  && ok "Removed desktop entry"
     rm -f "$HELPER"        2>/dev/null || true
-    rm -f /etc/sudoers.d/cyberclean 2>/dev/null || true
+    rm -f "$SUDOERS_FILE" 2>/dev/null || true
     rm -f /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy 2>/dev/null || true
     update-desktop-database /usr/share/applications 2>/dev/null || true
     echo ""
@@ -47,29 +58,25 @@ if [[ "$1" == "--uninstall" ]]; then
 fi
 
 # ── Fetch latest version from GitHub API ──────────────────
-# Không hardcode version trong file này nữa.
-# Luôn lấy bản mới nhất từ GitHub Releases API.
+# Không hardcode version. Có thể ghim bản cụ thể:  CYBERCLEAN_VERSION=3.1.0 ... | sudo -E bash
 section "Fetching latest version"
-LATEST_JSON=""
-if command -v curl &>/dev/null; then
-    LATEST_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
-elif command -v wget &>/dev/null; then
-    LATEST_JSON=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
-fi
-
-VERSION=""
-if [[ -n "$LATEST_JSON" ]]; then
-    VERSION=$(echo "$LATEST_JSON" | grep -o '"tag_name": *"[^"]*"' | head -1 | grep -o '[0-9][^"]*')
-fi
-
+VERSION="${CYBERCLEAN_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
-    # Fallback: dùng version hardcode nếu API không trả về
-    # Cập nhật dòng này khi release nhưng không phải điểm fail chính
-    VERSION="3.0.1"
-    warn "GitHub API unavailable — using fallback version ${VERSION}"
-else
-    ok "Latest version: v${VERSION}"
+    LATEST_JSON=""
+    if command -v curl &>/dev/null; then
+        LATEST_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    elif command -v wget &>/dev/null; then
+        LATEST_JSON=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    fi
+    if [[ -n "$LATEST_JSON" ]]; then
+        VERSION=$(echo "$LATEST_JSON" | grep -o '"tag_name": *"[^"]*"' | head -1 | grep -o '[0-9][^"]*' || true)
+    fi
 fi
+# Chỉ nhận dạng x.y.z[-suffix] — giá trị này được ghép vào URL và đường dẫn
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)?$ ]]; then
+    err "Could not determine the latest version (GitHub API unavailable or rate-limited). Retry later, or pin one: CYBERCLEAN_VERSION=x.y.z"
+fi
+ok "Version: v${VERSION}"
 
 TARGZ_URL="https://github.com/${REPO}/releases/download/v${VERSION}/CyberClean-${VERSION}-linux-x86_64.tar.gz"
 
@@ -85,30 +92,82 @@ echo -e "${NC}"
 echo -e "${CYAN}  Smart Disk Cleaner v${VERSION} — Installing...${NC}\n"
 
 
-# ── Download ──────────────────────────────────────────────
+# ── Download (thư mục tạm riêng, root-owned, tên ngẫu nhiên — không dùng đường dẫn cố định trong /tmp) ──
 section "Downloading v${VERSION}"
-mkdir -p /opt/CyberClean
-TARGZ_TMP="/tmp/CyberClean.tar.gz"
+WORK=$(mktemp -d /var/tmp/cyberclean-install.XXXXXXXX) || err "Cannot create a temporary directory"
+trap 'rm -rf --one-file-system -- "$WORK"' EXIT
+TARGZ_TMP="$WORK/CyberClean.tar.gz"
+SIG_TMP="$WORK/CyberClean.tar.gz.sig"
+SIG_URL="${TARGZ_URL}.sig"
 
-if command -v curl &>/dev/null; then
-    curl -fsSL --progress-bar -o "$TARGZ_TMP" "$TARGZ_URL" || err "Download failed — check internet connection"
-elif command -v wget &>/dev/null; then
-    wget -q --show-progress -O "$TARGZ_TMP" "$TARGZ_URL" || err "Download failed — check internet connection"
-else
-    err "curl or wget required"
-fi
+fetch() {  # fetch URL DEST
+    if command -v curl &>/dev/null; then
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "$2" "$1"
+    elif command -v wget &>/dev/null; then
+        wget -q --https-only -O "$2" "$1"
+    else
+        err "curl or wget required"
+    fi
+}
+fetch "$TARGZ_URL" "$TARGZ_TMP" || err "Download failed — check your connection, or release v${VERSION} may not exist"
 
-# Validate tar.gz (không phải file HTML error page)
-MIN_BYTES=100000  # release phải > 100KB
 ACTUAL_SIZE=$(stat -c%s "$TARGZ_TMP" 2>/dev/null || echo 0)
-if [[ "$ACTUAL_SIZE" -lt "$MIN_BYTES" ]]; then
-    rm -f "$TARGZ_TMP"
+if [[ "$ACTUAL_SIZE" -lt 100000 ]]; then
     err "Downloaded file too small (${ACTUAL_SIZE} bytes) — release v${VERSION} may not exist yet"
 fi
 
-tar -xzf "$TARGZ_TMP" -C "$INSTALL_DIR"
-rm -f "$TARGZ_TMP"
-chmod +x "$INSTALL_DIR/CyberClean/CyberClean"
+# ── Verify signature (Ed25519) — trước khi giải nén bất cứ thứ gì ─────────────────────
+section "Verifying signature"
+verified=0
+if fetch "$SIG_URL" "$SIG_TMP" 2>/dev/null; then
+    if command -v openssl &>/dev/null && openssl pkeyutl -help 2>&1 | grep -q -- '-rawin'; then
+        printf '%s\n' "$RELEASE_PUBKEY_PEM" > "$WORK/pub.pem"
+        tr -d ' \t\r\n' < "$SIG_TMP" | base64 -d > "$WORK/sig.bin" 2>/dev/null || err "Malformed signature file"
+        [[ $(stat -c %s "$WORK/sig.bin") -eq 64 ]] || err "Signature must be 64 bytes"
+        if openssl pkeyutl -verify -pubin -inkey "$WORK/pub.pem" -rawin -in "$TARGZ_TMP" \
+               -sigfile "$WORK/sig.bin" >/dev/null 2>&1; then
+            verified=1
+            ok "Signature OK"
+        else
+            err "SIGNATURE INVALID — refusing to install (the download was corrupted or tampered with)"
+        fi
+    else
+        warn "OpenSSL >= 3.0 is not available here, so the signature cannot be checked."
+    fi
+else
+    warn "No signature published for v${VERSION}."
+fi
+if [[ $verified -ne 1 ]]; then
+    if [[ "${CYBERCLEAN_INSECURE_SKIP_VERIFY:-}" == "1" ]]; then
+        warn "CYBERCLEAN_INSECURE_SKIP_VERIFY=1 — installing an UNVERIFIED package."
+    else
+        err "Refusing to install an unverified package. Update OpenSSL (>= 3.0), or set CYBERCLEAN_INSECURE_SKIP_VERIFY=1 to override at your own risk."
+    fi
+fi
+
+# ── Extract + validate + atomic swap ─────────────────────────────────────────────────
+section "Installing"
+mkdir -p "$WORK/x"
+tar -xzf "$TARGZ_TMP" -C "$WORK/x" --no-same-owner || err "Cannot extract the archive"
+NEW="$WORK/x/CyberClean"
+[[ -d "$NEW" && ! -L "$NEW" && -f "$NEW/CyberClean" ]] || err "Unexpected archive layout"
+[[ -f "$NEW/cyber-clean-helper" && ! -L "$NEW/cyber-clean-helper" ]] \
+    || err "This release does not ship the privileged helper — use v3.1.0 or newer"
+chown -R root:root "$WORK/x"
+chmod -R go-w "$WORK/x"
+find "$WORK/x" -perm /6000 -exec chmod u-s,g-s {} + 2>/dev/null || true
+chmod +x "$NEW/CyberClean" "$NEW/cyber-clean-helper"
+
+install -d -m 0755 -o root -g root "$INSTALL_DIR"
+if [[ -e "$INSTALL_DIR/CyberClean" ]]; then
+    rm -rf --one-file-system -- "$INSTALL_DIR/_old"
+    mv -T -- "$INSTALL_DIR/CyberClean" "$INSTALL_DIR/_old"       # không trộn file cũ với file mới
+fi
+if ! mv -T -- "$NEW" "$INSTALL_DIR/CyberClean"; then
+    [[ -e "$INSTALL_DIR/_old" ]] && mv -T -- "$INSTALL_DIR/_old" "$INSTALL_DIR/CyberClean"
+    err "Install failed — previous version restored"
+fi
+rm -rf --one-file-system -- "$INSTALL_DIR/_old"
 ok "Installed → $INSTALL_DIR"
 
 # ── Create launcher command ───────────────────────────────
@@ -152,169 +211,19 @@ DESKTOP
 update-desktop-database /usr/share/applications 2>/dev/null || true
 ok "App registered in launcher"
 
-# ── System helper ─────────────────────────────────────────
+# ── System helper + sudoers ───────────────────────────────
+# Nguồn DUY NHẤT của helper là file nằm trong gói đã được ký (packaging/cyber-clean-helper).
+# `install-helper` chỉ chạy được bằng root VÀ khi script nằm đúng trong $INSTALL_DIR/CyberClean
+# (root-owned); nó cài helper vào $HELPER và ghi rule sudoers qua file tạm + `visudo -c`
+# (rule hỏng không bao giờ được ghi vào /etc/sudoers.d — trước đây vẫn ghi rồi mới cảnh báo).
 section "Setting up system helper"
-cat > "$HELPER" << 'HELPER_CONTENT'
-#!/bin/bash
-# CyberClean — Privileged Helper
-# Scoped tightly: chỉ expose đúng những action cần thiết.
-# Không có blanket sudo — đây là security design, không phải giới hạn.
-case "$1" in
-  paccache)         paccache -rk1 2>/dev/null ;;
-  pacman-orphans)   pkgs=$(cat); [[ -n "$pkgs" ]] && pacman -Rns --noconfirm $pkgs 2>/dev/null ;;
-  journal)          journalctl --vacuum-time=7d 2>/dev/null ;;
-  broken-downloads) find /var/cache/pacman/pkg -name "download-*" -delete 2>/dev/null ;;
-  apt-clean)        DEBIAN_FRONTEND=noninteractive apt-get clean 2>/dev/null ;;
-  apt-autoremove)   DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null ;;
-  dnf-clean)        dnf clean all 2>/dev/null ;;
-  zypper-clean)     zypper clean --all 2>/dev/null ;;
-  xbps-clean-cache) xbps-remove -o 2>/dev/null ;;
-  xbps-orphans)     xbps-remove -O 2>/dev/null ;;
-  snap-remove-rev)  [[ -z "$2" || -z "$3" ]] && exit 1; snap remove "$2" --revision="$3" 2>/dev/null ;;
-  fstrim)           fstrim -av 2>/dev/null ;;
-  drop-cache)       sync && echo 1 > /proc/sys/vm/drop_caches ;;
-  compact-memory)   echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true ;;
-  swappiness)       echo 10 > /proc/sys/vm/swappiness ;;
-  set-swappiness)
-    # Restore an arbitrary (previously-read) swappiness value.
-    # Only accepts a plain integer 0-200 (valid vm.swappiness range is
-    # 0-200 on modern kernels) — never passes the argument through a
-    # shell, and rejects anything that isn't a bare number so a
-    # malformed/unexpected value from the caller can't write garbage
-    # into a kernel tunable.
-    [[ -z "$2" ]] && exit 1
-    case "$2" in
-      ''|*[!0-9]*) exit 1 ;;   # reject anything that isn't digits only
-    esac
-    [[ "$2" -gt 200 ]] && exit 1
-    echo "$2" > /proc/sys/vm/swappiness ;;
-  dirty-ratio)      echo 10 > /proc/sys/vm/dirty_ratio ;;
-  dirty-background-ratio) echo 5 > /proc/sys/vm/dirty_background_ratio ;;
-  fix-suid)
-    # SECURITY: targets arrive via STDIN (newline-separated absolute
-    # paths), never via argv/shell interpolation — this is what makes it
-    # safe to call even when a filename contains shell metacharacters
-    # (an attacker who planted a SUID file controls its name).
-    #
-    # TOCTOU GUARD: re-check the file STILL has the setuid bit right
-    # before stripping it. Closes the window between the GUI scan and the
-    # user clicking Auto-Fix, during which the path could have been
-    # replaced (e.g. swapped for a symlink into a sensitive location).
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      [[ -f "$f" ]] || continue     # must be a regular file
-      [[ ! -L "$f" ]] || continue   # never follow a symlink — operate on the real file only
-      [[ -u "$f" ]] || continue     # must still have the setuid bit set right now
-      chmod u-s -- "$f" 2>/dev/null || true
-    done ;;
-  fix-writable)
-    # Same stdin + TOCTOU pattern as fix-suid above.
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      [[ -f "$f" ]] || continue
-      [[ ! -L "$f" ]] || continue
-      perm=$(stat -c '%a' "$f" 2>/dev/null) || continue
-      last="${perm: -1}"
-      # World-write bit set ⇔ last octal digit is 2,3,6, or 7
-      # (write=2, can combine with read=4 and/or exec=1 → 2,3,6,7)
-      case "$last" in
-        2|3|6|7) ;;
-        *) continue ;;   # no longer world-writable — skip (TOCTOU guard)
-      esac
-      chmod o-w -- "$f" 2>/dev/null || true
-    done ;;
-  remove-file)
-    # SECURITY: targets arrive via STDIN (newline-separated absolute
-    # paths), same pattern as fix-suid/fix-writable above — never via
-    # argv/shell interpolation. This action is specifically used to
-    # delete files the Security Scanner flagged as malicious, which
-    # means the filename itself is attacker-influenced and must never
-    # be allowed to touch a shell parser at the Python-calling side.
-    #
-    # SAFETY: only allow deleting REGULAR files, never directories or
-    # symlinks (a malicious "file" swapped for a symlink to something
-    # important must not be followed).
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      [[ -f "$f" ]] || continue     # must be a regular file right now
-      [[ ! -L "$f" ]] || continue   # never follow a symlink
-      rm -f -- "$f" 2>/dev/null || true
-    done ;;
-  kill-pid)         [[ -z "$2" ]] && exit 1; kill -9 "$2" 2>/dev/null ;;
-  stop-service)     [[ -z "$2" ]] && exit 1; systemctl stop "$2" 2>/dev/null ;;
-  clean-rotated-logs)
-    # Delete rotated/compressed log files passed via stdin (newline-separated paths).
-    # Only deletes files matching safe patterns — no wildcards, no dirs.
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      # Safety: only allow files under /var/log with rotated suffixes
-      case "$f" in
-        /var/log/*.gz|/var/log/*.bz2|/var/log/*.xz|/var/log/*.zst|\
-        /var/log/*.1|/var/log/*.2|/var/log/*.3|/var/log/*.4|/var/log/*.5|\
-        /var/log/*.6|/var/log/*.7|/var/log/*.8|/var/log/*.9|/var/log/*.10|\
-        /var/log/*.old|/var/log/*.bak|/var/log/*.archived|\
-        /var/log/**/*.gz|/var/log/**/*.bz2|/var/log/**/*.xz|\
-        /var/log/**/*.1|/var/log/**/*.2|/var/log/**/*.old)
-          [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true ;;
-        *) true ;;  # reject anything outside /var/log
-      esac
-    done ;;
-  clean-crash-dirs)
-    # Delete crash dump files passed via stdin (newline-separated paths).
-    # Only allows files under /var/crash and /var/lib/systemd/coredump.
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      case "$f" in
-        /var/crash/*.crash|/var/crash/*.upload|\
-        /var/lib/systemd/coredump/*|\
-        /tmp/core.*)
-          [[ -f "$f" ]] && rm -f "$f" 2>/dev/null || true ;;
-        *) true ;;  # reject unexpected paths
-      esac
-    done ;;
-  pacman-remove)    [[ -z "$2" ]] && exit 1; pacman -Rns --noconfirm "${@:2}" 2>/dev/null ;;
-  apt-remove)       [[ -z "$2" ]] && exit 1; DEBIAN_FRONTEND=noninteractive apt-get remove -y "$2" 2>/dev/null ;;
-  dnf-remove)       [[ -z "$2" ]] && exit 1; dnf remove -y "$2" 2>/dev/null ;;
-  zypper-remove)    [[ -z "$2" ]] && exit 1; zypper remove -y "$2" 2>/dev/null ;;
-  update-replace)
-    [[ -z "$2" || -z "$3" ]] && exit 1
-    SRC="$2"; DST="$3"; BACKUP="${4:-/opt/CyberClean/_backup}"
-    rm -rf "$BACKUP" 2>/dev/null || true
-    [[ -d "$DST" ]] && mv "$DST" "$BACKUP"
-    cp -r "$SRC" "$DST"
-    chmod +x "$DST/CyberClean" 2>/dev/null || true
-    rm -rf "$SRC" 2>/dev/null || true ;;
-  one-click-fix)
-    sync && echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
-    echo 10 > /proc/sys/vm/swappiness 2>/dev/null
-    fstrim -av 2>/dev/null
-    journalctl --vacuum-time=7d 2>/dev/null
-    command -v paccache &>/dev/null && paccache -rk1 2>/dev/null ;;
-  *)  echo "Unknown command: $1" >&2; exit 1 ;;
-esac
-HELPER_CONTENT
-chmod +x "$HELPER"
-ok "System helper → $HELPER"
-
-# ── Sudoers rule ──────────────────────────────────────────
-# Detect sudo group (sudo = Debian/Ubuntu, wheel = Arch/Fedora/RHEL)
-if getent group sudo &>/dev/null; then
-    SUDO_GROUP="sudo"
-elif getent group wheel &>/dev/null; then
-    SUDO_GROUP="wheel"
+if "$INSTALL_DIR/CyberClean/cyber-clean-helper" install-helper; then
+    ok "System helper → $HELPER"
 else
-    SUDO_GROUP="sudo"
+    warn "Could not set up the privileged helper — system targets (logs, package caches) will be unavailable."
 fi
-
-echo "%${SUDO_GROUP} ALL=(root) NOPASSWD: $HELPER" > /etc/sudoers.d/cyberclean
-chmod 0440 /etc/sudoers.d/cyberclean
-# Validate trước khi apply — tránh lock sudo ra
-if visudo -c -f /etc/sudoers.d/cyberclean 2>/dev/null; then
-    ok "Sudoers rule validated"
-else
-    warn "Sudoers validation skipped (visudo not found) — rule still applied"
-fi
-ok "Sudoers configured: %${SUDO_GROUP} → NOPASSWD helper only"
+# Dọn polkit policy cũ (không còn dùng)
+rm -f /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy 2>/dev/null || true
 
 # ── Done ──────────────────────────────────────────────────
 echo ""

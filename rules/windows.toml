@@ -1,0 +1,180 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CyberClean — luật dọn rác cho Windows (schema 1)
+# Xem rules/linux.toml để biết ý nghĩa các khóa. Biến hỗ trợ: %LOCALAPPDATA%,
+# %APPDATA%, %USERPROFILE%, %TEMP%, %SystemRoot%, %ProgramData%.
+# Các target dùng lệnh hệ thống (DISM, wevtutil, dịch vụ Windows Update...) nằm
+# trong core/windows_cleaner.py — luật ở đây chỉ mô tả cache dạng thư mục.
+# ─────────────────────────────────────────────────────────────────────────────
+schema = 1
+
+[[target]]
+id    = "chromium_cache"
+name  = "Browser & Electron Caches (Chromium)"
+desc  = "Chrome, Edge, Brave, Opera, Vivaldi, Cốc Cốc, VS Code, Discord, Slack… — cache only, never cookies or logins"
+tier  = "auto"
+safety = "safe"
+os    = ["windows"]
+
+[[rule]]
+id     = "chromium-family-win"
+target = "chromium_cache"
+kind   = "chromium"
+os     = ["windows"]
+note   = "cache — rebuilt when the app starts"
+user_data = [
+  "%LOCALAPPDATA%\\Google\\Chrome\\User Data", "%LOCALAPPDATA%\\Google\\Chrome Beta\\User Data",
+  "%LOCALAPPDATA%\\Chromium\\User Data", "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data",
+  "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data", "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data",
+  "%LOCALAPPDATA%\\Vivaldi\\User Data", "%LOCALAPPDATA%\\CocCoc\\Browser\\User Data",
+  "%APPDATA%\\Opera Software\\Opera Stable", "%APPDATA%\\Opera Software\\Opera GX Stable",
+  "%LOCALAPPDATA%\\Opera Software\\Opera Stable", "%LOCALAPPDATA%\\Opera Software\\Opera GX Stable",
+]
+discover = ["%APPDATA%\\*"]
+subpaths = [
+  "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
+  "GraphiteDawnCache", "GrShaderCache", "ShaderCache",
+  "Service Worker\\CacheStorage", "Service Worker\\ScriptCache",
+]
+never = [
+  "Cookies", "Local Storage", "IndexedDB", "Session Storage", "Login Data", "Web Data", "History",
+  "Preferences", "Secure Preferences", "Local State", "Extensions", "Extension State", "databases",
+  "leveldb", "Network", "Bookmarks", "Favicons", "Sync Data", "Storage", "File System",
+]
+min_age_days       = 0
+sched_min_age_days = 7
+
+[rule.closed_by_path]
+"Google/Chrome"     = ["chrome"]
+"Chromium"          = ["chromium"]
+"Microsoft/Edge"    = ["msedge"]
+"BraveSoftware"     = ["brave"]
+"Vivaldi"           = ["vivaldi"]
+"CocCoc"            = ["browser"]
+"Opera Software"    = ["opera", "opera_gx", "launcher"]
+
+[[target]]
+id    = "firefox_cache"
+name  = "Firefox Cache"
+desc  = "cache2 / startupCache of every profile — rebuilt automatically"
+tier  = "auto"
+safety = "safe"
+os    = ["windows"]
+
+[[rule]]
+id     = "firefox-win"
+target = "firefox_cache"
+kind   = "firefox"
+os     = ["windows"]
+cache_roots = ["%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles", "%APPDATA%\\Mozilla\\Firefox\\Profiles"]
+subpaths = ["cache2", "startupCache", "thumbnails", "OfflineCache", "jumpListCache"]
+closed   = ["firefox"]
+note     = "cache — rebuilt when the browser starts"
+sched_min_age_days = 7
+
+[[target]]
+id    = "dev_cache"
+name  = "Developer Caches"
+desc  = "npm, yarn, pnpm, pip, NuGet, gradle, maven, cargo, go, JetBrains… — pick items"
+tier  = "review"
+safety = "caution"
+os    = ["windows"]
+
+[[rule]]
+id = "dev-npm-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\npm-cache", "%APPDATA%\\npm-cache"]
+note = "npm package cache"
+
+[[rule]]
+id = "dev-yarn-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\Yarn\\Cache"]
+note = "yarn cache"
+
+[[rule]]
+id = "dev-pnpm-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\pnpm\\store", "%LOCALAPPDATA%\\pnpm-store"]
+note = "pnpm store — hard-linked into node_modules, so less space is freed than shown"
+
+[[rule]]
+id = "dev-pip-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\pip\\Cache"]
+note = "pip wheel cache"
+
+[[rule]]
+id = "dev-nuget-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\NuGet\\v3-cache", "%LOCALAPPDATA%\\NuGet\\plugins-cache"]
+note = "NuGet http cache (packages restored to ~/.nuget/packages are untouched)"
+
+[[rule]]
+id = "dev-gradle-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%USERPROFILE%\\.gradle\\caches"]
+note = "Gradle dependency + build cache (close the Gradle daemon / IDE first)"
+
+[[rule]]
+id = "dev-maven-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%USERPROFILE%\\.m2\\repository"]
+risk = "high"
+note = "CAUTION: also holds libraries you `mvn install`-ed locally — NOT re-downloadable from the network"
+
+[[rule]]
+id = "dev-cargo-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%USERPROFILE%\\.cargo\\registry\\cache"]
+note = "downloaded crates (src/ is kept)"
+
+[[rule]]
+id = "dev-go-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%USERPROFILE%\\go\\pkg\\mod\\cache", "%LOCALAPPDATA%\\go-build"]
+note = "Go module download cache + build cache"
+
+[[rule]]
+id = "dev-cypress-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\Cypress\\Cache"]
+risk = "medium"
+note = "Cypress binary — re-downloaded when you run tests"
+
+[[rule]]
+id = "dev-playwright-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\ms-playwright"]
+risk = "medium"
+note = "Playwright browsers — need `npx playwright install` again"
+
+[[rule]]
+id = "dev-jetbrains-win"
+target = "dev_cache"
+os = ["windows"]
+mode = "contents"
+paths = ["%LOCALAPPDATA%\\JetBrains\\*\\caches", "%LOCALAPPDATA%\\JetBrains\\*\\index"]
+risk = "medium"
+note = "IDE index cache — the IDE re-indexes projects (close the IDE first)"

@@ -1,0 +1,489 @@
+#!/bin/bash
+# CyberClean — Privileged Helper  (protocol 2)
+# ─────────────────────────────────────────────────────────────────────────────
+# SECURITY MODEL — đọc kỹ trước khi sửa file này
+#
+# Script này chạy bằng root qua một rule sudoers NOPASSWD cho cả nhóm
+# sudo/wheel. Nghĩa là BẤT KỲ tiến trình nào chạy dưới user thuộc nhóm đó
+# (exploit trình duyệt, gói npm độc, app bị chiếm...) đều gọi được nó với
+# tham số và stdin tùy ý mà không cần mật khẩu. Vì vậy:
+#
+#   • Không tin tham số / stdin: kiểm tra kiểu, ký tự, độ dài.
+#   • Không nhận đường dẫn cần xóa từ caller mà không kiểm tra lại tại đây
+#     (đường dẫn chuẩn hóa, không symlink, nằm trong root cho phép, thư mục
+#     cha thuộc root và không ai khác ghi được).
+#   • Không bao giờ để chuỗi của caller trở thành option của lệnh con.
+#     Tên gói phải bắt đầu bằng chữ/số; dùng "--" khi lệnh hỗ trợ.
+#   • Không cung cấp primitive tổng quát (copy/move/rm tùy ý, dừng service
+#     tùy ý, cài/gỡ gói tùy ý không qua kiểm tra).
+#
+# Mã thoát:  0 ok · 1 lỗi chung · 2 sai tham số · 3 bị từ chối (gói lõi / chữ ký)
+#            4 thiếu công cụ xác thực · 75 pacman đang chạy · 127 thiếu lệnh
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+set -o pipefail
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin
+export PATH
+export LC_ALL=C LANG=C
+unset LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV CDPATH GLOBIGNORE 2>/dev/null || true
+IFS=$' \t\n'
+
+HELPER_PROTOCOL=2
+
+# Các đường dẫn cố định (biến để bộ test có thể trỏ sang sandbox).
+LOG_ROOT=/var/log
+CRASH_ROOT=/var/crash
+COREDUMP_ROOT=/var/lib/systemd/coredump
+PACMAN_LOCK=/var/lib/pacman/db.lck
+PACMAN_CACHE_DEFAULT=/var/cache/pacman/pkg
+APP_PARENT=/opt/CyberClean
+APP_DIR=/opt/CyberClean/CyberClean
+HELPER_INSTALL_PATH=/usr/local/bin/cyber-clean-helper
+SUDOERS_DIR=/etc/sudoers.d
+SUDOERS_FILE=/etc/sudoers.d/cyberclean
+RECENT_MINUTES=60
+
+# Public key Ed25519 của release (phải khớp CYBERCLEAN_PUBLIC_KEY_B64 trong
+# utils/updater.py — tests/test_helper.py kiểm tra điều này).
+read -r -d '' RELEASE_PUBKEY_PEM <<'PEM'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA0HIxLhJ7mZ31Bv7p6t1DK8gGC4/eyS6myJNYz9LYms0=
+-----END PUBLIC KEY-----
+PEM
+
+die()  { printf 'cyber-clean-helper: %s\n' "$1" >&2; exit "${2:-1}"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed" 127; }
+nargs() { [[ $1 -eq $2 ]] || die "wrong number of arguments" 2; }   # nargs $# expected
+
+# ── Validators ───────────────────────────────────────────────────────────────
+valid_pkg()  { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9+._:@-]{0,127}$ ]]; }
+valid_snap() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]; }
+valid_rev()  { [[ $1 =~ ^[0-9]{1,9}$ ]]; }
+valid_ver()  { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)?$ ]]; }
+ver_core()   { [[ $1 =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] && printf '%d.%d.%d' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))"; }
+
+# Gói lõi KHÔNG BAO GIỜ được gỡ qua helper (kernel, bootloader, libc, init,
+# package manager, sudo/polkit, mạng, công cụ filesystem, session desktop).
+PROTECTED_GLOBS=(
+  linux linux-lts linux-zen linux-hardened linux-rt linux-rt-lts
+  'linux-cachyos*' 'linux-xanmod*' linux-firmware 'linux-firmware-*'
+  'linux-image-*' 'linux-modules-*' 'linux-generic*' 'linux-virtual*' linux-base
+  kernel kernel-core 'kernel-modules*' 'kernel-default*'
+  grub 'grub2*' 'grub-*' shim 'shim-*' efibootmgr 'systemd-boot*' refind limine syslinux
+  mkinitcpio 'mkinitcpio-*' dracut 'dracut-*' initramfs-tools 'initramfs-tools-*'
+  base filesystem glibc libc6 libc-bin bash dash coreutils util-linux 'util-linux-*'
+  systemd systemd-sysv systemd-sysvcompat systemd-libs systemd-resolved systemd-timesyncd
+  systemd-udev 'libsystemd*' udev 'libudev*'
+  dbus dbus-broker dbus-daemon dbus-user-session
+  pacman 'pacman-*' 'libalpm*' archlinux-keyring
+  apt 'apt-*' 'libapt-*' dpkg debian-archive-keyring ubuntu-keyring
+  dnf 'dnf-*' dnf5 rpm 'rpm-*' 'libdnf*' yum zypper libzypp xbps
+  sudo doas su shadow login passwd polkit polkitd policykit-1 pam 'libpam*'
+  e2fsprogs btrfs-progs xfsprogs dosfstools lvm2 cryptsetup mdadm
+  networkmanager NetworkManager network-manager iwd wpa_supplicant dhcpcd dhclient
+  plasma-desktop plasma-meta plasma-workspace gnome-shell gnome-session gdm gdm3 sddm lightdm
+  xorg-server xwayland 'xserver-xorg*' 'ubuntu-desktop*' ubuntu-minimal ubuntu-standard
+  kubuntu-desktop xubuntu-desktop
+  python python3 python3-minimal 'libpython3*'
+  cyberclean cyber-clean
+)
+is_protected_pkg() {
+  local g
+  for g in "${PROTECTED_GLOBS[@]}"; do
+    # shellcheck disable=SC2053  # so sánh glob có chủ ý
+    [[ $1 == $g ]] && return 0
+  done
+  return 1
+}
+
+# ── An toàn đường dẫn ────────────────────────────────────────────────────────
+# Thư mục "đáng tin": thuộc root, không ai khác ghi được → user thường không hoán đổi được thành phần
+# đường dẫn (chống TOCTOU / symlink swap).
+# Ngoại lệ có kiểm soát: thư mục group-writable bởi một NHÓM HỆ THỐNG không có người dùng thường nào
+# thuộc về. Ubuntu để /var/log là `root:syslog 775` — nếu từ chối thì helper không dọn được log nào
+# trên distro phổ biến nhất. Nhóm có thành viên (kể cả primary group) với uid >= 1000 thì KHÔNG đáng tin.
+trusted_group() {
+  local gid=$1 line members m uid
+  [[ $gid =~ ^[0-9]+$ ]] || return 1
+  (( gid == 0 )) && return 0
+  (( gid < 1000 )) || return 1
+  line=$(getent group "$gid" 2>/dev/null) || return 1
+  members=${line##*:}
+  for m in ${members//,/ }; do
+    uid=$(getent passwd "$m" 2>/dev/null | cut -d: -f3)
+    [[ $uid =~ ^[0-9]+$ ]] && (( uid < 1000 )) || return 1      # thành viên là người dùng thường / không rõ
+  done
+  # người dùng thường có primary group = gid này?
+  getent passwd 2>/dev/null | awk -F: -v g="$gid" '$4 == g && $3 >= 1000 { f = 1 } END { exit f }' || return 1
+  return 0
+}
+trusted_dir() {
+  local st own mode gid
+  st=$(stat -c '%u %a %g' -- "$1" 2>/dev/null) || return 1
+  read -r own mode gid <<< "$st"
+  [[ $own == 0 ]] || return 1
+  (( (8#$mode & 8#002) == 0 )) || return 1            # other-writable: không bao giờ
+  (( (8#$mode & 8#020) == 0 )) && return 0            # group-writable? chỉ khi nhóm hệ thống sạch
+  trusted_group "$gid"
+}
+# /var/crash là 1777 (sticky) trên Ubuntu: chấp nhận khi chỉ xóa con trực tiếp.
+sticky_root_dir() {
+  local st own mode
+  st=$(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
+  own=${st%% *}; mode=${st##* }
+  [[ $own == 0 && ${#mode} -eq 4 && ${mode:0:1} == 1 ]]
+}
+
+# safe_unlink <path> <root> <maxdepth>
+# Chỉ xóa file thường, không symlink, đường dẫn chuẩn hóa tuyệt đối nằm trong
+# <root>, mọi thư mục cha từ <root> đến file đều đáng tin, file không mới sửa.
+safe_unlink() {
+  local p=$1 root=$2 maxdepth=$3
+  [[ $p == "$root"/* ]] || return 1
+  case $p in
+    *$'\n'*|*/./*|*/../*|*//*|*/.|*/..) return 1 ;;
+  esac
+  [[ -f $p && ! -L $p ]] || return 1
+  local rel=${p#"$root"/} slashes depth
+  slashes=${rel//[^\/]/}
+  depth=$(( ${#slashes} + 1 ))
+  (( depth <= maxdepth )) || return 1
+  local dir=${p%/*}
+  while :; do
+    if ! trusted_dir "$dir"; then
+      # ngoại lệ duy nhất: chính $CRASH_ROOT (sticky) và file nằm trực tiếp trong đó
+      [[ $dir == "$root" && $root == "$CRASH_ROOT" ]] && sticky_root_dir "$dir" || return 1
+    fi
+    [[ $dir == "$root" ]] && break
+    dir=${dir%/*}
+    [[ $dir == "$root"* ]] || return 1
+  done
+  local c
+  c=$(realpath -e -- "$p" 2>/dev/null) || return 1
+  [[ $c == "$p" ]] || return 1            # có symlink ở thành phần cha
+  [[ -z $(find "$p" -maxdepth 0 -mmin "-$RECENT_MINUTES" 2>/dev/null) ]] || return 1
+  rm -f -- "$p"
+}
+
+is_rotated_log_name() {
+  case ${1##*/} in
+    *.gz|*.bz2|*.xz|*.zst|*.old|*.bak|*.archived) return 0 ;;
+    *.[0-9]|*.[0-9][0-9]) return 0 ;;
+  esac
+  return 1
+}
+is_crash_name() {
+  case ${1##*/} in *.crash|*.upload|*.uploaded) return 0 ;; esac
+  return 1
+}
+is_coredump_name() { case ${1##*/} in core.*) return 0 ;; esac; return 1; }
+
+pacman_busy() {
+  [[ -e $PACMAN_LOCK ]] && return 0
+  local pid st
+  # bỏ qua tiến trình zombie (đã chết nhưng chưa được reap) — không phải "đang chạy"
+  while read -r pid; do
+    st=$(ps -o stat= -p "$pid" 2>/dev/null) || continue
+    [[ $st == Z* ]] || return 0
+  done < <(pgrep -x pacman 2>/dev/null)
+  return 1
+}
+
+pacman_cachedirs() {
+  local d out=0
+  if command -v pacman-conf >/dev/null 2>&1; then
+    while IFS= read -r d; do
+      [[ $d == /* && -d $d ]] && trusted_dir "$d" && { printf '%s\n' "${d%/}"; out=1; }
+    done < <(pacman-conf CacheDir 2>/dev/null)
+  fi
+  if (( out == 0 )) && [[ -d $PACMAN_CACHE_DEFAULT ]] && trusted_dir "$PACMAN_CACHE_DEFAULT"; then
+    printf '%s\n' "$PACMAN_CACHE_DEFAULT"
+  fi
+}
+
+# ── Cập nhật ứng dụng (xác minh chữ ký Ở PHÍA ROOT trên bản sao riêng) ───────
+update_apply() {
+  nargs "$#" 3                      # tarball sig version
+  local tarball=$1 sigfile=$2 ver=$3
+  valid_ver "$ver" || die "invalid version" 2
+  [[ -f $tarball && ! -L $tarball ]] || die "tarball must be a regular file" 2
+  [[ -f $sigfile && ! -L $sigfile ]] || die "signature must be a regular file" 2
+  local tsz ssz
+  tsz=$(stat -c %s -- "$tarball") || die "cannot stat tarball" 2
+  ssz=$(stat -c %s -- "$sigfile") || die "cannot stat signature" 2
+  (( tsz > 50000 && tsz < 700*1024*1024 )) || die "tarball size out of range" 2
+  (( ssz > 0 && ssz < 1024 )) || die "signature size out of range" 2
+  need openssl; need tar; need base64
+  openssl pkeyutl -help 2>&1 | grep -q -- '-rawin' \
+    || die "OpenSSL >= 3.0 is required to verify the update signature" 4
+  [[ -d $APP_PARENT ]] && trusted_dir "$APP_PARENT" || die "$APP_PARENT is missing or not root-owned" 1
+
+  local work
+  work=$(mktemp -d -p "$APP_PARENT" .update.XXXXXXXX) || die "cannot create staging dir" 1
+  # shellcheck disable=SC2064
+  trap "rm -rf --one-file-system -- '$work'" EXIT
+
+  # 1) sao chép MỘT lần vào vùng root-owned; mọi bước sau chỉ đọc bản sao này
+  cp -P -- "$tarball" "$work/pkg.tar.gz" || die "cannot copy tarball" 1
+  cp -P -- "$sigfile"  "$work/sig.b64"    || die "cannot copy signature" 1
+  [[ -f $work/pkg.tar.gz && ! -L $work/pkg.tar.gz && -f $work/sig.b64 && ! -L $work/sig.b64 ]] \
+    || die "input changed while copying" 3
+  tsz=$(stat -c %s -- "$work/pkg.tar.gz"); ssz=$(stat -c %s -- "$work/sig.b64")
+  (( tsz > 50000 && tsz < 700*1024*1024 && ssz > 0 && ssz < 1024 )) || die "input changed while copying" 3
+  tr -d ' \t\r\n' < "$work/sig.b64" | base64 -d > "$work/sig.bin" 2>/dev/null || die "malformed signature" 3
+  [[ $(stat -c %s -- "$work/sig.bin") -eq 64 ]] || die "signature must be 64 bytes" 3
+  printf '%s\n' "$RELEASE_PUBKEY_PEM" > "$work/pub.pem"
+
+  # 2) xác minh chữ ký trên bản sao
+  openssl pkeyutl -verify -pubin -inkey "$work/pub.pem" -rawin \
+      -in "$work/pkg.tar.gz" -sigfile "$work/sig.bin" >/dev/null 2>&1 \
+    || die "SIGNATURE INVALID — update refused" 3
+
+  # 3) giải nén vào thư mục root-owned
+  mkdir "$work/x" || die "mkdir failed" 1
+  tar -xzf "$work/pkg.tar.gz" -C "$work/x" --no-same-owner 2>/dev/null || die "cannot extract archive" 1
+  local new=$work/x/CyberClean l tgt
+  [[ -d $new && ! -L $new && -f $new/CyberClean && -x $new/CyberClean ]] || die "unexpected archive layout" 1
+  # symlink phải trỏ vào trong cây vừa giải nén
+  while IFS= read -r -d '' l; do
+    tgt=$(readlink -f -- "$l" 2>/dev/null) || die "bad symlink in archive" 3
+    [[ $tgt == "$work/x/"* ]] || die "symlink escapes archive: ${l#"$work"/}" 3
+  done < <(find "$work/x" -type l -print0)
+
+  # 4) chống replay/downgrade: bản mới phải mang VERSION khớp tag và mới hơn bản đang cài.
+  #    Các release cũ (đã ký nhưng không có VERSION) vì vậy bị từ chối.
+  [[ -f $new/VERSION && ! -L $new/VERSION ]] || die "archive has no VERSION file — refused" 3
+  local newver curver=""
+  newver=$(tr -d ' \t\r\n' < "$new/VERSION")
+  valid_ver "$newver" && [[ $newver == "$ver" ]] || die "VERSION in archive ($newver) does not match requested $ver" 3
+  if [[ -f $APP_DIR/VERSION && ! -L $APP_DIR/VERSION ]]; then
+    curver=$(tr -d ' \t\r\n' < "$APP_DIR/VERSION")
+    if valid_ver "$curver"; then
+      local nc cc
+      nc=$(ver_core "$newver"); cc=$(ver_core "$curver")
+      [[ $nc != "$cc" && $(printf '%s\n%s\n' "$cc" "$nc" | sort -V | tail -n1) == "$nc" ]] \
+        || die "version $newver is not newer than installed $curver" 3
+    fi
+  fi
+
+  # 5) quyền hạn: root sở hữu, không setuid/setgid, không ai khác ghi được
+  chown -R root:root "$work/x" || die "chown failed" 1
+  find "$work/x" -perm /6000 -exec chmod u-s,g-s {} + 2>/dev/null
+  chmod -R go-w "$work/x"
+  find "$work/x" -type d -exec chmod go+rx {} + 2>/dev/null
+  find "$work/x" -type f -perm /u+x -exec chmod go+rx {} + 2>/dev/null
+  find "$work/x" -type f ! -perm /u+x -exec chmod go+r {} + 2>/dev/null
+
+  # 6) hoán đổi (cùng filesystem → rename); lỗi thì khôi phục bản cũ
+  local backup=$APP_PARENT/_backup
+  rm -rf --one-file-system -- "$backup"
+  if [[ -e $APP_DIR ]]; then
+    mv -T -- "$APP_DIR" "$backup" || die "cannot move the current install aside" 1
+  fi
+  if ! mv -T -- "$new" "$APP_DIR"; then
+    [[ -e $backup ]] && mv -T -- "$backup" "$APP_DIR"
+    die "install failed — rolled back" 1
+  fi
+
+  # 7) nếu release kèm helper mới (đã nằm trong gói được ký) thì cập nhật helper
+  if [[ -f $APP_DIR/cyber-clean-helper && ! -L $APP_DIR/cyber-clean-helper ]]; then
+    if head -n1 "$APP_DIR/cyber-clean-helper" | grep -q '^#!/bin/bash' \
+       && grep -q '^HELPER_PROTOCOL=' "$APP_DIR/cyber-clean-helper" \
+       && bash -n "$APP_DIR/cyber-clean-helper" 2>/dev/null; then
+      install -m 0755 -o root -g root -- "$APP_DIR/cyber-clean-helper" "$HELPER_INSTALL_PATH.new" \
+        && mv -f -- "$HELPER_INSTALL_PATH.new" "$HELPER_INSTALL_PATH"
+    fi
+  fi
+  echo "updated=$newver"
+}
+
+# ── Tự cài helper + sudoers (dùng bởi install.sh và nâng cấp helper trong app) ─
+# CHỈ chạy được khi: euid=0 VÀ script đang nằm đúng ở $APP_DIR (root-owned).
+# Gọi từ /usr/local/bin qua sudo sẽ bị từ chối → user thường không lợi dụng được.
+install_helper() {
+  [[ $EUID -eq 0 ]] || die "install-helper must run as root (use pkexec)" 1
+  local self
+  self=$(readlink -f -- "${BASH_SOURCE[0]}") || die "cannot resolve own path" 1
+  [[ $self == "$APP_DIR/cyber-clean-helper" ]] || die "install-helper only runs from the installed app bundle" 3
+  trusted_dir "$APP_DIR" && trusted_dir "$APP_PARENT" || die "app directory is not root-owned" 3
+  [[ -f $self && ! -L $self ]] || die "bad helper file" 3
+  bash -n "$self" 2>/dev/null || die "helper has syntax errors" 3
+  install -d -m 0755 -o root -g root -- "${HELPER_INSTALL_PATH%/*}" || die "cannot create ${HELPER_INSTALL_PATH%/*}" 1
+  install -m 0755 -o root -g root -- "$self" "$HELPER_INSTALL_PATH.new" || die "cannot install helper" 1
+  mv -f -- "$HELPER_INSTALL_PATH.new" "$HELPER_INSTALL_PATH" || die "cannot install helper" 1
+
+  local grp rule
+  if   getent group sudo  >/dev/null 2>&1; then grp=sudo
+  elif getent group wheel >/dev/null 2>&1; then grp=wheel
+  else grp=sudo; fi
+  rule=$(mktemp) || die "mktemp failed" 1
+  printf '%%%s ALL=(root) NOPASSWD: %s\n' "$grp" "$HELPER_INSTALL_PATH" > "$rule"
+  if command -v visudo >/dev/null 2>&1 && visudo -c -f "$rule" >/dev/null 2>&1; then
+    install -d -m 0750 -o root -g root -- "$SUDOERS_DIR"
+    install -m 0440 -o root -g root -- "$rule" "$SUDOERS_FILE" || { rm -f -- "$rule"; die "cannot write sudoers rule" 1; }
+    rm -f -- "$rule"
+    echo "helper=installed sudoers=installed group=$grp"
+  else
+    rm -f -- "$rule"
+    echo "helper=installed sudoers=SKIPPED (visudo missing or rule invalid)"
+  fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+action=${1:-}
+[[ -n $action ]] || die "no action given" 2
+shift
+command -v logger >/dev/null 2>&1 && logger -t cyber-clean-helper -- "action=$action user=${SUDO_USER:-${PKEXEC_UID:-?}}" 2>/dev/null
+
+case $action in
+  ping|version)
+    nargs $# 0
+    echo "cyberclean-helper protocol=$HELPER_PROTOCOL" ;;
+
+  # ── package caches ─────────────────────────────────────────────────────────
+  paccache)
+    nargs $# 0
+    need paccache
+    pacman_busy && die "pacman is running (db.lck present) — try again later" 75
+    paccache -rk2 || true          # giữ 2 bản gần nhất → còn đường downgrade
+    paccache -ruk0 || true         # cache của gói đã gỡ
+    ;;
+  broken-downloads)
+    nargs $# 0
+    pacman_busy && die "pacman is running (db.lck present) — try again later" 75
+    n=0
+    while IFS= read -r d; do
+      [[ -n $d ]] || continue
+      while IFS= read -r -d '' f; do
+        rm -rf --one-file-system -- "$f" && n=$((n+1))
+      done < <(find "$d" -maxdepth 1 \( -name 'download-*' -o -name '*.part' \) -mmin "+$RECENT_MINUTES" -print0 2>/dev/null)
+    done < <(pacman_cachedirs)
+    echo "removed=$n" ;;
+  apt-clean)
+    nargs $# 0; need apt-get
+    DEBIAN_FRONTEND=noninteractive apt-get clean ;;
+  apt-autoremove)
+    nargs $# 0; need apt-get
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y ;;
+  dnf-clean)
+    nargs $# 0; need dnf
+    dnf clean all ;;
+  dnf-autoremove)
+    nargs $# 0; need dnf
+    dnf autoremove -y ;;
+  zypper-clean)
+    nargs $# 0; need zypper
+    zypper --non-interactive clean --all ;;
+  xbps-clean-cache)
+    nargs $# 0; need xbps-remove
+    xbps-remove -o ;;
+  xbps-orphans)
+    nargs $# 0; need xbps-remove
+    xbps-remove -O ;;
+  apk-clean)
+    nargs $# 0; need apk
+    apk cache clean ;;
+  rpm-ostree-cleanup)
+    nargs $# 0; need rpm-ostree
+    rpm-ostree cleanup -bm ;;
+  nix-gc)
+    nargs $# 0; need nix-collect-garbage
+    nix-collect-garbage --delete-older-than 14d ;;
+  journal)
+    nargs $# 0; need journalctl
+    journalctl --vacuum-time=7d --vacuum-size=500M ;;
+
+  # ── gỡ gói: đúng MỘT tên đã kiểm tra, không phải gói lõi ──────────────────
+  pacman-remove|apt-remove|dnf-remove|zypper-remove|xbps-remove)
+    nargs $# 1
+    pkg=$1
+    valid_pkg "$pkg" || die "invalid package name" 2
+    is_protected_pkg "$pkg" && die "refusing to remove protected system package: $pkg" 3
+    case $action in
+      pacman-remove)
+        need pacman
+        pacman_busy && die "pacman is running (db.lck present)" 75
+        pacman -Rns --noconfirm -- "$pkg" ;;
+      apt-remove)
+        need apt-get
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y -- "$pkg" ;;
+      dnf-remove)
+        need dnf
+        dnf remove -y -- "$pkg" ;;
+      zypper-remove)
+        need zypper
+        zypper --non-interactive remove -- "$pkg" ;;
+      xbps-remove)
+        need xbps-remove
+        xbps-remove -y -- "$pkg" ;;
+    esac ;;
+
+  # stdin: mỗi dòng một tên gói; mỗi tên phải THỰC SỰ đang là orphan theo pacman
+  pacman-orphans)
+    nargs $# 0
+    need pacman
+    pacman_busy && die "pacman is running (db.lck present)" 75
+    mapfile -t want
+    mapfile -t have < <(pacman -Qdtq 2>/dev/null)
+    pkgs=()
+    for p in "${want[@]}"; do
+      [[ -n $p ]] || continue
+      valid_pkg "$p" || die "invalid package name in list" 2
+      is_protected_pkg "$p" && die "refusing to remove protected system package: $p" 3
+      found=1
+      for h in "${have[@]}"; do [[ $h == "$p" ]] && { found=0; break; }; done
+      (( found == 0 )) || die "$p is not an orphan (anymore) — refusing" 3
+      pkgs+=("$p")
+    done
+    (( ${#pkgs[@]} > 0 )) || die "no packages given" 2
+    (( ${#pkgs[@]} <= 200 )) || die "too many packages in one call" 2
+    pacman -Rns --noconfirm -- "${pkgs[@]}" ;;
+
+  snap-remove-rev)
+    nargs $# 2
+    valid_snap "$1" || die "invalid snap name" 2
+    valid_rev  "$2" || die "invalid revision" 2
+    need snap
+    snap remove "$1" --revision="$2" ;;
+
+  # ── xóa file do caller liệt kê: kiểm tra lại từng đường dẫn tại đây ────────
+  clean-rotated-logs)
+    nargs $# 0
+    n=0; skipped=0
+    while IFS= read -r f || [[ -n $f ]]; do
+      [[ -n $f ]] || continue
+      if is_rotated_log_name "$f" && safe_unlink "$f" "$LOG_ROOT" 4; then
+        n=$((n+1))
+      else
+        skipped=$((skipped+1))
+      fi
+    done
+    echo "removed=$n skipped=$skipped" ;;
+  clean-crash-dirs)
+    nargs $# 0
+    n=0; skipped=0
+    while IFS= read -r f || [[ -n $f ]]; do
+      [[ -n $f ]] || continue
+      if   [[ $f == "$CRASH_ROOT"/*    ]] && is_crash_name    "$f" && safe_unlink "$f" "$CRASH_ROOT" 1;    then n=$((n+1))
+      elif [[ $f == "$COREDUMP_ROOT"/* ]] && is_coredump_name "$f" && safe_unlink "$f" "$COREDUMP_ROOT" 1; then n=$((n+1))
+      else skipped=$((skipped+1)); fi
+    done
+    echo "removed=$n skipped=$skipped" ;;
+
+  # ── tinh chỉnh hệ thống ────────────────────────────────────────────────────
+  fstrim)           nargs $# 0; need fstrim; fstrim -av ;;
+  compact-memory)   nargs $# 0; echo 1 > /proc/sys/vm/compact_memory ;;
+  swappiness)       nargs $# 0; echo 10 > /proc/sys/vm/swappiness ;;
+  dirty-ratio)      nargs $# 0; echo 10 > /proc/sys/vm/dirty_ratio ;;
+  dirty-background-ratio) nargs $# 0; echo 5 > /proc/sys/vm/dirty_background_ratio ;;
+  set-swappiness)
+    nargs $# 1
+    [[ $1 =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= 200 )) || die "swappiness must be 0-200" 2
+    echo "$((10#$1))" > /proc/sys/vm/swappiness ;;
+
+  update-apply)  update_apply "$@" ;;
+  install-helper) nargs $# 0; install_helper ;;
+
+  *) die "unknown action: $action" 2 ;;
+esac

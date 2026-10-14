@@ -15,10 +15,6 @@ NEW: fmt_uptime() — human-readable uptime string.
 
 NEW: SystemSnapshot.uptime_str property — convenience for UI labels.
 
-NEW: get_process_by_pid() — fetch a single ProcessInfo by PID.
-     Used by scanner tab to enrich findings with live CPU/mem data
-     without fetching the full process list.
-
 IMPROVED: _SKIP_NAMES extended — added more Windows kernel pseudo-processes
      that report spurious CPU% (Memory Compression, Secure System, etc.)
      and more Linux kernel threads to reduce list noise.
@@ -334,6 +330,16 @@ _SKIP_NAMES = {
     'kcompactd', 'irq/', 'kblockd', 'bioset',
 }
 
+# Pre-normalized once at import time (lower-case, '.exe' suffix stripped via
+# proper suffix removal — NOT rstrip('.exe'), which strips by character set
+# and would mangle names like 'chrome.exe' into 'chrom'). Computing this once
+# here also avoids rebuilding the set on every single process during a scan.
+def _strip_exe(n: str) -> str:
+    n = n.lower()
+    return n[:-4] if n.endswith('.exe') else n
+
+_SKIP_NAMES_NORM = {_strip_exe(n) for n in _SKIP_NAMES}
+
 
 def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     """
@@ -434,7 +440,7 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
             pname = p.info['name'] or ''
             if _IS_WIN and p.info['pid'] in (0, 4):
                 continue
-            if pname.lower().rstrip('.exe') in {n.lower().rstrip('.exe') for n in _SKIP_NAMES}:
+            if _strip_exe(pname) in _SKIP_NAMES_NORM:
                 continue
             raw_cpu = p.info['cpu_percent'] or 0
             # Normalise: psutil can report > 100% on multi-core systems
@@ -457,23 +463,6 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
         pass
 
     return s
-
-
-def get_process_by_pid(pid: int) -> Optional[ProcessInfo]:
-    """Fetch a single ProcessInfo. Returns None if process gone or no psutil."""
-    if not HAS_PSUTIL:
-        return None
-    try:
-        p = psutil.Process(pid)
-        return ProcessInfo(
-            pid=pid,
-            name=p.name(),
-            cpu=p.cpu_percent(interval=0.1),
-            mem=p.memory_percent(),
-            status=p.status(),
-        )
-    except Exception:
-        return None
 
 
 def _fallback_snapshot() -> SystemSnapshot:

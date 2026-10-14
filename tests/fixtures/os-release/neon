@@ -1,0 +1,3 @@
+NAME="KDE neon"
+ID=neon
+ID_LIKE="ubuntu debian"

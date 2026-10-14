@@ -20,7 +20,6 @@ import time
 import sys
 import shutil
 import subprocess
-import tarfile
 import tempfile
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -86,7 +85,15 @@ REPO = "vuphitung/CyberClean"
 CYBERCLEAN_PUBLIC_KEY_B64 = "0HIxLhJ7mZ31Bv7p6t1DK8gGC4/eyS6myJNYz9LYms0="
 
 
-def _verify_ed25519(file_path: Path, sig_url: str, ua: str) -> tuple[bool, str]:
+def _https(url: str) -> str:
+    """Chỉ https: urlopen mặc định nhận cả file:// và ftp:// — không bao giờ mong muốn cho cập nhật."""
+    if not isinstance(url, str) or not url.lower().startswith("https://"):
+        raise ValueError(f"refusing non-https URL: {url!r}")
+    return url
+
+
+def _verify_ed25519(file_path: Path, sig_url: str, ua: str,
+                    sig_save_path: Path | None = None) -> tuple[bool, str]:
     """
     Download the .sig sidecar and verify it against CYBERCLEAN_PUBLIC_KEY_B64.
 
@@ -116,7 +123,7 @@ def _verify_ed25519(file_path: Path, sig_url: str, ua: str) -> tuple[bool, str]:
     ssl_ctx.verify_mode = ssl.CERT_REQUIRED
 
     try:
-        req = Request(sig_url, headers={"User-Agent": ua})
+        req = Request(_https(sig_url), headers={"User-Agent": ua})
         with urlopen(req, timeout=30, context=ssl_ctx) as resp:
             sig_raw = resp.read().decode("utf-8", errors="replace").strip()
     except HTTPError as e:
@@ -132,6 +139,14 @@ def _verify_ed25519(file_path: Path, sig_url: str, ua: str) -> tuple[bool, str]:
         signature = base64.b64decode(sig_raw)
     except Exception:
         return False, f"malformed .sig content: {sig_raw[:80]!r}"
+
+    if sig_save_path is not None:
+        # Helper chạy bằng root sẽ XÁC MINH LẠI chữ ký trên bản sao riêng của nó — kiểm tra phía app chỉ
+        # để báo lỗi sớm cho người dùng; ranh giới bảo mật thật nằm ở helper.
+        try:
+            sig_save_path.write_text(sig_raw.strip() + "\n", encoding="utf-8")
+        except OSError as e:
+            return False, f"cannot save signature: {e}"
 
     try:
         with open(file_path, "rb") as f:
@@ -151,7 +166,8 @@ def _verify_ed25519(file_path: Path, sig_url: str, ua: str) -> tuple[bool, str]:
         return False, f"signature check error: {e}"
 
 
-def _verify_release(file_path: Path, base_url: str, version: str) -> tuple[bool, str]:
+def _verify_release(file_path: Path, base_url: str, version: str,
+                    sig_save_path: Path | None = None) -> tuple[bool, str]:
     """
     Combined verification, called by both the Linux and Windows update paths.
 
@@ -199,7 +215,7 @@ def _verify_release(file_path: Path, base_url: str, version: str) -> tuple[bool,
 
     ua = f"CyberClean-Updater/{version}"
     sig_url = f"{base_url}.sig"
-    ok_sig, sig_msg = _verify_ed25519(file_path, sig_url, ua)
+    ok_sig, sig_msg = _verify_ed25519(file_path, sig_url, ua, sig_save_path)
     if ok_sig:
         return True, sig_msg
 
@@ -253,7 +269,7 @@ def _legacy_verify_sha256(file_path: Path, sha256_url: str, ua: str) -> tuple[bo
         return False, f"Cannot read file for verification: {e}"
 
     try:
-        req = Request(sha256_url, headers={"User-Agent": ua})
+        req = Request(_https(sha256_url), headers={"User-Agent": ua})
         with urlopen(req, timeout=30, context=ssl_ctx) as resp:
             raw = resp.read().decode("utf-8", errors="replace").strip()
     except HTTPError as e:
@@ -306,7 +322,7 @@ def _fetch_github_json(url: str, headers: dict) -> object | None:
     """GET JSON from GitHub API; returns dict/list or None on failure."""
     try:
         import ssl
-        req = Request(url, headers=headers)
+        req = Request(_https(url), headers=headers)
         # SECURITY: Create secure SSL context with proper validation
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = True
@@ -380,16 +396,20 @@ class UpdateCheckThread(QThread):
             self.found.emit(best_tag, best_body)
 
 
-# Design tokens — match main.py (no circular import)
-C = {
-    "bg": "#050a0f", "bg2": "#09121a", "bg3": "#0d1a26", "bg4": "#112032",
-    "cyan": "#00e5ff", "cyan2": "#00bcd4", "cyan_dim": "#004d5c",
-    "red": "#ff3d5a", "yellow": "#ffd740", "green": "#00e676",
-    "text": "#def0f8", "text2": "#7eb8cc", "text3": "#3d6678",
-    "border2": "#0f2a3d", "border3": "#1a3a52",
-}
-MONO    = "\'Cascadia Code\',\'JetBrains Mono\',\'Fira Code\',\'Consolas\',\'Share Tech Mono\',monospace"
-DISPLAY = "\'Orbitron\',\'Rajdhani\',\'Oxanium\',\'Exo 2\',\'Share Tech Mono\',monospace"
+# Design tokens — match ui_widgets (import; fallback if run standalone)
+try:
+    from ui_widgets import C, MONO, DISPLAY, UI
+except ImportError:
+    C = {
+        "bg": "#07090B", "bg2": "#0C1114", "bg3": "#12181C", "bg4": "#182026",
+        "cyan": "#00E8FF", "cyan2": "#22D3EE", "cyan_dim": "#06343A",
+        "red": "#FF4D5A", "yellow": "#F5C542", "green": "#00FF41",
+        "text": "#E8F1F4", "text2": "#B4C9D4", "text3": "#8BA3B0",
+        "border2": "#1C2A33", "border3": "#2A3D48", "radius": "8px",
+    }
+    MONO    = "'JetBrains Mono','Cascadia Code','Fira Code','Consolas',monospace"
+    DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2',sans-serif"
+    UI      = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
 
 
 class UpdateBadge(QLabel):
@@ -466,7 +486,7 @@ class UpdateWorker(QThread):
                 headers["Range"] = f"bytes={resume_pos}-"
 
             try:
-                req  = Request(url, headers=headers)
+                req  = Request(_https(url), headers=headers)
                 with urlopen(req, timeout=120, context=ssl_context) as resp:
                     # 206 Partial Content = server hỗ trợ resume
                     # 200 OK = server không support Range → viết lại từ đầu
@@ -548,93 +568,35 @@ class UpdateWorker(QThread):
                 f"https://github.com/{REPO}/releases/download/v{ver}/"
                 f"CyberClean-{ver}-linux-x86_64.tar.gz"
             )
-            ok_verify, verify_msg = _verify_release(tar_path, asset_base, ver)
+            sig_path = tmp_dir / f"CyberClean-{ver}.tar.gz.sig"
+            ok_verify, verify_msg = _verify_release(tar_path, asset_base, ver, sig_save_path=sig_path)
             if not ok_verify:
                 return False, _t("upd_err_hash", verify_msg, msg=verify_msg)
             self.progress.emit(64, f"✓ {verify_msg}")
+            if not sig_path.exists():
+                return False, _t("upd_err_nosig", "In-app update needs a signed release (no .sig was found).")
 
-            self.progress.emit(65, _t("upd_extracting", "Extracting"))
-            extract_dir = tmp_dir / "extracted"
-            extract_dir.mkdir()
-            
-            # UI FEEDBACK: Hiên thông báo cho user yên tâm
-            from PyQt6.QtWidgets import QApplication
-            self.progress.emit(70, _t("upd_installing_optimizing", "Installing and optimizing... Will restart in 3 seconds!"))
-            
-            # LNH THN THÁNH: p giao diên update ngay lâp tuc trc khi bi ng bng
-            QApplication.processEvents()
-            
-            with tarfile.open(tar_path, "r:gz") as tf:
-                # SECURITY FIX: Path traversal protection for all Python versions
-                try:
-                    tf.extractall(extract_dir, filter="data")
-                except TypeError:
-                    # Manual path validation for Python < 3.12
-                    for member in tf.getmembers():
-                        # SECURITY: Block path traversal attempts
-                        if '..' in member.name or member.name.startswith('/'):
-                            continue
-                        # SECURITY: Ensure resolved path stays within extract_dir
-                        try:
-                            target_path = (extract_dir / member.name).resolve()
-                            if not str(target_path).startswith(str(extract_dir.resolve())):
-                                continue
-                        except (OSError, ValueError):
-                            continue
-                        tf.extract(member, extract_dir)
-
-            extracted_app = extract_dir / "CyberClean" / "CyberClean"
-            if not extracted_app.exists():
-                matches = [p for p in extract_dir.rglob("CyberClean") if p.is_file()]
-                if not matches:
-                    return False, _t("upd_err_no_binary",
-                        "Could not find CyberClean binary in archive.")
-                extracted_app = matches[0]
-
+            # ── Cài đặt: toàn bộ việc nhạy cảm nằm trong helper chạy bằng root ──────────────
+            # Trước đây app giải nén vào thư mục của user rồi nhờ helper `update-replace` sao chép
+            # (a) một primitive "ghi/xóa file tùy ý bằng root" cho mọi tiến trình của user,
+            # (b) TOCTOU: user sửa staging sau khi đã kiểm tra chữ ký. Nay helper `update-apply` tự sao
+            # chép gói vào vùng root-owned, XÁC MINH LẠI Ed25519, kiểm tra symlink/VERSION/downgrade rồi
+            # mới hoán đổi nguyên tử. Không còn giải nén/copytree phía user.
+            from core import privileged as PRIV
+            self.progress.emit(70, _t("upd_installing_optimizing",
+                                      "Installing… this can take a little while, please don't close the app"))
+            info = PRIV.helper_info(refresh=True)
+            if not info.installed:
+                return False, _t("upd_err_helper_missing",
+                                 "The privileged helper is not installed — re-run install.sh to update.")
+            if not info.current:
+                return False, _t("upd_err_helper_old",
+                                 "The privileged helper is out of date. Click UPDATE HELPER in the Clean tab "
+                                 "(or re-run install.sh), then try the update again.")
             self.progress.emit(75, _t("upd_installing", "Installing…"))
-            install_src = extracted_app.parent
-            # SECURITY: staging now lives under tmp_dir, which was created
-            # via tempfile.mkdtemp() a few lines above — random name, 0700
-            # permissions, guaranteed fresh (never reused across runs).
-            # This replaces the old fixed path Path("/tmp/cyberclean_staging"),
-            # which was a predictable, world-visible location and a classic
-            # TOCTOU/insecure-temp-file anti-pattern (CWE-377): a local
-            # attacker could not swap it out after creation thanks to /tmp's
-            # sticky bit, but relying on that incidental protection is
-            # fragile — a future refactor (e.g. adding dirs_exist_ok=True
-            # to make retries more robust) could silently reopen it. Using
-            # mkdtemp's random path removes the predictability entirely,
-            # so there's no fixed target for a local attacker to race against.
-            staging = tmp_dir / "staging"
-            shutil.copytree(str(install_src), str(staging))
-
-            helper = "/usr/local/bin/cyber-clean-helper"
-            backup = "/opt/CyberClean/_backup"
-            r = subprocess.run(
-                ["sudo", "-n", helper, "update-replace",
-                 str(staging), str(install_dst), backup],
-                capture_output=True, text=True, timeout=120,
-                creationflags=_no_window_flags(),
-            )
-            if r.returncode != 0:
-                # Fallback: plain non-privileged copy. NOTE: the previous
-                # version of this fallback shelled out to `sudo -n rsync`
-                # via shell=True with f-string-interpolated paths — that
-                # command was never actually granted in sudoers (only the
-                # helper binary is), so it could only ever "work" by
-                # accident via an unrelated cached sudo ticket, while still
-                # carrying shell=True + string-interpolation risk for no
-                # real benefit. Removed; if the helper call fails, fall
-                # straight through to the unprivileged copy below (works
-                # for the ~/.local fallback install location; for /opt it
-                # will simply fail loudly, which is correct — we should
-                # not silently attempt more privileged shell commands that
-                # were never actually authorized).
-                try:
-                    shutil.copytree(str(staging), str(install_dst), dirs_exist_ok=True)
-                except OSError as e:
-                    return False, _t("upd_err_install",
-                        f"Install failed: {e}", err=str(e))
+            res = PRIV.run_helper("update-apply", str(tar_path), str(sig_path), ver, timeout=600)
+            if not res.ok:
+                return False, _t("upd_err_install", f"Install failed: {res.message}", err=res.message)
 
             self.progress.emit(95, _t("upd_restarting", "Restarting…"))
             return True, "ok"
@@ -770,35 +732,36 @@ class UpdateDialog(QDialog):
             }}
             QLabel {{
                 color: {C["text"]};
-                font-family: {MONO};
+                font-family: {UI};
             }}
             QTextEdit {{
                 background: {C["bg3"]};
                 color: {C["text2"]};
                 border: 1px solid {C["border3"]};
-                border-radius: 4px;
+                border-radius: {C.get("radius", "8px")};
                 font-family: {MONO};
-                font-size: 11px;
-                padding: 10px;
+                font-size: 12px;
+                padding: 12px;
             }}
             QProgressBar {{
                 background: {C["bg3"]};
                 border: 1px solid {C["border3"]};
-                border-radius: 2px;
+                border-radius: 4px;
                 height: 10px;
                 text-align: center;
             }}
             QProgressBar::chunk {{
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {C["cyan_dim"]}, stop:1 {C["cyan"]});
-                border-radius: 2px;
+                border-radius: 4px;
             }}
             QPushButton {{
-                border-radius: 4px;
-                padding: 8px 20px;
-                font-family: {MONO};
-                font-size: 12px;
-                letter-spacing: 1px;
+                border-radius: {C.get("radius", "8px")};
+                padding: 9px 20px;
+                font-family: {UI};
+                font-size: 13px;
+                letter-spacing: 0.4px;
+                min-height: 36px;
             }}
         """)
 

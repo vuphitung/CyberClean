@@ -11,8 +11,9 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QGridLayout, QScrollBar,
+    QSizePolicy, QBoxLayout,
 )
-from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QRectF
+from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QRectF, QSize
 from PyQt6.QtGui   import (
     QPainter, QColor, QPen, QBrush, QFont,
     QTextCursor, QTextCharFormat, QPainterPath,
@@ -36,19 +37,21 @@ except ImportError:
 
 # ── Dùng design tokens từ ui_widgets ─────────────────────────
 try:
-    from ui_widgets import C, MONO
+    from ui_widgets import C, MONO, UI
 except ImportError:
     C = {
-        'bg': '#050a0f', 'bg2': '#09121a', 'bg3': '#0d1a26', 'bg4': '#112032',
-        'cyan': '#00e5ff', 'cyan2': '#00bcd4', 'cyan_dim': '#004d5c',
-        'red': '#ff3d5a', 'red_dim': '#3d0010',
-        'yellow': '#ffd740', 'yel_dim': '#3d2d00',
-        'green': '#00e676', 'grn_dim': '#00280f',
-        'purple': '#d050ff',
-        'text': '#def0f8', 'text2': '#7eb8cc', 'text3': '#3d6678',
-        'dim': '#2a4a5a', 'border': '#0a1e2d', 'border2': '#0f2a3d', 'border3': '#1a3a52',
+        'bg': '#07090B', 'bg2': '#0C1114', 'bg3': '#12181C', 'bg4': '#182026',
+        'cyan': '#00E8FF', 'cyan2': '#22D3EE', 'cyan_dim': '#06343A',
+        'red': '#FF4D5A', 'red_dim': '#3A0B12',
+        'yellow': '#F5C542', 'yel_dim': '#3A2E0A',
+        'green': '#00FF41', 'grn_dim': '#063016',
+        'purple': '#C084FC',
+        'text': '#E8F1F4', 'text2': '#B4C9D4', 'text3': '#8BA3B0',
+        'dim': '#5C7380', 'border': '#152028', 'border2': '#1C2A33', 'border3': '#2A3D48',
+        'radius': '8px',
     }
     MONO = "'JetBrains Mono','Fira Code','Consolas',monospace"
+    UI   = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -62,10 +65,21 @@ class OrbitButton(QPushButton):
         self._dir      = 1
         self._timer    = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self.setFixedSize(170, 170)
+        self.setMinimumSize(128, 128)
+        self.setMaximumSize(200, 200)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlat(True)
+        self.setAccessibleName("Toggle system boost")
         self.setStyleSheet("background:transparent;border:none;")
+        self._set_side(168)
+
+    def _set_side(self, side: int):
+        side = max(128, min(200, int(side)))
+        self.setFixedSize(side, side)
+
+    def sizeHint(self):
+        return QSize(168, 168)
 
     def set_active(self, v: bool):
         self._active = v
@@ -85,65 +99,54 @@ class OrbitButton(QPushButton):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx, cy   = self.width() // 2, self.height() // 2
-        cyan     = QColor(C['cyan'])
-        dim      = QColor(C['dim'])
-        border2  = QColor(C['border2'])
+        w, h = self.width(), self.height()
+        cx, cy = w / 2.0, h / 2.0
+        r = min(w, h) / 2.0 - 4
+        cyan    = QColor(C['cyan'])
+        border2 = QColor(C['border2'])
+
+        def ring(radius, pen, brush=Qt.BrushStyle.NoBrush):
+            d = radius * 2
+            p.setPen(pen)
+            p.setBrush(brush)
+            p.drawEllipse(QRectF(cx - radius, cy - radius, d, d))
 
         if self._active:
-            # Outer glow ring
-            a_outer = int(15 + self._phase * 25)
+            a_outer = int(18 + self._phase * 28)
             rc = QColor(C['cyan']); rc.setAlpha(a_outer)
-            p.setPen(QPen(rc, 1.0)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(cx-92, cy-92, 184, 184)
+            ring(r * 0.96, QPen(rc, 1.2))
 
-            # Mid ring
-            a_mid = int(55 + self._phase * 100)
+            a_mid = int(60 + self._phase * 90)
             mc = QColor(C['cyan']); mc.setAlpha(a_mid)
-            p.setPen(QPen(mc, 1.5))
-            p.drawEllipse(cx-74, cy-74, 148, 148)
+            ring(r * 0.76, QPen(mc, 1.8))
 
-            # Inner fill
-            fill = QColor(C['cyan']); fill.setAlpha(10)
-            p.setBrush(QBrush(fill))
-            p.setPen(QPen(QColor(C['cyan']), 1.5))
-            p.drawEllipse(cx-52, cy-52, 104, 104)
+            fill = QColor(C['cyan']); fill.setAlpha(18)
+            ring(r * 0.50, QPen(cyan, 2.0), QBrush(fill))
+            self._bolt(p, cx, cy, r * 0.20, cyan)
 
-            # Bolt icon
-            self._bolt(p, cx, cy, 17, QColor(C['cyan']))
-
-            # "ACTIVE" label
-            p.setFont(QFont("JetBrains Mono", 7))
-            p.setPen(QColor(C['cyan']))
-            p.drawText(QRectF(cx-35, cy+30, 70, 14),
+            p.setFont(QFont("JetBrains Mono", max(8, int(r * 0.10)), QFont.Weight.Bold))
+            p.setPen(cyan)
+            p.drawText(QRectF(cx - r * 0.45, cy + r * 0.28, r * 0.90, r * 0.22),
                        Qt.AlignmentFlag.AlignCenter, "ACTIVE")
         else:
-            # Idle rings
-            p.setPen(QPen(border2, 1)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(cx-66, cy-66, 132, 132)
-            c2 = QColor(C['border']); c2.setAlpha(80)
-            p.setPen(QPen(c2, 1))
-            p.drawEllipse(cx-82, cy-82, 164, 164)
-            # Button circle
-            p.setPen(QPen(QColor(C['border2']), 1.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(cx-48, cy-48, 96, 96)
-            # Dim bolt
-            self._bolt(p, cx, cy, 17, QColor(C['text3']))
-            # "BOOST" label
-            p.setFont(QFont("JetBrains Mono", 7))
-            p.setPen(QColor(C['dim']))
-            p.drawText(QRectF(cx-35, cy+30, 70, 14),
+            ring(r * 0.88, QPen(border2, 1))
+            c2 = QColor(C['border']); c2.setAlpha(90)
+            ring(r * 0.74, QPen(c2, 1))
+            ring(r * 0.48, QPen(QColor(C['border3']), 1.6))
+            self._bolt(p, cx, cy, r * 0.20, QColor(C['text3']))
+            p.setFont(QFont("JetBrains Mono", max(8, int(r * 0.10)), QFont.Weight.Bold))
+            p.setPen(QColor(C['text3']))
+            p.drawText(QRectF(cx - r * 0.45, cy + r * 0.28, r * 0.90, r * 0.22),
                        Qt.AlignmentFlag.AlignCenter, "BOOST")
 
-        # Corner tags
-        tag_col = QColor(C['cyan']) if self._active else QColor(C['border3'])
-        p.setFont(QFont("JetBrains Mono", 7))
+        tag_col = cyan if self._active else QColor(C['text3'])
+        p.setFont(QFont("JetBrains Mono", max(7, int(r * 0.09))))
         p.setPen(tag_col)
-        p.drawText(QRectF(cx-14, cy-80, 28, 12), Qt.AlignmentFlag.AlignCenter, "GPU")
-        p.drawText(QRectF(cx+62, cy-6,  28, 12), Qt.AlignmentFlag.AlignCenter, "CPU")
-        p.drawText(QRectF(cx-14, cy+68, 28, 12), Qt.AlignmentFlag.AlignCenter, "RAM")
-        p.drawText(QRectF(cx-90, cy-6,  28, 12), Qt.AlignmentFlag.AlignCenter, "NET")
+        tag_h = r * 0.18
+        p.drawText(QRectF(cx - 18, cy - r * 0.94, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "GPU")
+        p.drawText(QRectF(cx + r * 0.62, cy - tag_h / 2, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "CPU")
+        p.drawText(QRectF(cx - 18, cy + r * 0.76, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "RAM")
+        p.drawText(QRectF(cx - r * 0.94, cy - tag_h / 2, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "NET")
 
     def _bolt(self, p, cx, cy, s, color):
         path = QPainterPath()
@@ -165,46 +168,46 @@ class MetricCard(QFrame):
         super().__init__(parent)
         self._bar_max = 200
         self._apply_style(False)
-        self.setMinimumHeight(58)
-        self.setMaximumHeight(72)
+        self.setMinimumHeight(72)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(3)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(6)
 
         self._lbl = QLabel(label.upper())
         self._lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:8px;letter-spacing:2px;"
-            f"font-family:{MONO};border:none;background:transparent;"
+            f"color:{C['text3']};font-size:11px;letter-spacing:1.4px;"
+            f"font-family:{UI};font-weight:700;border:none;background:transparent;"
         )
         self._val   = QLabel("—")
         self._val.setStyleSheet(
-            f"color:{C['text']};font-size:15px;font-weight:500;"
+            f"color:{C['text']};font-size:20px;font-weight:700;"
             f"font-family:{MONO};border:none;background:transparent;"
         )
         self._delta = QLabel("")
         self._delta.setStyleSheet(
-            f"color:{C['cyan']};font-size:10px;font-family:{MONO};"
+            f"color:{C['cyan']};font-size:12px;font-family:{MONO};"
             "border:none;background:transparent;"
         )
-        row = QHBoxLayout(); row.setSpacing(6); row.setContentsMargins(0,0,0,0)
+        row = QHBoxLayout(); row.setSpacing(8); row.setContentsMargins(0,0,0,0)
         row.addWidget(self._val); row.addWidget(self._delta); row.addStretch()
 
-        # Mini bar
         self._bar_bg   = QFrame(self)
-        self._bar_bg.setFixedHeight(2)
+        self._bar_bg.setFixedHeight(4)
         self._bar_bg.setStyleSheet(
-            f"background:{C['border2']};border:none;border-radius:1px;"
+            f"background:{C['border2']};border:none;border-radius:2px;"
         )
         self._bar_fill = QFrame(self._bar_bg)
-        self._bar_fill.setFixedHeight(2)
+        self._bar_fill.setFixedHeight(4)
         self._bar_fill.setStyleSheet(
-            f"background:{C['cyan']};border:none;border-radius:1px;"
+            f"background:{C['cyan']};border:none;border-radius:2px;"
         )
         self._bar_fill.setFixedWidth(0)
 
         lay.addWidget(self._lbl)
         lay.addLayout(row)
+        lay.addStretch()
         lay.addWidget(self._bar_bg)
 
     def resizeEvent(self, e):
@@ -225,13 +228,13 @@ class MetricCard(QFrame):
         self._delta.setText(delta)
         col = delta_color or C['cyan']
         self._delta.setStyleSheet(
-            f"color:{col};font-size:10px;font-family:{MONO};"
+            f"color:{col};font-size:12px;font-family:{MONO};"
             "border:none;background:transparent;"
         )
         w = int(self._bar_max * min(1.0, max(0.0, pct / 100)))
         self._bar_fill.setFixedWidth(w)
         self._bar_fill.setStyleSheet(
-            f"background:{col};border:none;border-radius:1px;"
+            f"background:{col};border:none;border-radius:2px;"
         )
 
     def set_lit(self, lit: bool):
@@ -246,37 +249,41 @@ class PhaseBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0,0,0,0); lay.setSpacing(4)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
         self._pills = []
         for i, name in enumerate(self.LABELS):
             pill = QLabel(name)
             pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pill.setFixedHeight(20)
+            pill.setMinimumHeight(32)
+            pill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pill.setStyleSheet(self._style(False, False))
             self._pills.append(pill)
-            lay.addWidget(pill)
-            if i < len(self.LABELS)-1:
-                sep = QLabel("·")
+            lay.addWidget(pill, 1)
+            if i < len(self.LABELS) - 1:
+                sep = QLabel("›")
+                sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                sep.setFixedWidth(14)
                 sep.setStyleSheet(
-                    f"color:{C['border3']};font-size:8px;border:none;"
+                    f"color:{C['border3']};font-size:14px;border:none;font-family:{UI};"
                 )
-                lay.addWidget(sep)
-        lay.addStretch()
+                lay.addWidget(sep, 0)
 
     def _style(self, active: bool, done: bool) -> str:
         if active:
-            return (f"color:{C['yellow']};font-size:8px;letter-spacing:2px;"
-                    f"font-family:{MONO};border:1px solid {C['yellow']}40;"
-                    f"border-radius:10px;padding:0 10px;"
+            return (f"color:{C['yellow']};font-size:11px;letter-spacing:1.4px;"
+                    f"font-family:{UI};font-weight:700;border:1px solid {C['yellow']}55;"
+                    f"border-radius:8px;padding:6px 12px;"
                     f"background:{C['yel_dim']};")
         if done:
-            return (f"color:{C['dim']};font-size:8px;letter-spacing:2px;"
-                    f"font-family:{MONO};border:1px solid {C['border2']};"
-                    f"border-radius:10px;padding:0 10px;background:transparent;")
-        return (f"color:{C['border3']};font-size:8px;letter-spacing:2px;"
-                f"font-family:{MONO};border:1px solid {C['border']};"
-                f"border-radius:10px;padding:0 10px;background:transparent;")
+            return (f"color:{C['green']};font-size:11px;letter-spacing:1.4px;"
+                    f"font-family:{UI};font-weight:600;border:1px solid {C['green']}40;"
+                    f"border-radius:8px;padding:6px 12px;background:{C['grn_dim']};")
+        return (f"color:{C['text3']};font-size:11px;letter-spacing:1.4px;"
+                f"font-family:{UI};font-weight:600;border:1px solid {C['border2']};"
+                f"border-radius:8px;padding:6px 12px;background:{C['bg2']};")
 
     def set_phase(self, n: int):
         for i, pill in enumerate(self._pills):
@@ -291,33 +298,37 @@ class PhaseBar(QWidget):
 class CyberLog(QTextEdit):
     MAX_LINES = 300
     COLORS = {
-        "ok":   "#00e676",
-        "warn": "#ffd740",
-        "head": "#00e5ff",
-        "err":  "#ff3d5a",
-        "text": "#def0f8",
-        "mute": "#3d6678",
+        "ok":   C['green'],
+        "warn": C['yellow'],
+        "head": C['cyan'],
+        "err":  C['red'],
+        "text": C['text'],
+        "mute": C['text3'],
     }
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setMinimumHeight(120)
-        self.setMaximumHeight(200)
+        self.setMinimumHeight(140)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setPlaceholderText("Press BOOST to scan GPU / RAM / background load…")
         self.setStyleSheet(f"""
             QTextEdit {{
                 background:{C['bg2']};
                 border:1px solid {C['border2']};
-                border-radius:8px;
+                border-radius:{C.get('radius', '8px')};
                 color:{C['text']};
                 font-family:{MONO};
-                font-size:10px;
-                padding:8px 10px;
+                font-size:12px;
+                padding:12px 14px;
+            }}
+            QTextEdit:focus {{
+                border:1px solid {C['cyan']}70;
             }}
             QScrollBar:vertical {{
-                background:{C['bg']};width:4px;border-radius:2px;
+                background:{C['bg']};width:8px;border-radius:4px;
             }}
             QScrollBar::handle:vertical {{
-                background:{C['border3']};border-radius:2px;
+                background:{C['border3']};border-radius:4px;
             }}
         """)
 
@@ -362,7 +373,7 @@ class GpuMonitorThread(QThread):
             for p in sorted(Path("/sys/class/drm").glob(
                     "card*/device/gpu_busy_percent")):
                 try: return int(p.read_text().strip())
-                except: pass
+                except (OSError, ValueError): pass
 
             # Method 2: Intel RC6 residency (Skylake/Broadwell iGPU)
             # RC6 = render C6 sleep state — khi GPU bận thì RC6 giảm
@@ -378,7 +389,7 @@ class GpuMonitorThread(QThread):
                     delta_rc6 = v2 - v1  # ms trong 500ms
                     busy_pct  = max(0, min(100, 100 - int(delta_rc6 / 5)))
                     return busy_pct
-                except: pass
+                except (OSError, ValueError): pass
 
             # Method 3: CPU iowait + user% làm proxy khi không có GPU metric
             # Khi game chạy, CPU user% tăng = game đang dùng CPU nhiều hơn
@@ -399,7 +410,7 @@ class GpuMonitorThread(QThread):
                     creationflags=0x08000000)  # CREATE_NO_WINDOW
                 if r.returncode == 0 and r.stdout.strip():
                     return int(float(r.stdout.strip().splitlines()[0].strip()))
-            except: pass
+            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError): pass
 
             # Method 2: WMI Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine
             # (thường chỉ hoạt động khi driver expose đúng performance counter;
@@ -415,7 +426,7 @@ class GpuMonitorThread(QThread):
                 out = r.stdout.strip()
                 if r.returncode == 0 and out:
                     return int(float(out))
-            except: pass
+            except (OSError, subprocess.TimeoutExpired, ValueError): pass
         return -1
 
 
@@ -527,7 +538,7 @@ class GameWatcherThread(QThread):
                         for c in _psu.Process(pid).children(recursive=True):
                             if c.pid not in seen:
                                 seen.add(c.pid); pids.append(c.pid)
-                    except: pass
+                    except (_psu.NoSuchProcess, _psu.AccessDenied): pass
                 # Only emit if new PIDs appeared (covers both "first game
                 # found" and "another game found while one is running")
                 new = set(pids) - self._known
@@ -584,40 +595,68 @@ class GameBoostPage(QWidget):
 
     def _setup_ui(self):
         self.setStyleSheet(f"background:{C['bg']};")
+        self._compact = None
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
 
-        # Header
         hdr = QHBoxLayout()
+        titles = QVBoxLayout(); titles.setSpacing(2); titles.setContentsMargins(0, 0, 0, 0)
         title = QLabel("SYS BOOSTER")
         title.setStyleSheet(
-            f"color:{C['text3']};font-size:9px;letter-spacing:4px;"
-            f"font-family:{MONO};border:none;"
+            f"color:{C['text']};font-size:18px;letter-spacing:1.2px;"
+            f"font-family:{UI};font-weight:700;border:none;"
         )
+        sub = QLabel("One control · scan → apply → monitor  ·  scales with the window")
+        sub.setStyleSheet(
+            f"color:{C['text3']};font-size:12px;font-family:{UI};border:none;"
+        )
+        sub.setWordWrap(True)
+        titles.addWidget(title); titles.addWidget(sub)
+
         self._sdot = QLabel("●")
         self._stxt = QLabel("standby")
+        status = QFrame()
+        status.setStyleSheet(
+            f"QFrame{{background:{C['bg2']};border:1px solid {C['border2']};"
+            f"border-radius:8px;}}"
+        )
+        st_lay = QHBoxLayout(status)
+        st_lay.setContentsMargins(10, 6, 12, 6); st_lay.setSpacing(6)
         for w in (self._sdot, self._stxt):
             w.setStyleSheet(
-                f"color:{C['dim']};font-size:9px;letter-spacing:2px;"
-                f"font-family:{MONO};border:none;"
+                f"color:{C['text3']};font-size:12px;letter-spacing:0.8px;"
+                f"font-family:{UI};font-weight:600;border:none;background:transparent;"
             )
-        hdr.addWidget(title); hdr.addStretch()
-        hdr.addWidget(self._sdot); hdr.addSpacing(4)
-        hdr.addWidget(self._stxt)
+        st_lay.addWidget(self._sdot); st_lay.addWidget(self._stxt)
+        hdr.addLayout(titles, 1)
+        hdr.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(hdr)
 
-        # Orbit button
+        self._cmd = QFrame()
+        self._cmd.setObjectName("boostHud")
+        self._cmd.setStyleSheet(
+            f"QFrame#boostHud{{background:{C['bg2']};border:1px solid {C['border2']};"
+            f"border-radius:{C.get('radius','8px')};}}"
+        )
+        self._cmd.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._cmd_lay = QHBoxLayout(self._cmd)
+        self._cmd_lay.setContentsMargins(16, 16, 16, 16)
+        self._cmd_lay.setSpacing(16)
+
         self._btn = OrbitButton()
         self._btn.clicked.connect(self._toggle)
-        root.addWidget(self._btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._cmd_lay.addWidget(self._btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Phase bar
-        self._phases = PhaseBar()
-        root.addWidget(self._phases, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        # Metrics
-        grid = QGridLayout(); grid.setSpacing(8)
+        self._metrics_wrap = QWidget()
+        self._metrics_wrap.setStyleSheet("background:transparent;border:none;")
+        grid = QGridLayout(self._metrics_wrap)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
         self._mc_gpu  = MetricCard("GPU busy")
         self._mc_ram  = MetricCard("RAM freed")
         self._mc_bg   = MetricCard("Background")
@@ -626,17 +665,41 @@ class GameBoostPage(QWidget):
         grid.addWidget(self._mc_ram,  0, 1)
         grid.addWidget(self._mc_bg,   1, 0)
         grid.addWidget(self._mc_game, 1, 1)
-        root.addLayout(grid)
+        self._cmd_lay.addWidget(self._metrics_wrap, 1)
+        root.addWidget(self._cmd, 0)
 
-        # Log
+        self._phases = PhaseBar()
+        root.addWidget(self._phases, 0)
+
         self._log = CyberLog()
-        self._log.append_line("[ ready — press boost ]", "mute")
-        root.addWidget(self._log)
-        root.addStretch()
+        self._log.append_line("[ ready — press BOOST ]", "mute")
+        root.addWidget(self._log, 1)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        compact = self.width() < 760
+        side = 148 if compact else min(188, max(148, int(self.height() * 0.20)))
+        self._btn._set_side(side)
+        if compact:
+            self._cmd.setMaximumHeight(440)
+            self._metrics_wrap.setMinimumHeight(160)
+            self._metrics_wrap.setMaximumHeight(220)
+        else:
+            self._cmd.setMaximumHeight(220)
+            self._metrics_wrap.setMinimumHeight(0)
+            self._metrics_wrap.setMaximumHeight(188)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        direction = QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
+        self._cmd_lay.setDirection(direction)
+        align = Qt.AlignmentFlag.AlignHCenter if compact else Qt.AlignmentFlag.AlignVCenter
+        self._cmd_lay.setAlignment(self._btn, align)
+        self._metrics_wrap.setMinimumHeight(168 if compact else 148)
 
     def _set_status(self, txt: str, color: str):
-        s = (f"color:{color};font-size:9px;letter-spacing:2px;"
-             f"font-family:{MONO};border:none;")
+        s = (f"color:{color};font-size:12px;letter-spacing:0.8px;"
+             f"font-family:{UI};font-weight:600;border:none;background:transparent;")
         self._sdot.setStyleSheet(s); self._stxt.setStyleSheet(s)
         self._stxt.setText(txt)
 
@@ -701,7 +764,7 @@ class GameBoostPage(QWidget):
                 # Remove mesa env file
                 env_file = Path.home() / ".config/environment.d/cyber-boost.conf"
                 try: env_file.unlink(missing_ok=True)
-                except: pass
+                except OSError: pass
                 # Restore swappiness
                 sw = saved.get("swappiness_orig") if saved else None
                 if sw and IS_LINUX:
@@ -715,10 +778,8 @@ class GameBoostPage(QWidget):
                         # is left at 1 permanently, even after the user
                         # thinks they've turned Boost off.
                         try:
-                            subprocess.run(
-                                ["sudo", "-n", "/usr/local/bin/cyber-clean-helper",
-                                 "set-swappiness", sw],
-                                capture_output=True, timeout=5)
+                            from core import privileged as _PRIV
+                            _PRIV.run_helper("set-swappiness", sw, timeout=5, use_pkexec=False)
                         except Exception:
                             pass
                 # Restore VFR
@@ -727,16 +788,16 @@ class GameBoostPage(QWidget):
                         subprocess.run(
                             ["hyprctl", "keyword", "misc:vfr", "true"],
                             capture_output=True, timeout=3)
-                    except: pass
+                    except (OSError, subprocess.TimeoutExpired): pass
                 # Restore nice
                 try:
                     import psutil
                     for pid, orig in (saved or {}).get("game_nice", {}).items():
                         try: psutil.Process(pid).nice(orig)
-                        except: pass
+                        except (psutil.NoSuchProcess, psutil.AccessDenied): pass
                     for pid, orig in (saved or {}).get("bg_nice", {}).items():
                         try: psutil.Process(pid).nice(orig)
-                        except: pass
+                        except (psutil.NoSuchProcess, psutil.AccessDenied): pass
                 except ImportError:
                     pass
                 log("└─ DONE ───────────────────────────────────", "head")
@@ -931,7 +992,7 @@ class GameBoostPage(QWidget):
         if IS_LINUX:
             for pn in Path("/sys/class/drm").glob("card*/device/product_name"):
                 try: gpu_name = pn.read_text().strip()[:45]; break
-                except: pass
+                except OSError: pass
             if gpu_name == "unknown":
                 try:
                     r = subprocess.run(["lspci"], capture_output=True,
@@ -939,7 +1000,7 @@ class GameBoostPage(QWidget):
                     for ln in r.stdout.splitlines():
                         if "VGA" in ln or "3D" in ln:
                             gpu_name = ln.split(":")[-1].strip()[:45]; break
-                except: pass
+                except (OSError, subprocess.TimeoutExpired): pass
         elif IS_WINDOWS:
             # Method 1: nvidia-smi (nếu có card NVIDIA + driver) — nhanh, đáng tin cậy nhất
             try:
@@ -1125,7 +1186,7 @@ class GameBoostPage(QWidget):
                                capture_output=True, timeout=3)
                 saved["hyprland_vfr"] = True
                 log("│  + Hyprland: VFR disabled, direct scanout on", "ok")
-            except: pass
+            except (OSError, subprocess.TimeoutExpired): pass
 
         # 5. vm.swappiness = 1
         if IS_LINUX:
@@ -1150,10 +1211,9 @@ class GameBoostPage(QWidget):
                 log("│  + vm.swappiness → 1 (game pages stay in RAM)", "ok")
             except (PermissionError, OSError):
                 try:
-                    r = subprocess.run(
-                        ["sudo","-n","/usr/local/bin/cyber-clean-helper","swappiness"],
-                        capture_output=True, timeout=5)
-                    if r.returncode == 0:
+                    from core import privileged as _PRIV
+                    r = _PRIV.run_helper("swappiness", timeout=5, use_pkexec=False)
+                    if r.ok:
                         saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
                         log("│  + vm.swappiness → 10 (via helper)", "ok")
                 except Exception:
@@ -1202,7 +1262,7 @@ class GameBoostPage(QWidget):
                             p.nice(5)
                             saved.setdefault("bg_nice", {})[p.pid] = o
                             bg_count += 1
-                    except: pass
+                    except (_psu.NoSuchProcess, _psu.AccessDenied): pass
 
                 log(f"│  + {bg_count} background → nice(+5)", "ok")
                 metric_sig.emit("bg_count", bg_count)

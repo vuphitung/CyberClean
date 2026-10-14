@@ -1,0 +1,3 @@
+NAME="Red Hat Enterprise Linux"
+ID="rhel"
+ID_LIKE="fedora"

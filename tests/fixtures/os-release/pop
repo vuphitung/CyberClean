@@ -1,0 +1,4 @@
+NAME="Pop!_OS"
+ID=pop
+ID_LIKE="ubuntu debian"
+VERSION_ID="22.04"

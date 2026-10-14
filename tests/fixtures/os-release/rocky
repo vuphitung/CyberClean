@@ -1,0 +1,3 @@
+NAME="Rocky Linux"
+ID="rocky"
+ID_LIKE="rhel centos fedora"

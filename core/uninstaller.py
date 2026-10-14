@@ -38,7 +38,7 @@ NEW: UninstallResult dataclass — structured return value from uninstall_app().
 COMPAT: uninstall_app() still returns bool | 'UI_OPENED' for old call sites.
 """
 
-import subprocess, platform, re, time, shlex
+import subprocess, platform, re, time, shlex, fnmatch
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional
 
@@ -51,6 +51,10 @@ class InstalledApp:
     size_mb: float = 0.0
     source:  str   = ''   # 'pacman'|'apt'|'dnf'|'zypper'|'xbps'|'flatpak'|'winget'|'registry'
     pkg_id:  str   = ''   # id used to uninstall
+
+    @property
+    def protected(self) -> bool:
+        return is_protected(self)
 
     @property
     def uninstall_preview(self) -> dict:
@@ -76,6 +80,46 @@ class UninstallResult:
 _NO_WIN = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
 
 
+# ── Gói lõi KHÔNG được gỡ ────────────────────────────────────────────────────
+# Pacman/apt/dnf tự từ chối gỡ gói đang được gói khác cần, nhưng kernel, bootloader, initramfs, init,
+# sudo/polkit, trình quản lý mạng, DE meta-package... thường KHÔNG ai "require" nên vẫn gỡ được và có thể
+# làm máy không khởi động. Danh sách này PHẢI giống PROTECTED_GLOBS trong packaging/cyber-clean-helper
+# (tests/test_uninstaller.py đối chiếu) — helper là hàng rào thật; đây là hàng rào sớm cho UI.
+PROTECTED_PKG_GLOBS = (
+    'linux', 'linux-lts', 'linux-zen', 'linux-hardened', 'linux-rt', 'linux-rt-lts',
+    'linux-cachyos*', 'linux-xanmod*', 'linux-firmware', 'linux-firmware-*',
+    'linux-image-*', 'linux-modules-*', 'linux-generic*', 'linux-virtual*', 'linux-base',
+    'kernel', 'kernel-core', 'kernel-modules*', 'kernel-default*',
+    'grub', 'grub2*', 'grub-*', 'shim', 'shim-*', 'efibootmgr', 'systemd-boot*', 'refind', 'limine', 'syslinux',
+    'mkinitcpio', 'mkinitcpio-*', 'dracut', 'dracut-*', 'initramfs-tools', 'initramfs-tools-*',
+    'base', 'filesystem', 'glibc', 'libc6', 'libc-bin', 'bash', 'dash', 'coreutils', 'util-linux', 'util-linux-*',
+    'systemd', 'systemd-sysv', 'systemd-sysvcompat', 'systemd-libs', 'systemd-resolved', 'systemd-timesyncd',
+    'systemd-udev', 'libsystemd*', 'udev', 'libudev*',
+    'dbus', 'dbus-broker', 'dbus-daemon', 'dbus-user-session',
+    'pacman', 'pacman-*', 'libalpm*', 'archlinux-keyring',
+    'apt', 'apt-*', 'libapt-*', 'dpkg', 'debian-archive-keyring', 'ubuntu-keyring',
+    'dnf', 'dnf-*', 'dnf5', 'rpm', 'rpm-*', 'libdnf*', 'yum', 'zypper', 'libzypp', 'xbps',
+    'sudo', 'doas', 'su', 'shadow', 'login', 'passwd', 'polkit', 'polkitd', 'policykit-1', 'pam', 'libpam*',
+    'e2fsprogs', 'btrfs-progs', 'xfsprogs', 'dosfstools', 'lvm2', 'cryptsetup', 'mdadm',
+    'networkmanager', 'NetworkManager', 'network-manager', 'iwd', 'wpa_supplicant', 'dhcpcd', 'dhclient',
+    'plasma-desktop', 'plasma-meta', 'plasma-workspace', 'gnome-shell', 'gnome-session', 'gdm', 'gdm3', 'sddm', 'lightdm',
+    'xorg-server', 'xwayland', 'xserver-xorg*', 'ubuntu-desktop*', 'ubuntu-minimal', 'ubuntu-standard',
+    'kubuntu-desktop', 'xubuntu-desktop',
+    'python', 'python3', 'python3-minimal', 'libpython3*',
+    'cyberclean', 'cyber-clean',
+)
+_PM_SOURCES = ('pacman', 'apt', 'dnf', 'zypper', 'xbps')
+
+
+def is_protected_pkg(name: str) -> bool:
+    n = (name or '').strip()
+    return any(fnmatch.fnmatchcase(n, g) for g in PROTECTED_PKG_GLOBS)
+
+
+def is_protected(app: 'InstalledApp') -> bool:
+    return app.source in _PM_SOURCES and is_protected_pkg(app.pkg_id)
+
+
 def run(cmd, timeout=20):
     """
     FIX: encoding='utf-8' errors='replace' — prevents UnicodeDecodeError crash
@@ -91,6 +135,18 @@ def run(cmd, timeout=20):
             encoding='utf-8', errors='replace',
         )
         return r.stdout.strip(), r.returncode
+    except subprocess.TimeoutExpired:
+        return f'timeout after {timeout}s', 1
+    except Exception as e:
+        return str(e), 1
+
+
+def _run_argv(argv, timeout=60):
+    """subprocess không qua shell. Trả về (output, returncode)."""
+    try:
+        r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+                           creationflags=_NO_WIN, encoding='utf-8', errors='replace')
+        return (r.stdout or '').strip(), r.returncode
     except subprocess.TimeoutExpired:
         return f'timeout after {timeout}s', 1
     except Exception as e:
@@ -120,11 +176,12 @@ def get_dependencies_linux(app: 'InstalledApp') -> List[str]:
 
     try:
         if PKG_MANAGER == 'apt':
-            out, _ = run(f'apt-cache rdepends --installed {app.pkg_id} 2>/dev/null', timeout=8)
+            pkg = shlex.quote(app.pkg_id)
+            out, _ = run(f'apt-cache rdepends --installed {pkg} 2>/dev/null', timeout=8)
             return [l.strip().lstrip('|').strip() for l in out.splitlines()
                     if l.strip() and not l.strip().startswith(app.pkg_id)][:10]
         elif PKG_MANAGER == 'pacman':
-            out, _ = run(f'pacman -Qi {app.pkg_id} 2>/dev/null', timeout=8)
+            out, _ = run(f'pacman -Qi {shlex.quote(app.pkg_id)} 2>/dev/null', timeout=8)
             for line in out.splitlines():
                 if line.startswith('Required By'):
                     val = line.split(':', 1)[1].strip()
@@ -433,6 +490,46 @@ def _clean_path(s: str) -> str:
     return s.strip().strip('"').strip("'")
 
 
+def _win_argv(cmd_str: str) -> list:
+    """
+    Split a Windows command-line string (as stored verbatim in registry
+    UninstallString / QuietUninstallString values) into an argv list,
+    WITHOUT ever handing the string to a shell for parsing.
+
+    SECURITY: every call site in this module used to build an f-string like
+    f'"{exe}" /S {args}' and run it via subprocess.run(cmd, shell=True) or
+    subprocess.Popen(uninstall_str, shell=True) — with shell=True on Windows
+    that string is handed to cmd.exe, which interprets &, |, ^, and stray "
+    as shell metacharacters. uninstall_str/quiet_str come straight from a
+    registry value under the app's own Uninstall key; on a clean system
+    that's effectively developer-controlled data, but if malware/a PUA (or a
+    corrupted/hand-edited installer entry) ever writes a value containing
+    e.g. `"C:\\x.exe" & calc.exe & echo "`, the injected command runs with
+    whatever privileges CyberClean has — this is the same CWE-78 class every
+    Linux branch in this file already avoids via shlex.quote(). Splitting
+    into argv and calling subprocess with shell=False removes cmd.exe from
+    the picture entirely: CreateProcess receives the arguments directly, so
+    there is no shell metacharacter interpretation left to exploit.
+
+    shlex.split(cmd_str, posix=False) is used (not posix mode) because
+    Windows paths use '\\' as a directory separator, which POSIX mode would
+    treat as an escape character and mangle. posix=False keeps quoted
+    segments intact and doesn't touch backslashes; we still need to strip
+    the surrounding quote characters it leaves on each token.
+    """
+    if not cmd_str or not cmd_str.strip():
+        return []
+    try:
+        tokens = shlex.split(cmd_str, posix=False)
+    except ValueError:
+        # Unbalanced quotes etc. — fall back to a single-token best-effort
+        # split so callers still get *something* runnable via argv rather
+        # than silently doing nothing; still never touches a shell.
+        tokens = cmd_str.split()
+    return [t[1:-1] if len(t) >= 2 and t[0] == '"' and t[-1] == '"' else t
+            for t in tokens]
+
+
 def _run_win_uninstall(
     app_name: str, reg_key: str, uninstall_str: str,
     quiet_str: str, log_cb: Callable
@@ -444,9 +541,12 @@ def _run_win_uninstall(
     """
     _NW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
 
-    def _run(cmd, timeout=120):
+    def _run(argv: list, timeout=120):
+        """Run a command directly (no shell), given as an argv list."""
+        if not argv:
+            return '', 1
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+            r = subprocess.run(argv, shell=False, capture_output=True, text=True,
                                timeout=timeout, creationflags=_NW)
             return r.stdout.strip() + r.stderr.strip(), r.returncode
         except Exception as e:
@@ -455,7 +555,7 @@ def _run_win_uninstall(
     # Strategy 1: QuietUninstallString (cleanest)
     if quiet_str:
         log_cb('  → Trying QuietUninstallString...', 'info')
-        out, code = _run(quiet_str)
+        out, code = _run(_win_argv(quiet_str))
         if code == 0:
             return out, code
 
@@ -469,10 +569,10 @@ def _run_win_uninstall(
         guid = guid_match.group(0) if guid_match else ''
         if guid:
             log_cb(f'  → MSI uninstall {guid}...', 'info')
-            out, code = _run(f'msiexec /x "{guid}" /qb- REBOOT=ReallySuppress 2>nul')
+            out, code = _run(['msiexec', '/x', guid, '/qb-', 'REBOOT=ReallySuppress'])
             if code in (0, 3010):
                 return out, 0
-            out, code = _run(f'msiexec /x "{guid}" /qn REBOOT=ReallySuppress 2>nul')
+            out, code = _run(['msiexec', '/x', guid, '/qn', 'REBOOT=ReallySuppress'])
             if code in (0, 3010):
                 return out, 0
             log_cb(f'  ✗ msiexec failed ({code}) — trying EXE fallback', 'warn')
@@ -499,32 +599,36 @@ def _run_win_uninstall(
 
         fname = _Path(exe).name.lower()
         existing_args_lower = args.lower()
+        # args (the trailing portion of uninstall_str after the exe path)
+        # can itself contain quoted segments, so it goes through _win_argv
+        # too rather than a plain .split() — same reasoning as above.
+        args_argv = _win_argv(args)
 
         if any(flag in existing_args_lower for flag in ('/s', '/silent', '/quiet', '/q', '--quiet')):
             log_cb('  → Running with existing silent flags...', 'info')
-            out, code = _run(f'"{exe}" {args}')
+            out, code = _run([exe] + args_argv)
             if code == 0:
                 return out, code
 
         if 'unins' in fname or 'inno' in fname:
             log_cb('  → Inno Setup silent uninstall...', 'info')
-            out, code = _run(f'"{exe}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART {args}')
+            out, code = _run([exe, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'] + args_argv)
             if code == 0: return out, code
-            out, code = _run(f'"{exe}" /SILENT /NORESTART {args}')
+            out, code = _run([exe, '/SILENT', '/NORESTART'] + args_argv)
             if code == 0: return out, code
 
         if 'nsis' in fname or fname in ('uninst.exe', 'uninstall.exe'):
             log_cb('  → NSIS silent uninstall...', 'info')
-            out, code = _run(f'"{exe}" /S {args}')
+            out, code = _run([exe, '/S'] + args_argv)
             if code == 0: return out, code
 
         for flag in ['/S', '/silent', '/quiet', '/Q', '--quiet', '/VERYSILENT']:
             log_cb(f'  → Trying {flag}...', 'info')
-            out, code = _run(f'"{exe}" {flag} {args}'.strip())
+            out, code = _run([exe, flag] + args_argv)
             if code == 0: return out, code
 
         log_cb('  → Running uninstaller (may show UI)...', 'warn')
-        out, code = _run(f'"{exe}" {args}'.strip())
+        out, code = _run([exe] + args_argv)
         return out, code
 
     return '', 1
@@ -544,58 +648,30 @@ def uninstall_app(app: InstalledApp, log_cb: Callable):
     log_cb(f'Uninstalling {app.name}...', 'info')
     out, code = '', 1
 
-    if app.source == 'pacman':
-        pkg = shlex.quote(app.pkg_id)
-        out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper pacman-remove {pkg} 2>/dev/null',
-            timeout=60,
-        )
-        if code != 0:
-            out, code = run(f'sudo pacman -Rns --noconfirm {pkg} 2>&1', timeout=60)
-
-    elif app.source == 'apt':
-        pkg = shlex.quote(app.pkg_id)
-        out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper apt-remove {pkg} 2>/dev/null',
-            timeout=60,
-        )
-        if code != 0:
-            out, code = run(f'sudo apt-get remove -y {pkg} 2>&1', timeout=60)
-
-    elif app.source == 'dnf':
-        pkg = shlex.quote(app.pkg_id)
-        out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper dnf-remove {pkg} 2>/dev/null',
-            timeout=60,
-        )
-        if code != 0:
-            out, code = run(f'sudo dnf remove -y {pkg} 2>&1', timeout=60)
-
-    elif app.source == 'zypper':
-        # NEW: zypper via helper
-        pkg = shlex.quote(app.pkg_id)
-        out, code = run(
-            f'sudo -n /usr/local/bin/cyber-clean-helper zypper-remove {pkg} 2>/dev/null',
-            timeout=60,
-        )
-        if code != 0:
-            out, code = run(f'sudo zypper remove -y {pkg} 2>&1', timeout=60)
-
-    elif app.source == 'xbps':
-        out, code = run(f'sudo xbps-remove -y {shlex.quote(app.pkg_id)} 2>&1', timeout=60)
+    if app.source in _PM_SOURCES:
+        # Hàng rào sớm cho UI; helper (chạy bằng root) kiểm tra lại độc lập.
+        if is_protected(app):
+            log_cb(f'  ✗ {app.pkg_id} is a protected system package (kernel / bootloader / init / sudo / '
+                   f'network…) — refusing to remove it.', 'err')
+            return False
+        # KHÔNG còn fallback `sudo pacman -Rns …` / `sudo apt-get remove …`: nếu helper từ chối (gói lõi, tên
+        # không hợp lệ) mà fallback vẫn chạy được (máy có sudo NOPASSWD: ALL) thì hàng rào bị vô hiệu hóa.
+        from . import privileged as P
+        r = P.run_helper(f'{app.source}-remove', app.pkg_id, timeout=300)
+        out, code = (r.out if r.ok else r.message), r.code
 
     elif app.source == 'flatpak':
-        out, code = run(f'flatpak uninstall -y {shlex.quote(app.pkg_id)} 2>&1', timeout=60)
+        if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.\-]{0,254}$', app.pkg_id or ''):
+            log_cb('  ✗ Invalid Flatpak id', 'err')
+            return False
+        out, code = _run_argv(['flatpak', 'uninstall', '-y', '--noninteractive', app.pkg_id], timeout=180)
 
     elif app.source == 'winget':
-        # winget's --id is already double-quoted here; shlex.quote() would
-        # add a second, POSIX-style quoting layer that Windows' cmd.exe
-        # does not interpret the same way — so this one keeps its existing
-        # quoting style rather than being "fixed" to match the others.
-        # winget package IDs are also far more format-constrained
-        # (Publisher.Product, no shell metacharacters in practice) than
-        # pacman/apt/flatpak names, which lowers the risk here further.
-        out, code = run(f'winget uninstall --id "{app.pkg_id}" --silent 2>nul', timeout=120)
+        # argv, không shell: tên gói lấy từ output của `winget list` — không được phép trở thành câu lệnh.
+        if not app.pkg_id or app.pkg_id.startswith('-'):
+            log_cb('  ✗ Invalid winget id', 'err')
+            return False
+        out, code = _run_argv(['winget', 'uninstall', '--id', app.pkg_id, '--exact', '--silent'], timeout=180)
 
     elif app.source == 'registry':
         parts         = app.pkg_id.split('|||', 2)
@@ -619,8 +695,12 @@ def uninstall_app(app: InstalledApp, log_cb: Callable):
                     log_cb(f'  i App may already be partially uninstalled.', 'warn')
                     return False
             try:
+                _argv = _win_argv(uninstall_str)
+                if not _argv:
+                    log_cb(f'  ✗ Empty uninstall command for {app.name}.', 'err')
+                    return False
                 subprocess.Popen(
-                    uninstall_str, shell=True,
+                    _argv, shell=False,
                     creationflags=_NO_WIN,
                 )
                 log_cb(f'  ✓ Opened uninstaller for {app.name}.', 'ok')

@@ -1,0 +1,4 @@
+NAME="Zorin OS"
+ID=zorin
+ID_LIKE="ubuntu debian"
+VERSION_ID="17"

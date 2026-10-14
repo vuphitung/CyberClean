@@ -57,11 +57,6 @@ UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClea
 ---
 
 <p align="center">
-  <img src="screenshots/scanner.png" width="100%">
-</p>
----
-
-<p align="center">
   <img src="screenshots/uninstaller.png" width="100%">
 </p>
 ---
@@ -84,16 +79,45 @@ Live system stats, auto-refreshes every 4 seconds.
 - CPU / RAM / Swap / Temperature / Network I/O
 - Top processes with one-click kill
 - Disk usage per mount point
-- System uptime · Startup items manager
+- System uptime
 
 ---
 
-### [✦] Smart Clean
-Dry-run preview before touching anything. Every deletion is logged. Targets are labelled **Safe / Caution / Danger**.
+### [✦] Smart Clean — three tiers, three pages
+CyberClean never guesses what is safe to delete. Every target belongs to one of three tiers, and each tier has **its own page** in the sidebar:
 
-**Linux** — package cache (pacman / apt / dnf / zypper / xbps), orphaned packages, AUR build cache, Flatpak runtimes, Docker/Podman images, Snap old revisions, journal logs, browser cache, pip cache, thumbnail cache, temp files.
+| Tier | Page | What | Behaviour |
+|------|------|------|-----------|
+| **AUTO** | **CLEAN** | Always regenerable: browser & Electron caches, thumbnails, rotated logs, package-manager caches, journal, old temp files, crash dumps | Ticked by default · the only tier the idle scheduler may run |
+| **REVIEW** | **DEEP CLEAN** | Things that *might* matter: orphaned packages, dev caches, Docker images/volumes, Flatpak/Snap leftovers, other `~/.cache` folders, the Trash | Categories on the left, every item on the right — **nothing is pre-ticked**, "select all" skips high-risk rows (their full warning is shown), every delete asks first (default: Cancel) · never runs in the background |
+| **ADVISOR** | **DISK ADVISOR** | Where the space *really* went: VMs, game libraries, `/opt`, heaviest packages, large files, old `node_modules`/`target`/venvs, Downloads, WSL disks | **Report only** — summary tiles, a share-of-disk bar, per-category cards, "open folder" and "copy report"; there is no delete button |
 
-**Windows** — Temp & `%TEMP%`, Prefetch, Recycle Bin, Windows Update cache, Delivery Optimization, Thumbnail DB, Font Cache, GPU Shader Cache, WinSxS, DNS flush, Event logs, WER crash dumps, browser cache (Chrome / Edge / Brave / Firefox / Vivaldi / Cốc Cốc).
+How a clean works (Linux + Windows share the same engine, `core/engine.py`):
+
+1. **Plan** — one scan produces a concrete list of items (real sizes, hard-links counted correctly).
+2. **Preview** — Dry-run shows exactly that plan.
+3. **Execute** — runs *that* plan, but re-checks every item right before deleting it: replaced? modified since the scan? the owning app started again? Anything that changed is skipped, never deleted.
+
+Guards applied to everything: age (untouched for N days + never anything modified in the last 10 min) · owning app must be closed (process list, Chromium `SingletonLock`, `--user-data-dir`) · file/dir not open by any process · symlinks and junctions never followed · mount points never crossed · directories containing sockets/FIFOs (live runtime state like `/tmp/.X11-unix`, `tmux-*`, `ssh-*`) are skipped · files of other users are skipped.
+
+Free space is measured with `shutil.disk_usage` before/after. If the filesystem is Btrfs/ZFS the app warns that snapshots may keep the space allocated.
+
+**Linux** — pacman / apt / dnf / zypper / xbps / apk / rpm-ostree (Fedora Atomic, Bazzite) / Nix · AUR build cache · Flatpak (user + system) · Docker/Podman · Snap · journal · browsers (every Chromium-based browser and Electron app via one rule — Chrome, Brave, Edge, Vivaldi, Opera, VS Code, Cursor, Discord, Slack…; Firefox incl. Snap/Flatpak) · pip · thumbnails · temp files.
+
+**Windows** — Temp, Thumbnail DB, WER reports, DNS flush (auto) · Recycle Bin, Prefetch, Windows Update / Delivery Optimization, Font & GPU shader cache, WinSxS, Event logs, crash dumps (review, one explicit item each) · browser caches via the same Chromium/Firefox rules · developer caches (npm, NuGet, Gradle, Maven, Cargo, Go, JetBrains…).
+
+> **Windows note** — this build's Windows-only calls (DISM, services, `wevtutil`) were not changed and could not be run in the CI sandbox; the engine, tiers, rules and guards are unit-tested.
+
+#### Rules, not code
+Path-based targets live in [`rules/linux.toml`](rules/linux.toml) and [`rules/windows.toml`](rules/windows.toml). A rule is data (`paths`, `mode`, `min_age_days`, `closed`, `keep`, `tier`…) — adding an app is a 6-line pull request that is easy to review. Personal rules go in `~/.config/cyber-clean/rules.d/*.toml`; they are forced into the **REVIEW** tier, limited to paths inside your home, and can never run unattended.
+
+```toml
+[[rule]]
+id     = "my-app-cache"
+target = "my_stuff"          # a target defined in the same file
+mode   = "children"          # each sub-folder becomes one item you can tick
+paths  = ["~/.cache/myapp"]
+```
 
 ---
 
@@ -109,17 +133,6 @@ Performance tweaks without crashes. Every change is fully reversible.
 - **[★] Smart Boost** — auto-detects PC tier (High / Mid / Low) by RAM + cores + GPU VRAM
 - **TCP Nagle Disable** — lower online game latency (Windows)
 - **Timer Resolution 1ms** — smoother frames (Windows)
-
----
-
-### [◉] Security Scanner
-Read-only deep scan — nothing deleted automatically. You decide what to fix.
-
-Scans: running processes · outbound TCP connections · SUID/SGID binaries · world-writable system files · cron backdoors · suspicious scripts in temp dirs · LD_PRELOAD hijacks · SSH authorized_keys · hosts file tampering · Windows autoruns.
-
-Each process goes through a multi-dimensional threat scoring matrix (+/− points per signal). Score ≥ 70 → critical. Score 40–69 → watchlist, re-checked every 5 minutes.
-
-> Cannot detect Ring-0 rootkits or UEFI implants. Good at: miners, reverse shells, cron backdoors, hosts hijacks, scripts running from `/tmp`.
 
 ---
 
@@ -144,7 +157,7 @@ Checks GitHub Releases on startup (background thread, non-blocking) — only sho
 ---
 
 ### [♪] System Tray & Auto-clean
-Minimize to tray. Auto-clean runs safe targets every 6 hours when idle (CPU < 20%, network < 500 KB/s). Pauses automatically when Game Mode is active.
+Minimize to tray. Auto-clean runs **only AUTO-tier targets flagged `scheduled`** every 6 hours when idle (CPU < 20%, network < 500 KB/s) and uses a stricter age policy than a manual clean (e.g. browser caches only if the browser has not been used for 7 days). It never touches the Trash, orphaned packages, dev caches, Docker or anything in the REVIEW tier, never shows a password prompt, and pauses automatically when Game Mode is active.
 
 ---
 
@@ -157,6 +170,10 @@ Minimize to tray. Auto-clean runs safe targets every 6 hours when idle (CPU < 20
 | Linux | Fedora · CentOS · Rocky · Nobara | dnf |
 | Linux | openSUSE Leap / Tumbleweed | zypper |
 | Linux | Void Linux | xbps |
+| Linux | Alpine | apk (source install) |
+| Linux | Fedora Atomic · Silverblue · Kinoite · Bazzite | rpm-ostree |
+| Linux | NixOS | nix-collect-garbage (user profile) |
+| Linux | Any derivative (Zorin, MX, Nobara, Garuda, KDE neon…) | detected through `ID_LIKE` in `/etc/os-release` |
 | Windows | 10 (1903+) | Full support |
 | Windows | 11 | Full support + EcoQoS |
 | Windows | ARM64 (Surface Pro X, Snapdragon) | Supported |
@@ -168,8 +185,9 @@ Minimize to tray. Auto-clean runs safe targets every 6 hours when idle (CPU < 20
 - **No telemetry** — zero data collection, zero network calls during normal operation
 - **No background service** — only runs when you open it
 - **Signed releases** — since v3.0.2, every release is signed with Ed25519; the public key ships inside the app, the private key never touches this repo. The updater refuses to install anything that isn't validly signed.
-- **Scoped privilege** — Linux sudoers rule grants access only to `/usr/local/bin/cyber-clean-helper`, not blanket sudo. The helper is a readable shell script you can audit.
-- **send2trash** — deleted files go to system Trash when available, not permanent delete
+- **Scoped privilege** — Linux sudoers rule grants access only to `/usr/local/bin/cyber-clean-helper`, not blanket sudo. The helper is a readable shell script ([`packaging/cyber-clean-helper`](packaging/cyber-clean-helper)) you can audit. Because the rule is `NOPASSWD`, **every** argument is treated as hostile: package names must match a strict pattern and can never become an option (`--`), core packages (kernel, bootloader, init, sudo, network…) are refused, deletion paths must be canonical, symlink-free, inside `/var/log` / `/var/crash` / coredump and under root-owned directories, and the helper offers no arbitrary copy/move/delete/stop-service primitive.
+- **Updates are verified twice** — the app checks the Ed25519 signature, then the root helper (`update-apply`) copies the package into a root-owned directory, **verifies the signature again**, rejects symlinks that escape the archive, requires a newer `VERSION` than the installed one (no downgrade/replay) and swaps the install atomically with rollback. `install.sh` verifies the same signature before unpacking.
+- **What is deleted permanently** — AUTO-tier caches are regenerable and are removed permanently (the confirmation says so). Anything that could be your data (Trash, packages, Docker volumes…) is only removed from the REVIEW dialog, item by item.
 
 ---
 
@@ -203,22 +221,35 @@ python build.py --inno
 ```
 CyberClean/
 ├── main.py                 # Main GUI (PyQt6)
+├── ui_widgets.py           # Custom widgets, icons, background QThread workers
+├── ui_pages.py             # DEEP CLEAN page (tier 2: review item by item) + DISK ADVISOR page (tier 3: report only)
 ├── version.py              # Single source of truth for version
+├── rules/
+│   ├── linux.toml          # Declarative clean rules (paths · age · closed-app · tier)
+│   └── windows.toml
+├── packaging/
+│   └── cyber-clean-helper  # Privileged helper (root) — shipped inside the signed release
+├── tests/                  # pytest: helper, engine, rules, cleaners, installer, UI
 ├── core/
-│   ├── base_cleaner.py     # Abstract cleaner interface
-│   ├── linux_cleaner.py    # Linux clean targets
-│   ├── windows_cleaner.py  # Windows clean targets
-│   ├── scanner.py          # Security scanner
+│   ├── engine.py           # plan → preview → guarded execute (age / process / open files / symlink / mount)
+│   ├── rules.py            # TOML rule loader + validator + plan builders (chromium / firefox / paths)
+│   ├── privileged.py       # the only door to the root helper (argv, error classification)
+│   ├── advisor.py          # report-only scanners (VMs, /opt, big files, old projects…)
+│   ├── base_cleaner.py     # Cleaner interface, tiers, Review types, plan mixin
+│   ├── linux_cleaner.py    # Linux code-driven targets (package managers, journal, Docker…)
+│   ├── windows_cleaner.py  # Windows code-driven targets
 │   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost
-│   ├── analyzer.py         # Idle scheduler · network view
+│   ├── game_boost_widget.py # Game Mode UI panel (GPU/game-process monitor threads)
+│   ├── analyzer.py         # Idle scheduler for auto-clean
 │   ├── uninstaller.py      # App uninstaller
 │   └── os_detect.py        # OS / distro / package manager detection
 ├── utils/
 │   ├── sysinfo.py          # psutil system snapshot
-│   ├── i18n.py             # 11-language translations
+│   ├── i18n.py             # English / Tiếng Việt translations
 │   └── updater.py          # In-app OTA updater
 ├── assets/
-│   └── logo.png
+│   ├── logo.png
+│   └── logo.ico
 ├── LibreHardwareMonitorLib.dll  # Windows temperature sensor
 └── install.sh              # Linux one-line installer
 ```

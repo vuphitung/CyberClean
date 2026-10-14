@@ -1,1266 +1,1085 @@
 """
-CyberClean v2.2 — Linux Cleaner
-FIX #2: _journal no longer uses time.sleep(1) in main thread.
-        Uses QTimer-safe approach — measures before, schedules check after.
-FIX #3: Flatpak version check before using --dry-run flag.
-FIX #7: bare except:pass in _user_cache and _tmp_files replaced with typed
-        PermissionError/OSError — errors surface in CleanResult.error, not silently dropped.
-FIX #8: _user_cache redesigned with 3-layer protection:
-        Layer 1 — Name whitelist (GPU, fonts, browsers, wallpaper daemons, theming tools...)
-        Layer 2 — Smart type guard: skip any item that IS or CONTAINS a socket/FIFO/device.
-                  Catches unknown apps without needing their name in any list.
-        Layer 3 — Recently-modified guard (< 30s): skip dirs active right now.
-        _tmp_files: added is_fifo() to guard list (was missing — FIFOs are also runtime IPC).
-Supports: pacman · apt · dnf · zypper · xbps (Void)
-Extras:   Flatpak · Docker/Podman · yay/paru AUR cache · snap old revisions
+CyberClean — Linux Cleaner (3.1)
+════════════════════════════════════════════════════════════════
+Thiết kế:
+  • AUTO   — tái tạo được, tick sẵn, được phép chạy nền (IdleScheduler).
+  • REVIEW — liệt kê từng mục cho người dùng tự chọn; KHÔNG BAO GIỜ tick sẵn,
+             KHÔNG BAO GIỜ chạy nền, KHÔNG BAO GIỜ đi qua clean(dry=False) —
+             chỉ qua review_clean() sau khi người dùng đã tick từng mục.
+  • Path-based targets nằm trong rules/linux.toml (rules → plan → execute có
+    guard: tuổi · tiến trình · file đang mở · symlink · mount · socket).
+  • Lệnh hệ thống (pacman/apt/dnf/journal...) chạy qua core/privileged.py →
+    packaging/cyber-clean-helper, KHÔNG dùng shell, KHÔNG có lối 'raw'.
+
+Hỗ trợ: pacman · apt · dnf (+ Fedora Atomic rpm-ostree) · zypper · xbps · apk · nix
+Extras: Flatpak · Docker/Podman · yay/paru AUR cache · snap · journal
 """
-import subprocess, re, time, shutil, shlex
-from pathlib import Path
-from .base_cleaner import BaseCleaner, CleanTarget, CleanResult
-from .os_detect import (PKG_MANAGER, HAS_POLKIT, IS_ROOT, SUDO,
-                         HAS_FLATPAK, HAS_DOCKER, HAS_YAY, HAS_PARU,
-                         CONTAINER_TOOL,
-                         safe_delete, HAS_POLKIT_AGENT,
-                         HAS_JOURNALCTL, HAS_SNAP, HAS_XBPS)
+import os
+import re
+import shutil
+import stat
+import subprocess
+import time
+from typing import Callable, Dict, List, Optional, Tuple
+
+from . import engine as E
+from . import privileged as P
+from . import rules as R
+from .base_cleaner import (BaseCleaner, PlanCleanerMixin, CleanTarget, CleanResult,
+                           ReviewItem, ReviewScan)
+from .os_detect import (PKG_MANAGER, HAS_FLATPAK, HAS_DOCKER, CONTAINER_TOOL, HAS_JOURNALCTL,
+                        HAS_SNAP, HAS_XBPS, HAS_APK, HAS_NIX, HAS_RPM_OSTREE, real_uid)
 
 JOURNAL_DAYS = 7
-PACMAN_KEEP  = 1
-TMP_DAYS     = 3
+JOURNAL_MAX_MB = 500
+PACMAN_KEEP = 2                     # giữ 2 bản gần nhất → còn đường downgrade
+LOG_ROOT = '/var/log'
+CRASH_ROOT = '/var/crash'
+COREDUMP_ROOT = '/var/lib/systemd/coredump'
+RECENT_SEC = 3600
+ROTATED_RE = re.compile(r'(\.(gz|bz2|xz|zst|old|bak|archived)|\.\d{1,2})$')
+PKG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+._:@-]{0,127}$')
+DOCKER_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$')
+FLATPAK_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$')
 
-def run(cmd, timeout=30):
+
+# ══════════════════════════════════════════════════════════════
+# Subprocess helpers (argv only — never a shell)
+# ══════════════════════════════════════════════════════════════
+
+def _cmd(argv: List[str], timeout: int = 30, input_text: Optional[str] = None) -> Tuple[str, str, int]:
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return r.stdout.strip(), r.returncode
-    except Exception as e:
-        return str(e), 1
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text,
+                           env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
+        return r.stdout, r.stderr, r.returncode
+    except FileNotFoundError:
+        return '', f'{argv[0]}: not found', 127
+    except subprocess.TimeoutExpired:
+        return '', 'timeout', 124
+    except Exception as e:                                         # pragma: no cover
+        return '', str(e), 1
+
+
+_UNITS = {'': 1, 'B': 1, 'K': 1024, 'M': 1024**2, 'G': 1024**3, 'T': 1024**4,
+          'KIB': 1024, 'MIB': 1024**2, 'GIB': 1024**3, 'TIB': 1024**4,
+          'KB': 1000, 'MB': 1000**2, 'GB': 1000**3, 'TB': 1000**4}
+
+
+def parse_size(text: str) -> int:
+    """'1.2G' / '803.5 MB' / '12 MiB' / '4096' → bytes. 0 nếu không đọc được."""
+    m = re.search(r'([\d]+(?:[.,]\d+)?)\s*([KMGT]?(?:i?B)?)\b', text or '', re.I)
+    if not m:
+        return 0
+    try:
+        v = float(m.group(1).replace(',', '.'))
+    except ValueError:
+        return 0
+    return int(v * _UNITS.get(m.group(2).upper(), 1))
+
 
 def ensure_privileged_session(log_cb=None) -> bool:
-    """
-    Pre-warm the sudo authentication session ONCE, before running a batch of
-    privileged clean targets, to avoid asking for a password once per target.
-
-    WHY THIS EXISTS:
-    Every privileged CleanTarget (paccache, broken-downloads, journal, ...)
-    calls run_privileged() independently. Each call tries `sudo -n` first
-    (silent, only succeeds if NOPASSWD is configured for the helper — this
-    is what install.sh sets up, and the normal/expected path for anyone who
-    installed via install.sh). If NOPASSWD is NOT configured for some reason
-    (install.sh not run, sudoers rule got removed, running from source
-    without installing, unusual distro sudo config...), `sudo -n` fails
-    immediately and each call falls through to `pkexec` independently —
-    on desktops without a running polkit agent (e.g. bare Hyprland/Sway with
-    no polkit-gnome/polkit-kde-agent), pkexec falls back to a *text* password
-    prompt in the terminal, once per target. Selecting "Clean Full" with
-    several root-needing targets then means typing the password 2-3+ times
-    in a row, which is confusing and easy to fail (see real report: 3
-    separate `pkexec` prompts for paccache / broken-downloads / clean-crash-dirs).
-
-    THE FIX: before looping over targets, make exactly ONE check:
-      1. `sudo -n true` — if this succeeds, NOPASSWD is already working.
-         Nothing else to do; every subsequent `sudo -n` call in the loop
-         will keep succeeding silently, same as today. Zero behavior change
-         for the normal, correctly-installed case.
-      2. If it fails, fall back to ONE interactive `sudo -v` call. This is
-         allowed to prompt for a password (unlike `sudo -n`), but it does so
-         only ONCE, and caches sudo's authentication timestamp (default ~15
-         minutes) — every `sudo -n` call made afterwards, for any target,
-         within that window succeeds without prompting again.
-      3. If even that fails (no tty available, wrong password, etc.), we
-         don't raise — individual targets still fall through to their
-         existing pkexec fallback exactly as before. This function can only
-         make things better (fewer prompts) or leave things exactly as they
-         already were; it never makes anything worse or blocks silently.
-
-    Returns True if a privileged session is available (either NOPASSWD was
-    already working, or the one-time sudo -v succeeded), False otherwise.
-    """
-    if IS_ROOT:
-        return True
-
-    # Step 1: is NOPASSWD already working? (the expected, normal case)
-    try:
-        r = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5)
-        if r.returncode == 0:
-            return True
-    except Exception:
-        pass
-
-    # Step 2: NOPASSWD isn't working — ask for the password ONCE via a real
-    # interactive sudo prompt (sudo handles reading it from the terminal
-    # itself; we don't need — and must never build — our own password UI).
-    # This only runs when the normal path already failed, so it adds no
-    # extra step for anyone whose install.sh setup is correct.
-    #
-    # TTY GUARD: sudo -v needs to read the password from a real terminal.
-    # If CyberClean was launched from a desktop icon (no attached tty —
-    # the common case for real end users, unlike a dev running it from a
-    # terminal), there's nothing for sudo to prompt on: it would either
-    # fail immediately with "no tty present" (harmless) or, on some sudo
-    # configs, hang waiting for input that can never arrive. Check for a
-    # usable tty first and skip straight to the existing per-target
-    # pkexec fallback (which has its own GUI-agent-or-text-prompt logic
-    # independent of our stdin) if there isn't one — this function must
-    # never introduce a hang that wasn't there before.
-    import sys
-    if not sys.stdin.isatty():
-        if log_cb:
-            log_cb(
-                '  i  No terminal attached — falling back to per-target '
-                'authentication prompts.',
-                'mute'
-            )
-        return False
-
-    if log_cb:
-        log_cb(
-            '  ⚠  NOPASSWD helper not configured — asking for your password '
-            'once for this session (re-run install.sh to avoid this).',
-            'warn'
-        )
-    try:
-        r = subprocess.run(['sudo', '-v'], timeout=120)
-        return r.returncode == 0
-    except Exception:
-        return False
+    """Giữ tên cũ cho ui_widgets — thực tế dùng P.ensure_session (kiểm tra bằng `ping`)."""
+    return P.ensure_session(log_cb)
 
 
-def run_privileged(action_key, raw_cmd=None, stdin_data=None):
-    """
-    Execute a privileged action via the NOPASSWD helper.
-    Priority: IS_ROOT → sudo -n NOPASSWD helper → pkexec (only if agent) → fail
-    Never blocks GUI.
+def run_privileged(action: str, *args: str, stdin: Optional[str] = None, timeout: int = 120):
+    """(output, exit_code) — tương thích tên cũ nhưng KHÔNG còn lối 'raw'."""
+    r = P.run_helper(action, *args, stdin=stdin, timeout=timeout)
+    return (r.out if r.ok else r.message), r.code
 
-    Special action_key='raw':
-      Runs raw_cmd via 'sudo -n' ONLY — never falls through to pkexec.
-      pkexec would popup a password dialog per-file (128 files = 128 popups = app freeze).
-      sudo -n returns immediately with error if NOPASSWD not configured.
-    """
-    if IS_ROOT:
-        cmd = raw_cmd or action_key
-        return run(cmd, timeout=120)
 
-    # 'raw' sentinel: sudo -n only, NEVER pkexec (would block GUI per-file)
-    if action_key == 'raw' and raw_cmd:
-        out, code = run(f'sudo -n {raw_cmd} 2>/dev/null', timeout=60)
-        if code == 0:
-            return out, 0
-        return 'Need root — run install.sh to configure NOPASSWD sudo', 1
+def _dir_bytes(paths) -> int:
+    total = 0
+    for p in paths:
+        ts = E.tree_stats(p)
+        total += ts.size + ts.shared
+    return total
 
-    # Named helper actions: try helper via sudo -n, then pkexec fallback
-    if action_key:
+
+def _rb(label: str, path: str, size: int, note: str = '') -> dict:
+    return {'time': time.strftime('%Y-%m-%dT%H:%M:%S'), 'type': label, 'path': path, 'size': size,
+            'note': note}
+
+
+# ══════════════════════════════════════════════════════════════
+# LinuxCleaner
+# ══════════════════════════════════════════════════════════════
+
+class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
+
+    def __init__(self):
+        self.ctx = R.RuleContext.detect()
+        E.set_owner_uid(real_uid())
         try:
-            result = subprocess.run(
-                ['sudo', '-n', '/usr/local/bin/cyber-clean-helper', action_key],
-                input=stdin_data or '',
-                capture_output=True, text=True, timeout=120
-            )
-            if result.returncode == 0:
-                return result.stdout.strip(), 0
-        except Exception:
-            pass
+            self.ruleset = R.load_default(self.ctx)
+        except Exception as e:                       # luật built-in hỏng → app vẫn chạy, chỉ thiếu target
+            self.ruleset = R.RuleSet()
+            self._rules_error = str(e)
+        else:
+            self._rules_error = ''
+        self._targets: Dict[str, CleanTarget] = {}
+        self._refresh_targets()
 
-        if HAS_POLKIT and HAS_POLKIT_AGENT:
-            try:
-                r = subprocess.run(
-                    ['pkexec', '/usr/local/bin/cyber-clean-helper', action_key],
-                    input=stdin_data or '', capture_output=True, text=True, timeout=60)
-                return r.stdout.strip(), r.returncode
-            except Exception as e:
-                return str(e), 1
-
-    elif raw_cmd:
-        out, code = run(f'sudo -n {raw_cmd} 2>/dev/null', timeout=60)
-        if code == 0:
-            return out, 0
-
-    return 'Need root — run install.sh to set up NOPASSWD or run with sudo', 1
-
-
-def _flatpak_supports_dry_run() -> bool:
-    """Check if installed flatpak version supports --dry-run flag (requires >= 1.9.0)."""
-    out, _ = run('flatpak --version 2>/dev/null')
-    m = re.search(r'(\d+)\.(\d+)', out)
-    if not m:
-        return False
-    major, minor = int(m.group(1)), int(m.group(2))
-    return (major, minor) >= (1, 9)
-
-
-class LinuxCleaner(BaseCleaner):
-
-    def get_targets(self):
-        targets = []
-
-        if PKG_MANAGER == 'pacman':
-            targets += [
-                CleanTarget('pacman_cache',  'Pacman Cache',
-                    f'Old package versions — keeps latest {PACMAN_KEEP}', 'safe', needs_root=True),
+    # ── target registry ────────────────────────────────────
+    def _code_targets(self) -> List[CleanTarget]:
+        t: List[CleanTarget] = []
+        pm = PKG_MANAGER
+        if pm == 'pacman':
+            t += [
+                CleanTarget('pacman_cache', 'Pacman Cache',
+                            f'Old package versions — keeps the latest {PACMAN_KEEP} (needs pacman-contrib)',
+                            'safe', needs_root=True),
                 CleanTarget('pacman_broken', 'Broken Downloads',
-                    'Interrupted download-* files in /var/cache/pacman',  'safe', needs_root=True),
+                            'Interrupted download-* / *.part in the pacman cache (skipped while pacman runs)',
+                            'safe', needs_root=True),
                 CleanTarget('orphaned_pkgs', 'Orphaned Packages',
-                    'Packages no longer needed by anything',               'caution', needs_root=True),
+                            'Packages no longer needed by anything — pick which to remove',
+                            'caution', needs_root=True, tier='review'),
             ]
-        elif PKG_MANAGER == 'apt':
-            targets += [
-                CleanTarget('apt_cache',      'APT Cache',
-                    'Downloaded .deb packages in /var/cache/apt',          'safe', needs_root=True),
+        elif pm == 'apt':
+            t += [
+                CleanTarget('apt_cache', 'APT Cache', 'Downloaded .deb packages in /var/cache/apt',
+                            'safe', needs_root=True),
                 CleanTarget('apt_autoremove', 'APT Autoremove',
-                    'Unused packages and old kernels',                     'caution', needs_root=True),
+                            'Unused packages and old kernels — pick which to remove',
+                            'caution', needs_root=True, tier='review'),
             ]
-        elif PKG_MANAGER == 'dnf':
-            targets += [
-                CleanTarget('dnf_cache', 'DNF Cache',
-                    'Downloaded RPM packages and metadata',                'safe', needs_root=True),
+        elif pm == 'dnf':
+            t += [
+                CleanTarget('dnf_cache', 'DNF Cache', 'Downloaded RPM packages and metadata',
+                            'safe', needs_root=True),
+                CleanTarget('dnf_autoremove', 'DNF Autoremove',
+                            'Unneeded dependencies — pick which to remove',
+                            'caution', needs_root=True, tier='review'),
             ]
-        elif PKG_MANAGER == 'zypper':
-            targets += [
-                CleanTarget('zypper_cache', 'Zypper Cache',
-                    'Downloaded packages in /var/cache/zypp',              'safe', needs_root=True),
-            ]
-        elif PKG_MANAGER == 'xbps' and HAS_XBPS:
-            targets += [
+        elif pm == 'zypper':
+            t.append(CleanTarget('zypper_cache', 'Zypper Cache', 'Downloaded packages in /var/cache/zypp',
+                                 'safe', needs_root=True))
+        elif pm == 'xbps' and HAS_XBPS:
+            t += [
                 CleanTarget('xbps_cache', 'XBPS Package Cache',
-                    'Obsolete packages in /var/cache/xbps (xbps-remove -o)', 'safe', needs_root=True),
+                            'Obsolete packages in /var/cache/xbps (xbps-remove -o)', 'safe', needs_root=True),
                 CleanTarget('xbps_orphaned', 'XBPS Orphaned Packages',
-                    'Packages no longer required (xbps-remove -O)',        'caution', needs_root=True),
+                            'Packages no longer required (xbps-remove -O)', 'caution',
+                            needs_root=True, tier='review'),
             ]
-
-        if HAS_YAY or HAS_PARU:
-            targets.append(CleanTarget('aur_cache', 'AUR Build Cache',
-                '~/.cache/yay and ~/.cache/paru build directories',        'safe'))
-
-        if HAS_FLATPAK:
-            targets.append(CleanTarget('flatpak', 'Flatpak Unused',
-                'Unused Flatpak runtimes and refs',                        'caution'))
-
-        if HAS_DOCKER:
-            targets.append(CleanTarget('docker', 'Docker/Podman Prune',
-                'Dangling images, stopped containers, unused volumes',     'caution'))
-
-        if HAS_SNAP:
-            targets.append(CleanTarget('snap_old', 'Snap Old Revisions',
-                'Disabled snap revisions only (current install kept)',      'caution', needs_root=True))
+        elif pm == 'apk' and HAS_APK:
+            t.append(CleanTarget('apk_cache', 'APK Cache', 'Package cache in /var/cache/apk (apk cache clean)',
+                                 'safe', needs_root=True))
+        elif pm == 'rpm-ostree' and HAS_RPM_OSTREE:
+            t.append(CleanTarget('rpm_ostree', 'rpm-ostree Cache',
+                                 'Base + rpm-md caches (rpm-ostree cleanup -bm) — deployments are kept',
+                                 'safe', needs_root=True))
+        elif pm == 'nix' and HAS_NIX:
+            t.append(CleanTarget('nix_gc', 'Nix Garbage Collection',
+                                 'Delete old user-profile generations and unreferenced store paths',
+                                 'caution', tier='review'))
 
         if HAS_JOURNALCTL:
-            targets.append(
-                CleanTarget('journal', 'Journal Logs',
-                    f'systemd logs older than {JOURNAL_DAYS} days',       'safe'),
-            )
-
-        targets += [
-            CleanTarget('user_cache',    'User Cache (~/.cache)',
-                'App caches — 3-layer guard: name list + socket detect + activity check', 'safe'),
-            CleanTarget('chrome_cache',  'Chrome / Chromium Cache',
-                'Browser cache — auto-rebuilds on next launch',           'safe'),
-            CleanTarget('firefox_cache', 'Firefox Cache',
-                'Browser cache — auto-rebuilds on next launch',           'safe'),
-            CleanTarget('thumbnails',    'Thumbnails',
-                'File manager previews — auto-rebuilds',                  'safe'),
-            CleanTarget('pip_cache',     'Pip Cache',
-                '~/.cache/pip downloaded wheels',                          'safe'),
-            CleanTarget('tmp_files',     'Temp Files',
-                f'/tmp files older than {TMP_DAYS} days, not in use',    'safe'),
-            CleanTarget('empty_trash',   'Empty Trash',
-                'Permanently delete files in ~/.local/share/Trash',        'safe'),
-            CleanTarget('system_logs',   'Old System Logs',
-                '/var/log rotated logs (.gz, .1, .old) — active logs kept', 'safe',
-                needs_root=True),
+            t.append(CleanTarget('journal', 'Journal Logs',
+                                 f'systemd logs older than {JOURNAL_DAYS} days (capped at {JOURNAL_MAX_MB} MB)',
+                                 'safe', needs_root=True))
+        t += [
+            CleanTarget('system_logs', 'Old System Logs',
+                        '/var/log rotated logs (.gz, .1, .old) — active logs kept', 'safe', needs_root=True),
             CleanTarget('crash_reports', 'Crash Reports',
-                '/var/crash dumps + ~/.local/share/apport + systemd coredumps', 'safe'),
-            CleanTarget('dev_cache',     'Developer Caches',
-                'npm, yarn, gradle, cargo, maven, go cache — re-downloads on next build',
-                'caution'),
+                        '/var/crash dumps + ~/.local/share/apport + systemd coredumps (older than 1 h)',
+                        'safe', needs_root=True),
+            CleanTarget('empty_trash', 'Trash',
+                        'Files you deleted — permanently removed only for the items YOU tick',
+                        'caution', tier='review'),
         ]
-        # ── Warn user if distro not recognized (no pkg manager targets) ──────
+        if HAS_FLATPAK:
+            t.append(CleanTarget('flatpak', 'Flatpak Unused Runtimes',
+                                 'Runtimes no installed app needs (user + system)', 'caution', tier='review'))
+        if HAS_DOCKER:
+            t.append(CleanTarget('docker', 'Docker/Podman',
+                                 'Dangling images, stopped containers, build cache, unused volumes — pick items',
+                                 'caution', tier='review'))
+        if HAS_SNAP:
+            t.append(CleanTarget('snap_old', 'Snap Old Revisions',
+                                 'Disabled snap revisions only (current install kept)', 'caution',
+                                 needs_root=True, tier='review'))
+        return t
+
+    def _refresh_targets(self) -> None:
+        by: Dict[str, CleanTarget] = {}
+        for td in self.ruleset.target_defs(self.ctx):
+            by[td.id] = CleanTarget(td.id, td.name, td.desc, td.safety, needs_root=td.needs_root,
+                                    tier=td.tier, scheduled=td.scheduled)
+        for ct in self._code_targets():
+            by[ct.id] = ct
+        # crash_reports / system_logs có phần root → needs_root cho UI
+        self._targets = by
+
+    ORDER = ['pacman_cache', 'pacman_broken', 'apt_cache', 'dnf_cache', 'zypper_cache', 'xbps_cache',
+             'apk_cache', 'rpm_ostree', 'aur_cache', 'journal', 'chromium_cache', 'firefox_cache',
+             'thumbnails', 'pip_cache', 'tmp_files', 'system_logs', 'crash_reports',
+             'orphaned_pkgs', 'apt_autoremove', 'dnf_autoremove', 'xbps_orphaned', 'flatpak',
+             'flatpak_cache', 'docker', 'snap_old', 'nix_gc', 'dev_cache', 'app_cache', 'empty_trash']
+
+    def get_targets(self) -> List[CleanTarget]:
+        order = {tid: i for i, tid in enumerate(self.ORDER)}
+        out = sorted(self._targets.values(), key=lambda t: (t.tier != 'auto', order.get(t.id, 999)))
         if not PKG_MANAGER:
-            # Insert an informational pseudo-target at top so user sees the warning
-            targets.insert(0, CleanTarget(
-                id='_unknown_distro_warn',
-                name='⚠ Package Manager Not Detected',
-                desc=f'Distro not recognized — package cache targets unavailable. '
-                     f'Run: cat /etc/os-release',
-                safety='caution',
-                enabled=False,
-            ))
-        return targets
+            out.insert(0, CleanTarget(
+                id='_unknown_distro_warn', name='⚠ Package Manager Not Detected',
+                desc='Distro not recognized — package cache targets unavailable. Run: cat /etc/os-release',
+                safety='caution', enabled=False, tier='auto', scheduled=False))
+        return out
 
+    # ── entry points ───────────────────────────────────────
     def estimate(self, target_id: str) -> int:
-        return self._run_target(target_id, dry=True).freed_bytes
+        return self.clean(target_id, dry=True).freed_bytes
 
-    def clean(self, target_id: str, dry: bool = True) -> CleanResult:
-        return self._run_target(target_id, dry=dry)
-
-    def _run_target(self, tid, dry):
-        result = CleanResult(target_id=tid)
-        if tid.startswith('_'):
+    def clean(self, target_id: str, dry: bool = True, *, unattended: bool = False,
+              plan: Optional[E.Plan] = None) -> CleanResult:
+        result = CleanResult(target_id=target_id, dry=dry)
+        if target_id.startswith('_'):
             result.error = 'Info-only target — nothing to clean'
             return result
+        tgt = self._targets.get(target_id)
+        if tgt is None:
+            result.error = f'Unknown target: {target_id}'
+            return result
+        # Hàng rào cứng của tier — kể cả khi UI/scheduler gọi nhầm:
+        if unattended and not tgt.scheduled:
+            result.error = 'Not allowed to run unattended'
+            return result
+        if not dry and tgt.tier != 'auto':
+            result.error = 'Review targets are cleaned item-by-item from the Review dialog'
+            return result
         try:
-            fn = {
-                'pacman_cache':  self._pacman_cache,
-                'pacman_broken': self._pacman_broken,
-                'orphaned_pkgs': self._orphaned_pkgs,
-                'apt_cache':     self._apt_cache,
-                'apt_autoremove':self._apt_autoremove,
-                'dnf_cache':     self._dnf_cache,
-                'zypper_cache':  self._zypper_cache,
-                'xbps_cache':    self._xbps_cache,
-                'xbps_orphaned': self._xbps_orphaned,
-                'aur_cache':     self._aur_cache,
-                'flatpak':       self._flatpak,
-                'docker':        self._docker,
-                'snap_old':      self._snap_old,
-                'journal':       self._journal,
-                'user_cache':    self._user_cache,
-                'chrome_cache':  lambda d: self._browser_or_thumbs('chrome_cache', d),
-                'firefox_cache': lambda d: self._browser_or_thumbs('firefox_cache', d),
-                'thumbnails':    lambda d: self._browser_or_thumbs('thumbnails', d),
-                'pip_cache':     self._pip_cache,
-                'tmp_files':     self._tmp_files,
-                'empty_trash':   self._empty_trash,
-                'system_logs':   self._system_logs,
-                'crash_reports': self._crash_reports,
-                'dev_cache':     self._dev_cache,
-            }.get(tid)
-            if fn: result = fn(dry)
+            fn = self._handlers().get(target_id)
+            if fn:
+                return fn(dry, unattended)
+            if tgt.tier == 'review' and not self.has_rules(target_id):       # chỉ để ước tính dung lượng
+                scan = self.review_scan(target_id)
+                result.freed_bytes = result.planned_bytes = sum(i.size for i in scan.items if not i.blocked)
+                result.notes = list(scan.notes)
+                return result
+            if self.has_rules(target_id):
+                return self.clean_rule_target(target_id, dry, unattended, plan, label=tgt.name)
+            result.error = f'No implementation for target {target_id}'
         except Exception as e:
             result.error = str(e)
         return result
 
-    # ── Pacman ────────────────────────────────────────────
-    def _pacman_cache(self, dry):
-        r = CleanResult('pacman_cache')
-        out, _ = run(f'paccache -dk{PACMAN_KEEP} 2>/dev/null')
-        m = re.search(r'([\d.]+)\s*(MiB|GiB|KiB|B)(?!\w)', out)
-        if m:
-            v, u = float(m.group(1)), m.group(2)
-            r.freed_bytes = int(v * (1024**2 if 'MiB' in u else 1024**3 if 'GiB' in u else 1024 if 'KiB' in u else 1))
-        if not dry:
-            out2, code = run_privileged('paccache')
-            if code != 0: r.error = out2
+    def _handlers(self) -> Dict[str, Callable]:
+        return {
+            'pacman_cache': self._pacman_cache, 'pacman_broken': self._pacman_broken,
+            'apt_cache': lambda d, u: self._simple_cache('apt_cache', d, ['/var/cache/apt/archives',
+                                                         '/var/cache/apt/pkgcache.bin',
+                                                         '/var/cache/apt/srcpkgcache.bin'], 'apt-clean'),
+            'dnf_cache': lambda d, u: self._simple_cache('dnf_cache', d, ['/var/cache/dnf', '/var/cache/libdnf5'],
+                                                         'dnf-clean'),
+            'zypper_cache': lambda d, u: self._simple_cache('zypper_cache', d, ['/var/cache/zypp'], 'zypper-clean'),
+            'xbps_cache': lambda d, u: self._simple_cache('xbps_cache', d, ['/var/cache/xbps'], 'xbps-clean-cache'),
+            'apk_cache': lambda d, u: self._simple_cache('apk_cache', d, ['/var/cache/apk'], 'apk-clean'),
+            'rpm_ostree': lambda d, u: self._simple_cache('rpm_ostree', d, [], 'rpm-ostree-cleanup'),
+            'journal': self._journal,
+            'system_logs': self._system_logs, 'crash_reports': self._crash_reports,
+        }
+
+    # ── mixin hooks ────────────────────────────────────────
+    def build_plan(self, target_id: str, *, unattended: bool = False) -> E.Plan:
+        plan = self.ruleset.plan(target_id, self.ctx, unattended=unattended) if self.has_rules(target_id) \
+            else E.Plan(target_id)
+        extra = {'crash_reports': self._crash_root_items, 'system_logs': self._log_items}.get(target_id)
+        if extra:
+            plan.items += extra()
+        if target_id == 'empty_trash':
+            return self._trash_plan()
+        return plan
+
+    def _execute(self, items: List[E.PlanItem]) -> E.ExecResult:
+        """Mục có meta['helper'] chạy bằng helper root; phần còn lại qua engine."""
+        mine = [i for i in items if not i.meta.get('helper')]
+        helper = [i for i in items if i.meta.get('helper')]
+        res = E.execute_plan(mine, guards=E.Guards(max_age=0)) if mine else E.ExecResult()
+        meter = E.FreeSpaceMeter([i.path for i in helper]) if helper else None
+        if meter:
+            meter.begin()
+        for it in helper:
+            out = self._exec_helper_files(it)
+            res.outcomes.append(out)
+            if out.status in ('removed', 'partial'):
+                res.freed += out.freed
+                res.removed += out.removed
+            if out.status in ('skipped', 'partial') and out.reason:
+                res.skipped.append((it.path, out.reason))
+            if out.status == 'failed':
+                res.errors.append(f'{it.display}: {out.reason}')
+        if meter:
+            extra = meter.end()
+            if extra is not None:
+                res.measured = (res.measured or 0) + extra
+        return res
+
+    # ══════════════════════════════════════════════════════
+    # Package-manager caches (helper chạy bằng root)
+    # ══════════════════════════════════════════════════════
+    def _simple_cache(self, tid: str, dry: bool, dirs: List[str], action: str) -> CleanResult:
+        label = self._targets[tid].name
+        r = CleanResult(tid, dry=dry)
+        before = _dir_bytes([d for d in dirs if os.path.exists(d)])
+        r.planned_bytes = before
+        if dry:
+            r.freed_bytes = before
+            if before:
+                r.rollback.append(_rb(label, ', '.join(d for d in dirs if os.path.exists(d)), before,
+                                      'package cache — re-downloaded when needed'))
+            return r
+        h = P.run_helper(action, timeout=300)
+        if not h.ok:
+            r.error = h.message
+            return r
+        after = _dir_bytes([d for d in dirs if os.path.exists(d)])
+        r.freed_bytes = max(before - after, 0)
+        r.rollback.append(_rb(label, ', '.join(dirs), r.freed_bytes, 'package cache'))
+        self._cache_invalidate(tid)
         return r
 
-    def _pacman_broken(self, dry):
-        r = CleanResult('pacman_broken')
-        broken = list(Path('/var/cache/pacman/pkg').glob('download-*'))
-        r.freed_bytes = sum(f.stat().st_size for f in broken if f.exists())
-        r.files_removed = len(broken)
-        if not dry:
-            _, code = run_privileged('broken-downloads')
-            if code != 0: r.error = 'Need root'
+    @staticmethod
+    def _pacman_cache_dirs() -> List[str]:
+        out, _, code = _cmd(['pacman-conf', 'CacheDir'], 10)
+        dirs = [l.strip().rstrip('/') for l in out.splitlines() if l.strip().startswith('/')] if code == 0 else []
+        return dirs or ['/var/cache/pacman/pkg']
+
+    @staticmethod
+    def _pacman_busy() -> bool:
+        if os.path.exists('/var/lib/pacman/db.lck'):
+            return True
+        return bool(E.Guards().running(['pacman']))
+
+    def _pacman_cache(self, dry: bool, unattended: bool = False) -> CleanResult:
+        r = CleanResult('pacman_cache', dry=dry)
+        if not shutil.which('paccache'):
+            # Trước đây: ước tính 0 B còn khi dọn thật báo nhầm "Need root". Nay nói đúng nguyên nhân.
+            r.error = 'paccache not found — install pacman-contrib (sudo pacman -S pacman-contrib)'
+            return r
+        if self._pacman_busy():
+            r.notes.append('pacman is running (db.lck) — skipped for now')
+            return r
+        dirs = [d for d in self._pacman_cache_dirs() if os.path.isdir(d)]
+        before = _dir_bytes(dirs)
+        est = 0
+        for flags in (f'-dvk{PACMAN_KEEP}', '-duvk0'):
+            out, _, _ = _cmd(['paccache', flags, *sum((['-c', d] for d in dirs), [])], 60)
+            m = re.search(r'disk space saved:\s*([\d.,]+\s*[KMGT]?i?B)', out)
+            if m:
+                est += parse_size(m.group(1))
+        r.planned_bytes = est
+        if dry:
+            r.freed_bytes = est
+            if est:
+                r.rollback.append(_rb('Pacman Cache', ', '.join(dirs), est,
+                                      f'old versions beyond the latest {PACMAN_KEEP} + uninstalled packages'))
+            return r
+        h = P.run_helper('paccache', timeout=300)
+        if not h.ok:
+            r.error = h.message
+            return r
+        r.freed_bytes = max(before - _dir_bytes(dirs), 0)
+        r.rollback.append(_rb('Pacman Cache', ', '.join(dirs), r.freed_bytes, 'old package versions'))
+        self._cache_invalidate('pacman_cache')
         return r
 
-    def _orphaned_pkgs(self, dry):
-        r = CleanResult('orphaned_pkgs')
-        out, _ = run('pacman -Qdtq 2>/dev/null')
-        pkgs = [l.strip() for l in out.splitlines() if l.strip()]
-        r.files_removed = len(pkgs)
-        if pkgs and not dry:
-            import subprocess as _sp
-            r2 = _sp.run(
-                ['sudo', '-n', '/usr/local/bin/cyber-clean-helper', 'pacman-remove'] + pkgs,
-                capture_output=True, text=True, timeout=120)
-            code = r2.returncode
-            if code == 0:
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'orphaned_packages', 'path': ' '.join(pkgs), 'size': 0,
-                    'note': f'Restore: sudo pacman -S {" ".join(pkgs)}'
-                })
-            else:
-                r.error = 'Need root'
+    def _pacman_broken(self, dry: bool, unattended: bool = False) -> CleanResult:
+        r = CleanResult('pacman_broken', dry=dry)
+        if self._pacman_busy():
+            r.notes.append('pacman is running (db.lck) — skipped for now')
+            return r
+        now = time.time()
+        found: List[Tuple[str, int]] = []
+        for d in self._pacman_cache_dirs():
+            for e in E.iter_dir(d):
+                if not (e.name.startswith('download-') or e.name.endswith('.part')):
+                    continue
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if E.is_link_like(st) or now - st.st_mtime < RECENT_SEC:
+                    continue
+                ts = E.tree_stats(e.path)                    # download-XXXX/ là THƯ MỤC trên pacman ≥ 6
+                found.append((e.path, ts.size + ts.shared))
+        total = sum(s for _, s in found)
+        r.planned_bytes = total
+        if dry:
+            r.freed_bytes = total
+            r.rollback = [_rb('Broken Downloads', p, s, 'partial download') for p, s in found]
+            return r
+        if not found:
+            return r
+        h = P.run_helper('broken-downloads', timeout=120)
+        if not h.ok:
+            r.error = h.message
+            return r
+        gone = [(p, s) for p, s in found if not os.path.lexists(p)]
+        r.freed_bytes = sum(s for _, s in gone)
+        r.files_removed = len(gone)
+        r.rollback = [_rb('Broken Downloads', p, s, 'partial download') for p, s in gone]
+        self._cache_invalidate('pacman_broken')
         return r
 
-    # ── APT ───────────────────────────────────────────────
-    def _apt_cache(self, dry):
-        r = CleanResult('apt_cache')
-        out, _ = run('du -sb /var/cache/apt/archives 2>/dev/null')
-        try: r.freed_bytes = int(out.split()[0])
-        except (ValueError, IndexError): pass
-        if not dry:
-            _, code = run_privileged('apt-clean')
-            if code != 0: r.error = 'Need root'
+    # ══════════════════════════════════════════════════════
+    # Journal
+    # ══════════════════════════════════════════════════════
+    @staticmethod
+    def _journal_usage() -> int:
+        out, _, _ = _cmd(['journalctl', '--disk-usage'], 15)
+        return parse_size(out.split('take up')[-1]) if 'take up' in out else parse_size(out)
+
+    @staticmethod
+    def _journal_estimate() -> int:
+        """Ước tính từ file journal đã archive (đọc được cho mọi user): quá hạn + vượt trần dung lượng."""
+        files: List[Tuple[float, int]] = []
+        total = 0
+        for base in ('/var/log/journal', '/run/log/journal'):
+            for d in E.iter_dir(base):
+                if not d.is_dir(follow_symlinks=False):
+                    continue
+                for f in E.iter_dir(d.path):
+                    if not f.name.endswith(('.journal', '.journal~')):
+                        continue
+                    try:
+                        st = f.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    total += st.st_size
+                    if '@' in f.name:                          # archived: system@<id>.journal
+                        files.append((st.st_mtime, st.st_size))
+        cutoff = time.time() - JOURNAL_DAYS * 86400
+        freed = sum(s for m, s in files if m < cutoff)
+        remaining = total - freed
+        cap = JOURNAL_MAX_MB * 1024 * 1024
+        for m, s in sorted(f for f in files if f[0] >= cutoff):
+            if remaining <= cap:
+                break
+            freed += s
+            remaining -= s
+        return freed
+
+    def _journal(self, dry: bool, unattended: bool = False) -> CleanResult:
+        r = CleanResult('journal', dry=dry)
+        if not HAS_JOURNALCTL:
+            r.error = 'journalctl not available (non-systemd / minimal init)'
+            return r
+        before = self._journal_usage()
+        if dry:
+            r.freed_bytes = r.planned_bytes = self._journal_estimate()
+            if r.freed_bytes:
+                r.rollback.append(_rb('Journal Logs', '/var/log/journal',
+                                      r.freed_bytes, f'older than {JOURNAL_DAYS} days or above {JOURNAL_MAX_MB} MB'))
+            return r
+        # journalctl --vacuum chạy bằng quyền user KHÔNG dọn được journal hệ thống (và vẫn trả về 0),
+        # nên trước đây nhánh helper hầu như không bao giờ được gọi. Luôn dùng helper.
+        h = P.run_helper('journal', timeout=120)
+        if not h.ok:
+            r.error = h.message
+            return r
+        r.freed_bytes = max(before - self._journal_usage(), 0)
+        r.rollback.append(_rb('Journal Logs', '/var/log/journal', r.freed_bytes, 'vacuumed'))
+        self._cache_invalidate('journal')
         return r
 
-    def _apt_autoremove(self, dry):
-        r = CleanResult('apt_autoremove')
-        out, _ = run('apt-get autoremove --dry-run 2>/dev/null | grep "^Remv" | wc -l')
-        try: r.files_removed = int(out)
-        except (ValueError, IndexError): pass
-        if not dry:
-            _, code = run_privileged('apt-autoremove')
-            if code != 0: r.error = 'Need root'
-        return r
+    # ══════════════════════════════════════════════════════
+    # Root-owned files listed by Python, VALIDATED again by the helper
+    # ══════════════════════════════════════════════════════
+    @staticmethod
+    def _trusted(st) -> bool:
+        return st.st_uid == 0 and not (st.st_mode & 0o022)
 
-    # ── DNF ───────────────────────────────────────────────
-    def _dnf_cache(self, dry):
-        r = CleanResult('dnf_cache')
-        out, _ = run('du -sb /var/cache/dnf 2>/dev/null')
-        try: r.freed_bytes = int(out.split()[0])
-        except (ValueError, IndexError): pass
-        if not dry:
-            _, code = run_privileged('dnf-clean')
-            if code != 0: r.error = 'Need root'
-        return r
+    def _files_item(self, root: str, files: List[Tuple[str, int, int, int, int]], label: str, helper: str,
+                    note: str) -> Optional[E.PlanItem]:
+        if not files:
+            return None
+        it = E.make_files_item(root, files, label=label, group=helper, note=note, basis='mtime')
+        it.meta['helper'] = helper
+        return it
 
-    # ── Zypper ────────────────────────────────────────────
-    def _zypper_cache(self, dry):
-        r = CleanResult('zypper_cache')
-        out, _ = run('du -sb /var/cache/zypp 2>/dev/null')
-        try: r.freed_bytes = int(out.split()[0])
-        except (ValueError, IndexError): pass
-        if not dry:
-            _, code = run_privileged('zypper-clean')
-            if code != 0: r.error = 'Need root'
-        return r
-
-    # ── XBPS (Void Linux) ─────────────────────────────────
-    def _xbps_cache(self, dry):
-        r = CleanResult('xbps_cache')
-        out, _ = run('du -sb /var/cache/xbps 2>/dev/null')
+    def _log_items(self) -> List[E.PlanItem]:
+        if not os.path.isdir(LOG_ROOT):
+            return []
+        now = time.time()
+        files: List[Tuple[str, int, int, int, int]] = []
         try:
-            r.freed_bytes = int(out.split()[0])
-        except (ValueError, IndexError):
-            pass
-        if not dry:
-            _, code = run_privileged('xbps-clean-cache')
-            if code != 0:
-                r.error = 'Need root or install.sh helper with xbps-clean-cache'
+            root_st = os.lstat(LOG_ROOT)
+        except OSError:
+            return []
+        stack = [(LOG_ROOT, 0)]
+        while stack:
+            cur, depth = stack.pop()
+            try:
+                if cur != LOG_ROOT and not self._trusted(os.lstat(cur)):
+                    continue                                   # helper cũng sẽ từ chối thư mục không đáng tin
+            except OSError:
+                continue
+            for e in E.iter_dir(cur):
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if E.is_link_like(st) or '\n' in e.name:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    if depth < 3 and st.st_dev == root_st.st_dev:
+                        stack.append((e.path, depth + 1))
+                elif stat.S_ISREG(st.st_mode) and ROTATED_RE.search(e.name) and st.st_nlink == 1:
+                    if now - st.st_mtime >= RECENT_SEC:
+                        files.append((e.path, st.st_mtime_ns, st.st_ino, st.st_size, st.st_ctime_ns))
+        it = self._files_item(LOG_ROOT, files, '/var/log (rotated)', 'clean-rotated-logs', 'rotated / compressed logs')
+        return [it] if it else []
+
+    def _crash_root_items(self) -> List[E.PlanItem]:
+        now = time.time()
+        files: List[Tuple[str, int, int, int, int]] = []
+        for root, ok_name in ((CRASH_ROOT, lambda n: n.endswith(('.crash', '.upload', '.uploaded'))),
+                              (COREDUMP_ROOT, lambda n: n.startswith('core.'))):
+            for e in E.iter_dir(root):
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if (stat.S_ISREG(st.st_mode) and not E.is_link_like(st) and ok_name(e.name)
+                        and '\n' not in e.name and now - st.st_mtime >= RECENT_SEC):
+                    files.append((e.path, st.st_mtime_ns, st.st_ino, st.st_size, st.st_ctime_ns))
+        it = self._files_item('/var/crash', files, 'System crash dumps', 'clean-crash-dirs',
+                              'crash / core dumps')
+        return [it] if it else []
+
+    def _exec_helper_files(self, item: E.PlanItem) -> E.Outcome:
+        files = item.meta.get('files', [])
+        keep = []
+        for path, mtime_ns, ino, size, ctime_ns in files:
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if st.st_ino == ino and st.st_mtime_ns == mtime_ns and st.st_ctime_ns == ctime_ns:
+                keep.append((path, size))
+        if not keep:
+            return E.Outcome(item, 'gone', reason='nothing left to remove')
+        h = P.run_helper(item.meta['helper'], stdin='\n'.join(p for p, _ in keep) + '\n', timeout=300)
+        if not h.ok:
+            return E.Outcome(item, 'failed', reason=h.message)
+        gone = [(p, s) for p, s in keep if not os.path.lexists(p)]
+        freed = sum(s for _, s in gone)
+        status = 'removed' if len(gone) == len(keep) else 'partial'
+        reason = '' if status == 'removed' else f'{len(keep) - len(gone)} files refused by the helper (not trusted / changed)'
+        return E.Outcome(item, status, freed, len(gone), reason)
+
+    def _system_logs(self, dry: bool, unattended: bool = False) -> CleanResult:
+        plan = E.Plan('system_logs', self._log_items())
+        return self.result_from_plan('system_logs', plan, dry=dry, label='Old System Logs')
+
+    def _crash_reports(self, dry: bool, unattended: bool = False) -> CleanResult:
+        plan = self.build_plan('crash_reports', unattended=unattended)
+        return self.result_from_plan('crash_reports', plan, dry=dry, label='Crash Reports')
+
+    # ══════════════════════════════════════════════════════
+    # REVIEW tier
+    # ══════════════════════════════════════════════════════
+    def review_scan(self, target_id: str, progress_cb=None) -> ReviewScan:
+        fn = {
+            'orphaned_pkgs': self._rv_pacman_orphans, 'apt_autoremove': self._rv_apt_autoremove,
+            'dnf_autoremove': self._rv_dnf_autoremove, 'xbps_orphaned': self._rv_xbps_orphans,
+            'flatpak': self._rv_flatpak, 'docker': self._rv_docker, 'snap_old': self._rv_snap,
+            'nix_gc': self._rv_nix, 'empty_trash': self._rv_trash, 'flatpak_cache': self._rv_flatpak_cache,
+        }.get(target_id)
+        tgt = self._targets.get(target_id)
+        if tgt is None or tgt.tier != 'review':
+            raise ValueError(f'{target_id} is not a review target')
+        if fn:
+            return fn()
+        return PlanCleanerMixin.review_scan(self, target_id, progress_cb)
+
+    def review_clean(self, target_id: str, item_ids: List[str], dry: bool = False) -> CleanResult:
+        tgt = self._targets.get(target_id)
+        if tgt is None or tgt.tier != 'review':
+            r = CleanResult(target_id, dry=dry)
+            r.error = f'{target_id} is not a review target'
+            return r
+        fn = {
+            'orphaned_pkgs': self._rc_pacman_orphans, 'apt_autoremove': self._rc_apt_autoremove,
+            'dnf_autoremove': self._rc_dnf_autoremove, 'xbps_orphaned': self._rc_xbps_orphans,
+            'flatpak': self._rc_flatpak, 'docker': self._rc_docker, 'snap_old': self._rc_snap,
+            'nix_gc': self._rc_nix, 'empty_trash': self._rc_trash,
+        }.get(target_id)
+        if fn:
+            return fn(item_ids, dry)
+        return PlanCleanerMixin.review_clean(self, target_id, item_ids, dry)
+
+    # ── helpers for list-style review ─────────────────────
+    @staticmethod
+    def _pkg_items(names: List[str], sizes: Dict[str, int], detail: str = '') -> List[ReviewItem]:
+        items = []
+        for n in names:
+            if PKG_RE.match(n):
+                items.append(ReviewItem(id=n, label=n, size=sizes.get(n, 0), detail=detail,
+                                        risk='low', payload={'pkg': n}))
+        return sorted(items, key=lambda i: -i.size)
+
+    def _simple_pkg_clean(self, target_id: str, names: List[str], dry: bool, helper_one: str,
+                          size_of: Dict[str, int], label: str) -> CleanResult:
+        r = CleanResult(target_id, dry=dry)
+        names = [n for n in names if PKG_RE.match(n)]
+        r.planned_bytes = sum(size_of.get(n, 0) for n in names)
+        if dry:
+            r.freed_bytes = r.planned_bytes
+            r.rollback = [_rb(label, n, size_of.get(n, 0), 'package removal') for n in names]
+            return r
+        for n in names:
+            h = P.run_helper(helper_one, n, timeout=300)
+            if h.ok:
+                r.freed_bytes += size_of.get(n, 0)
+                r.files_removed += 1
+                r.rollback.append(_rb(label, n, size_of.get(n, 0), 'package removed'))
+            else:
+                r.skipped.append((n, h.message))
+                if not r.error:
+                    r.error = f'{n}: {h.message}'
         return r
 
-    def _xbps_orphaned(self, dry):
-        r = CleanResult('xbps_orphaned')
-        out, _ = run('xbps-remove -n -O 2>/dev/null')
-        pkgs = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        r.files_removed = len(pkgs)
-        if not dry and pkgs:
-            _, code = run_privileged('xbps-orphans')
-            if code != 0:
-                r.error = 'Need root or install.sh helper with xbps-orphans'
+    # ── pacman orphans ──
+    def _pacman_orphan_names(self) -> List[str]:
+        out, _, _ = _cmd(['pacman', '-Qdtq'], 30)
+        return [l.strip() for l in out.splitlines() if l.strip()]
+
+    @staticmethod
+    def _pacman_sizes(names: List[str]) -> Dict[str, int]:
+        sizes: Dict[str, int] = {}
+        if not names:
+            return sizes
+        out, _, _ = _cmd(['pacman', '-Qi', *names[:300]], 30)
+        cur = ''
+        for line in out.splitlines():
+            if line.startswith('Name'):
+                cur = line.split(':', 1)[1].strip()
+            elif line.startswith('Installed Size') and cur:
+                sizes[cur] = parse_size(line.split(':', 1)[1])
+        return sizes
+
+    def _rv_pacman_orphans(self) -> ReviewScan:
+        names = self._pacman_orphan_names()
+        scan = ReviewScan('orphaned_pkgs', permanent=True)
+        scan.items = self._pkg_items(names, self._pacman_sizes(names), 'installed as a dependency, nothing needs it')
+        scan.warning = ('Review the list: some orphans are things you use directly but installed as a dependency. '
+                        'Removal uses pacman -Rns.')
+        return scan
+
+    def _rc_pacman_orphans(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('orphaned_pkgs', dry=dry)
+        current = set(self._pacman_orphan_names())
+        names = [n for n in item_ids if n in current and PKG_RE.match(n)]
+        sizes = self._pacman_sizes(names)
+        r.planned_bytes = sum(sizes.values())
+        if dry or not names:
+            r.freed_bytes = r.planned_bytes
+            r.rollback = [_rb('Orphaned Packages', n, sizes.get(n, 0), 'package removal') for n in names]
+            return r
+        h = P.run_helper('pacman-orphans', stdin='\n'.join(names) + '\n', timeout=600)
+        if not h.ok:
+            r.error = h.message
+            return r
+        r.freed_bytes, r.files_removed = r.planned_bytes, len(names)
+        r.rollback = [_rb('Orphaned Packages', n, sizes.get(n, 0), 'package removed') for n in names]
         return r
 
-    # ── Snap (disabled revisions) ─────────────────────────
-    def _snap_old(self, dry):
-        r = CleanResult('snap_old')
-        out, _ = run('LANG=C snap list --all 2>/dev/null')
-        pairs = []
-        for line in out.splitlines()[1:]:
+    # ── apt autoremove ──
+    def _apt_autoremove_names(self) -> List[str]:
+        out, _, _ = _cmd(['apt-get', '-s', 'autoremove'], 60)
+        return [m.group(1) for m in re.finditer(r'^Remv (\S+)', out, re.M)]
+
+    @staticmethod
+    def _dpkg_sizes(names: List[str]) -> Dict[str, int]:
+        sizes: Dict[str, int] = {}
+        if not names:
+            return sizes
+        out, _, _ = _cmd(['dpkg-query', '-W', '-f=${Package} ${Installed-Size}\n', *names[:400]], 30)
+        for line in out.splitlines():
             parts = line.split()
-            if len(parts) < 4 or parts[-1] != 'disabled':
-                continue
-            name, rev = parts[0], parts[2]
-            if not rev.isdigit():
-                continue
-            pairs.append((name, rev))
-        r.files_removed = len(pairs)
-        du, _ = run('du -sb /var/lib/snapd/snap 2>/dev/null')
-        try:
-            base = int(du.split()[0])
-            r.freed_bytes = min(base // 4, base) if pairs else 0
-        except (ValueError, IndexError):
-            r.freed_bytes = 0
-        if not dry and pairs:
-            h = '/usr/local/bin/cyber-clean-helper'
-            for name, rev in pairs:
-                qn, qr = shlex.quote(name), shlex.quote(rev)
-                _, code = run(f'sudo -n {h} snap-remove-rev {qn} {qr} 2>/dev/null', timeout=120)
-                if code != 0:
-                    r.error = 'Need root / NOPASSWD helper (snap-remove-rev) — run install.sh'
-                    break
+            if len(parts) == 2 and parts[1].isdigit():
+                sizes[parts[0]] = int(parts[1]) * 1024
+        return sizes
+
+    def _rv_apt_autoremove(self) -> ReviewScan:
+        names = self._apt_autoremove_names()
+        scan = ReviewScan('apt_autoremove')
+        scan.items = self._pkg_items(names, self._dpkg_sizes(names), 'no longer required (apt autoremove)')
+        scan.warning = 'Kernel images appear here too — the running kernel is never listed.'
+        return scan
+
+    def _rc_apt_autoremove(self, item_ids: List[str], dry: bool) -> CleanResult:
+        current = set(self._apt_autoremove_names())
+        names = [n for n in item_ids if n in current and PKG_RE.match(n)]
+        sizes = self._dpkg_sizes(names)
+        if names and set(names) == current and not dry:                # chọn hết → một giao dịch apt
+            r = CleanResult('apt_autoremove', dry=False)
+            h = P.run_helper('apt-autoremove', timeout=900)
+            if not h.ok:
+                r.error = h.message
+                return r
+            r.planned_bytes = r.freed_bytes = sum(sizes.values())
+            r.files_removed = len(names)
+            r.rollback = [_rb('APT Autoremove', n, sizes.get(n, 0), 'package removed') for n in names]
+            return r
+        return self._simple_pkg_clean('apt_autoremove', names, dry, 'apt-remove', sizes, 'APT Autoremove')
+
+    # ── dnf autoremove ──
+    def _dnf_unneeded(self) -> List[str]:
+        out, _, code = _cmd(['dnf', 'repoquery', '--unneeded', '--queryformat', '%{name}\n'], 90)
+        if code != 0:
+            return []
+        return sorted({l.strip() for l in out.splitlines() if PKG_RE.match(l.strip())})
+
+    @staticmethod
+    def _rpm_sizes(names: List[str]) -> Dict[str, int]:
+        sizes: Dict[str, int] = {}
+        if not names:
+            return sizes
+        out, _, _ = _cmd(['rpm', '-q', '--qf', '%{NAME} %{SIZE}\n', *names[:400]], 30)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                sizes[parts[0]] = int(parts[1])
+        return sizes
+
+    def _rv_dnf_autoremove(self) -> ReviewScan:
+        names = self._dnf_unneeded()
+        scan = ReviewScan('dnf_autoremove')
+        scan.items = self._pkg_items(names, self._rpm_sizes(names), 'unneeded dependency')
+        if not names:
+            scan.notes.append('Nothing listed (or `dnf repoquery --unneeded` is unavailable).')
+        return scan
+
+    def _rc_dnf_autoremove(self, item_ids: List[str], dry: bool) -> CleanResult:
+        current = set(self._dnf_unneeded())
+        names = [n for n in item_ids if n in current and PKG_RE.match(n)]
+        return self._simple_pkg_clean('dnf_autoremove', names, dry, 'dnf-remove', self._rpm_sizes(names),
+                                      'DNF Autoremove')
+
+    # ── xbps orphans ──
+    def _xbps_orphans(self) -> List[str]:
+        out, _, _ = _cmd(['xbps-remove', '-n', '-O'], 60)
+        names = []
+        for l in out.splitlines():
+            m = re.match(r'^\s*(\S+?)-[\w.]+_\d+\b', l)
+            if m and PKG_RE.match(m.group(1)):
+                names.append(m.group(1))
+        return sorted(set(names))
+
+    def _rv_xbps_orphans(self) -> ReviewScan:
+        names = self._xbps_orphans()
+        scan = ReviewScan('xbps_orphaned')
+        scan.items = self._pkg_items(names, {}, 'orphan (xbps-remove -O)')
+        scan.notes.append('xbps removes all orphans in one transaction — select all to proceed.')
+        return scan
+
+    def _rc_xbps_orphans(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('xbps_orphaned', dry=dry)
+        current = set(self._xbps_orphans())
+        names = [n for n in item_ids if n in current]
+        if not names:
+            return r
+        if set(names) != current:
+            r.error = 'xbps can only remove all orphans at once — select every item'
+            return r
+        r.files_removed = len(names)
+        r.rollback = [_rb('XBPS Orphans', n, 0, 'package removal') for n in names]
+        if dry:
+            return r
+        h = P.run_helper('xbps-orphans', timeout=600)
+        if not h.ok:
+            r.error, r.rollback, r.files_removed = h.message, [], 0
         return r
 
-    # ── AUR cache (yay / paru) ────────────────────────────
-    def _aur_cache(self, dry):
-        r = CleanResult('aur_cache')
-        dirs = []
-        if HAS_YAY:  dirs.append(Path.home() / '.cache/yay')
-        if HAS_PARU: dirs.append(Path.home() / '.cache/paru')
-        for d in dirs:
-            if not d.exists(): continue
-            r.freed_bytes += self.dir_size(d)
-            r.files_removed += sum(1 for _ in d.rglob('*') if _.is_file())
-            # Populate rollback in both dry and real modes for preview
-            for item in d.iterdir():
-                sz = self.dir_size(item)
-                r.rollback.append({'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                   'type': 'aur_cache', 'path': str(item),
-                                   'size': sz, 'note': 'AUR build cache — re-downloads on next install'})
-                if not dry:
-                    safe_delete(item, use_trash=False)
-        return r
+    # ── flatpak ──
+    @staticmethod
+    def _flatpak_unused() -> List[Tuple[str, str]]:
+        for argv in (['flatpak', 'uninstall', '--unused', '--dry-run'],
+                     ['flatpak', 'uninstall', '--unused', '--assumeno', '--noninteractive']):
+            out, err, _ = _cmd(argv, 60)
+            refs = []
+            for l in (out + '\n' + err).splitlines():
+                m = re.match(r'^\s*\d+\.\s+(\S+)\s+(\S+)', l)
+                if m and FLATPAK_ID_RE.match(m.group(1)) and FLATPAK_ID_RE.match(m.group(2)):
+                    refs.append((m.group(1), m.group(2)))
+            if refs:
+                return refs
+        return []
 
-    # ── Flatpak ───────────────────────────────────────────
-    def _flatpak(self, dry):
-        r = CleanResult('flatpak')
-        runtime_dir = Path.home() / '.local/share/flatpak/runtime'
-        size_before = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
+    @staticmethod
+    def _flatpak_sizes() -> Dict[Tuple[str, str], int]:
+        out, _, _ = _cmd(['flatpak', 'list', '--runtime', '--columns=application,branch,size'], 30)
+        sizes = {}
+        for l in out.splitlines():
+            parts = l.split('\t') if '\t' in l else re.split(r'\s{2,}', l.strip())
+            if len(parts) >= 3:
+                sizes[(parts[0].strip(), parts[1].strip())] = parse_size(parts[2])
+        return sizes
 
-        # FIX: check flatpak version before using --dry-run (requires >= 1.9.0)
-        supports_dry = _flatpak_supports_dry_run()
+    def _rv_flatpak(self) -> ReviewScan:
+        refs = self._flatpak_unused()
+        sizes = self._flatpak_sizes()
+        scan = ReviewScan('flatpak')
+        for rid, br in refs:
+            scan.items.append(ReviewItem(id=f'{rid}//{br}', label=f'{rid}  ({br})', size=sizes.get((rid, br), 0),
+                                         detail='unused runtime / extension', payload={'id': rid, 'branch': br}))
+        scan.items.sort(key=lambda i: -i.size)
+        if not refs:
+            scan.notes.append('Nothing unused (or this flatpak version cannot list unused refs).')
+        return scan
 
-        if supports_dry:
-            out_dry, _ = run('flatpak uninstall --unused --dry-run 2>/dev/null')
-            unused = [l.strip() for l in out_dry.splitlines()
-                      if l.strip() and not l.strip().startswith('Nothing')]
-            r.files_removed = len(unused)
-        else:
-            # Fallback: count via flatpak list for old versions
-            out_all, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
-            unused = [l for l in out_all.splitlines() if l.strip()]
-            r.files_removed = max(0, len(unused) - 1)  # rough estimate
-
-        if not dry:
-            run('flatpak uninstall --unused -y 2>/dev/null', timeout=120)
-            size_after = self.dir_size(runtime_dir) if runtime_dir.exists() else 0
-            r.freed_bytes = max(size_before - size_after, 0)
-        else:
-            if not unused:
-                r.freed_bytes = 0
+    def _rc_flatpak(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('flatpak', dry=dry)
+        current = {f'{a}//{b}' for a, b in self._flatpak_unused()}
+        sizes = self._flatpak_sizes()
+        for iid in item_ids:
+            if iid not in current:
+                continue
+            rid, br = iid.split('//', 1)
+            sz = sizes.get((rid, br), 0)
+            r.planned_bytes += sz
+            if dry:
+                r.freed_bytes += sz
+                continue
+            _, err, code = _cmd(['flatpak', 'uninstall', '-y', '--noninteractive', f'{rid}//{br}'], 180)
+            if code == 0:
+                r.freed_bytes += sz
+                r.files_removed += 1
+                r.rollback.append(_rb('Flatpak', iid, sz, 'runtime removed'))
             else:
-                out_all, _ = run('flatpak list --runtime --columns=application 2>/dev/null')
-                total_refs = max(len([l for l in out_all.splitlines() if l.strip()]), 1)
-                r.freed_bytes = int((size_before / total_refs) * len(unused))
+                r.skipped.append((iid, (err.strip().splitlines() or ['failed'])[-1]))
         return r
 
-    # ── Docker / Podman ───────────────────────────────────
-    def _docker(self, dry):
-        r = CleanResult('docker')
-        # FIX: use CONTAINER_TOOL from os_detect (same priority: podman > docker)
-        # instead of re-checking shutil.which with a different order each time.
+    def _rv_flatpak_cache(self) -> ReviewScan:
+        return PlanCleanerMixin.review_scan(self, 'flatpak_cache')
+
+    # ── docker / podman ──
+    def _rv_docker(self) -> ReviewScan:
+        tool = CONTAINER_TOOL
+        scan = ReviewScan('docker')
+        if not tool:
+            scan.notes.append('No container runtime found.')
+            return scan
+        out, err, code = _cmd([tool, 'images', '-f', 'dangling=true', '--format',
+                               '{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'], 30)
+        if code != 0 and 'permission denied' in (err or '').lower():
+            scan.notes.append(f'Cannot talk to the {tool} daemon (permission denied) — add your user to the '
+                              f'"{tool}" group or use rootless mode.')
+            return scan
+        for l in out.splitlines():
+            p = l.split('\t')
+            if len(p) >= 4 and DOCKER_ID_RE.match(p[0]):
+                scan.items.append(ReviewItem(id=f'image:{p[0]}', label=f'image  {p[0][:12]}  {p[1]}',
+                                             size=parse_size(p[2]), detail=f'dangling · created {p[3]}',
+                                             payload={'kind': 'image', 'ref': p[0]}))
+        out, _, _ = _cmd([tool, 'ps', '-a', '-f', 'status=exited', '-f', 'status=created', '--format',
+                          '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}'], 30)
+        for l in out.splitlines():
+            p = l.split('\t')
+            if len(p) >= 4 and DOCKER_ID_RE.match(p[0]):
+                scan.items.append(ReviewItem(id=f'container:{p[0]}', label=f'container  {p[1]}  ({p[2]})',
+                                             detail=f'stopped · {p[3]} — its writable layer is deleted',
+                                             risk='medium', payload={'kind': 'container', 'ref': p[0]}))
+        out, _, _ = _cmd([tool, 'volume', 'ls', '-f', 'dangling=true', '--format', '{{.Name}}'], 30)
+        for name in (l.strip() for l in out.splitlines()):
+            if name and DOCKER_ID_RE.match(name):
+                scan.items.append(ReviewItem(id=f'volume:{name}', label=f'volume  {name}',
+                                             detail='NOT used by any container — may hold database / app data',
+                                             risk='high', payload={'kind': 'volume', 'ref': name}))
+        out, _, _ = _cmd([tool, 'system', 'df', '--format', '{{.Type}}\t{{.Reclaimable}}'], 30)
+        for l in out.splitlines():
+            p = l.split('\t')
+            if len(p) == 2 and p[0].strip().lower().startswith('build cache') and parse_size(p[1]):
+                scan.items.append(ReviewItem(id='buildcache:all', label='build cache  (all unused layers)',
+                                             size=parse_size(p[1]), detail='re-built on the next docker build',
+                                             payload={'kind': 'buildcache'}))
+        scan.warning = 'Volumes are NOT recoverable. Nothing is selected by default.'
+        scan.items.sort(key=lambda i: (-i.size, i.label))
+        return scan
+
+    def _rc_docker(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('docker', dry=dry)
         tool = CONTAINER_TOOL
         if not tool:
             r.error = 'No container runtime found (docker/podman)'
             return r
-        out, _ = run(f'{tool} system df 2>/dev/null')
-        for line in out.splitlines():
-            if 'Images' in line:
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p.endswith(('MB','GB','KB','B')) and i > 0:
-                        try:
-                            v = float(p[:-2])
-                            u = p[-2:]
-                            mult = {'GB':1024**3,'MB':1024**2,'KB':1024,'B':1}.get(u, 1)
-                            r.freed_bytes += int(v * mult)
-                        except (ValueError, IndexError): pass
-        if not dry:
-            run(f'{tool} image prune -f 2>/dev/null')
-            run(f'{tool} container prune -f 2>/dev/null')
-            run(f'{tool} volume prune -f 2>/dev/null')
-        return r
-
-    # ── Journal ───────────────────────────────────────────
-    def _journal(self, dry):
-        """
-        FIX: dry-run estimate now uses journalctl --vacuum-time --dry-run when
-        available (journalctl >= 250). Falls back to a percentage estimate.
-        Removed hardcoded -10MB estimate which was wildly inaccurate.
-        """
-        r = CleanResult('journal')
-        if not HAS_JOURNALCTL:
-            r.error = 'journalctl not available (non-systemd / minimal init)'
-            return r
-
-        def _parse_size(text):
-            m = re.search(r'([\d.]+)\s*(M|G|K|B)', text)
-            if not m: return 0
-            v, u = float(m.group(1)), m.group(2)
-            return int(v * (1024**2 if u=='M' else 1024**3 if u=='G' else 1024 if u=='K' else 1))
-
-        out, _ = run('journalctl --disk-usage 2>/dev/null')
-        before = _parse_size(out)
-
-        if not dry:
-            # FIX #7: thêm --vacuum-size=500M để cap tổng size.
-            # Trên server hoặc máy không reboot thường xuyên, 7 ngày log
-            # có thể là hàng GB. Size cap đảm bảo không giữ quá 500MB
-            # dù time-based vacuum chưa đủ.
-            vacuum_cmd = f'journalctl --vacuum-time={JOURNAL_DAYS}d --vacuum-size=500M 2>/dev/null'
-            _, code = run(vacuum_cmd)
-            if code != 0:
-                run_privileged('journal')
-            # journalctl --vacuum is synchronous — no sleep needed
-            out2, _ = run('journalctl --disk-usage 2>/dev/null')
-            after = _parse_size(out2)
-            r.freed_bytes = max(before - after, 0)
-        else:
-            # FIX: try --dry-run first (journalctl >= 250), then fall back to
-            # rough estimate based on actual disk usage (not hardcoded -10MB)
-            dry_out, dry_code = run(
-                f'journalctl --vacuum-time={JOURNAL_DAYS}d --dry-run 2>/dev/null')
-            if dry_code == 0:
-                freed = _parse_size(dry_out)
-                r.freed_bytes = freed if freed > 0 else max(before // 4, 0)
+        known = {i.id: i for i in self._rv_docker().items}
+        for iid in item_ids:
+            it = known.get(iid)
+            if not it:
+                continue
+            kind, ref = it.payload.get('kind'), it.payload.get('ref', '')
+            r.planned_bytes += it.size
+            if dry:
+                r.freed_bytes += it.size
+                continue
+            argv = {'image': [tool, 'rmi', ref], 'container': [tool, 'rm', ref],
+                    'volume': [tool, 'volume', 'rm', ref],
+                    'buildcache': [tool, 'builder', 'prune', '-f'] if tool == 'docker' else [tool, 'system', 'prune', '-f']
+                    }.get(kind)
+            if not argv or (ref and not DOCKER_ID_RE.match(ref)):
+                continue
+            _, err, code = _cmd(argv, 300)
+            if code == 0:
+                r.freed_bytes += it.size
+                r.files_removed += 1
+                r.rollback.append(_rb('Docker/Podman', it.label, it.size, f'{kind} removed'))
             else:
-                # Older journalctl: assume ~25% of current usage is old enough to vacuum
-                r.freed_bytes = max(before // 4, 0)
+                r.skipped.append((it.label, (err.strip().splitlines() or ['failed'])[-1]))
         return r
 
-    # ── User cache ────────────────────────────────────────
-    def _user_cache(self, dry):
-        r = CleanResult('user_cache')
-        cache = Path.home() / '.cache'
-        if not cache.exists():
+    # ── snap ──
+    @staticmethod
+    def _snap_disabled() -> List[Tuple[str, str]]:
+        out, _, code = _cmd(['snap', 'list', '--all'], 30)
+        if code != 0:
+            return []
+        res = []
+        for l in out.splitlines()[1:]:
+            parts = l.split()
+            if len(parts) >= 6 and 'disabled' in parts[-1].split(','):
+                if re.match(r'^[a-z0-9][a-z0-9-]{0,39}$', parts[0]) and parts[2].isdigit():
+                    res.append((parts[0], parts[2]))
+        return res
+
+    def _rv_snap(self) -> ReviewScan:
+        scan = ReviewScan('snap_old')
+        for name, rev in self._snap_disabled():
+            try:
+                size = os.stat(f'/var/lib/snapd/snaps/{name}_{rev}.snap').st_size       # kích thước thật, không đoán
+            except OSError:
+                size = 0
+            scan.items.append(ReviewItem(id=f'{name}:{rev}', label=f'{name}  (revision {rev})', size=size,
+                                         detail='disabled revision — only needed to roll back a refresh',
+                                         payload={'name': name, 'rev': rev}))
+        scan.items.sort(key=lambda i: -i.size)
+        return scan
+
+    def _rc_snap(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('snap_old', dry=dry)
+        known = {i.id: i for i in self._rv_snap().items}
+        for iid in item_ids:
+            it = known.get(iid)
+            if not it:
+                continue
+            r.planned_bytes += it.size
+            if dry:
+                r.freed_bytes += it.size
+                continue
+            h = P.run_helper('snap-remove-rev', it.payload['name'], it.payload['rev'], timeout=300)
+            if h.ok:
+                r.freed_bytes += it.size
+                r.files_removed += 1
+                r.rollback.append(_rb('Snap', it.label, it.size, 'revision removed'))
+            else:
+                r.skipped.append((it.label, h.message))
+        return r
+
+    # ── nix ──
+    def _rv_nix(self) -> ReviewScan:
+        scan = ReviewScan('nix_gc')
+        scan.items.append(ReviewItem(
+            id='nix:gc30', label='User-profile generations older than 30 days + unreferenced store paths',
+            detail='nix-collect-garbage --delete-older-than 30d', risk='medium', payload={'days': 30}))
+        scan.notes.append('System generations (NixOS) need root: run `sudo nix-collect-garbage -d` yourself.')
+        return scan
+
+    def _rc_nix(self, item_ids: List[str], dry: bool) -> CleanResult:
+        r = CleanResult('nix_gc', dry=dry)
+        if 'nix:gc30' not in item_ids or dry:
             return r
-
-        # ══════════════════════════════════════════════════════
-        # LAYER 1 — NAME WHITELIST (explicit, never touch these)
-        # Kể cả khi logic thông minh ở Layer 2/3 không bắt được,
-        # những thứ này vẫn được bảo vệ tuyệt đối.
-        # ══════════════════════════════════════════════════════
-        NAME_EXCLUDE = {
-            # ── GPU shader / driver cache (xóa = 5–30 phút rebuild lag khi vào game) ──
-            # Bao gồm tên thư mục cấp 1 lẫn subdirectory của từng driver:
-            #   mesa_shader_cache/   → Mesa tổng (AMD RadeonSI, Intel Iris, etc.)
-            #   mesa/                → Mesa build artifacts
-            #   nvidia/              → NVIDIA OpenGL / Vulkan shader cache
-            #   amdgpu/              → AMDGPU-PRO driver cache
-            #   radeon/              → legacy ATI/AMD radeon driver
-            #   intel/               → Intel GPU media driver cache
-            #   vulkan/              → Vulkan ICD layer cache
-            #   radv/                → AMD Radeon Vulkan (Mesa RADV driver)
-            #   anv/                 → Intel ANV Vulkan driver cache
-            #   iris/                → Intel Iris/Iris Xe (OpenGL)
-            #   nouveau/             → NVIDIA open-source driver
-            #   d3d/                 → DXVK / VKD3D Direct3D-over-Vulkan cache
-            #   dxvk/                → DXVK shader cache (Steam/Proton games)
-            #   vkd3d/               → VKD3D-Proton DX12→Vulkan cache
-            'mesa_shader_cache', 'mesa', 'nvidia', 'amdgpu',
-            'radeon', 'intel', 'vulkan',
-            'radv', 'anv', 'iris', 'nouveau',
-            'd3d', 'dxvk', 'vkd3d',
-
-            # ── Fonts (xóa = ô vuông khắp nơi) ──
-            'fontconfig',
-
-            # ── Browsers (có target riêng, không xử lý ở đây) ──
-            'mozilla', 'google-chrome', 'chromium', 'microsoft-edge',
-            'BraveSoftware', 'brave', 'opera', 'vivaldi',
-
-            # ── Package managers (AUR có target riêng) ──
-            'yay', 'paru',
-
-            # ── Thumbnails (có target riêng) ──
-            'thumbnails',
-
-            # ── Wayland / X11 compositor & display runtime ──
-            'hyprland', 'sway', 'i3', 'openbox', 'xfwm4',
-            'kwin', 'mutter', 'marco',
-
-            # ── Wallpaper managers (daemon giữ socket trong cache) ──
-            # Xóa = màn hình đen hoặc wallpaper mất
-            'swww', 'swaybg', 'hyprpaper', 'wpaperd', 'mpvpaper',
-            'feh', 'nitrogen', 'variety', 'wbg', 'xwallpaper',
-
-            # ── Theming / color scheme (xóa = mất theme hiện tại) ──
-            'wal', 'wallust', 'matugen', 'pywal', 'lutgen',
-            'wpg', 'chameleon',
-
-            # ── Desktop environment runtime caches ──
-            'plasma', 'ksycoca5', 'ksycoca6', 'kioexec',
-            'gnome-software', 'gnome-shell', 'gnome-session',
-            'discover', 'tracker', 'tracker3',
-
-            # ── Input methods (xóa = không gõ được) ──
-            'ibus', 'fcitx', 'fcitx5',
-
-            # ── Audio (xóa = mất âm thanh / app không nhận device) ──
-            'pipewire', 'wireplumber', 'pulse', 'pulseaudio',
-            'gstreamer-1.0', 'obexd',
-
-            # ── Bars / launchers / notif (có socket runtime) ──
-            'waybar', 'polybar', 'eww', 'ags',
-            'rofi', 'wofi', 'fuzzel', 'tofi', 'anyrun',
-            'dunst', 'mako', 'swaync', 'fnott',
-            'cliphist', 'wl-clipboard',
-
-            # ── Filesystem / GVFS (xóa = mount points bị ảnh hưởng) ──
-            'gvfs', 'dconf', 'glib-2.0',
-
-            # ── Email clients ──
-            'thunderbird', 'evolution', 'geary',
-
-            # ── AI / ML (model cache cực lớn, tải lại rất lâu) ──
-            'huggingface', 'torch', 'transformers',
-
-            # ── Dev tools — MOVED to dev_cache target (user can opt in) ──
-            # npm, yarn, cargo, go-build, gradle, maven are no longer protected here.
-            # pip and yay/paru stay: pip has its own target; yay/paru have aur_cache.
-            'pip',
-            'zsh', 'prezto',
-            'clangd', 'vscode-cpptools',
-
-            # ── Gaming (Lutris / Wine prefix cache) ──
-            'lutris', 'winetricks',
-        }
-
-        # ══════════════════════════════════════════════════════
-        # LAYER 2 — SMART TYPE GUARD (không cần biết tên app)
-        # Bất kể tool mới lạ nào, nếu nó để lại socket/fifo/device
-        # trong .cache thì tự động được bỏ qua.
-        # Socket = "dây thần kinh" IPC của app đang chạy.
-        # Xóa socket = app crash ngay lập tức.
-        # ══════════════════════════════════════════════════════
-        def _is_runtime_file(p: Path) -> bool:
-            """True nếu item là socket, FIFO hoặc block/char device."""
-            try:
-                return p.is_socket() or p.is_fifo() or p.is_block_device() or p.is_char_device()
-            except OSError:
-                return True   # không stat được → giữ lại cho an toàn
-
-        def _dir_has_socket(p: Path) -> bool:
-            """
-            True nếu thư mục chứa bất kỳ socket / FIFO nào ở cấp đầu tiên.
-            Đây là dấu hiệu app đang chạy và giữ runtime state trong thư mục này.
-            Chỉ check cấp 1 — đủ để phát hiện, không cần đệ quy toàn bộ cây.
-            """
-            try:
-                for child in p.iterdir():
-                    if _is_runtime_file(child):
-                        return True
-            except (OSError, PermissionError):
-                return True   # không đọc được → giữ lại an toàn
-            return False
-
-        # ══════════════════════════════════════════════════════
-        # LAYER 3 — RECENTLY MODIFIED GUARD
-        # Thư mục được modified trong vòng 30 giây = app đang active.
-        # Không xóa để tránh race condition.
-        # ══════════════════════════════════════════════════════
-        _now = time.time()
-        _ACTIVE_WINDOW_SEC = 30
-
-        def _recently_modified(p: Path) -> bool:
-            try:
-                return (_now - p.stat().st_mtime) < _ACTIVE_WINDOW_SEC
-            except OSError:
-                return True   # không stat được → giữ lại an toàn
-
-        # ── Main iteration ────────────────────────────────────
-        for item in cache.iterdir():
-
-            # Layer 1: tên nằm trong whitelist → skip tuyệt đối
-            if item.name in NAME_EXCLUDE:
-                continue
-
-            # Layer 2a: bản thân item là socket/FIFO/device → skip
-            if _is_runtime_file(item):
-                continue
-
-            # FIX W7: bind-mount / Btrfs subvolume guard.
-            # On Fedora Silverblue, NixOS, and systems with Btrfs subvol layout,
-            # ~/.cache subdirs can be real mount points (not symlinks) for
-            # separate subvolumes or tmpfs mounts.
-            # item.is_symlink() returns False for mount points → Layer 2 misses them.
-            # os.path.ismount() correctly detects both symlink mounts AND real mounts.
-            # Deleting a mount point would attempt to remove the entire subvolume.
-            try:
-                import os as _os
-                if _os.path.ismount(str(item)):
-                    continue
-            except OSError:
-                continue   # stat failed → play it safe
-
-            # Layer 2b: nếu là thư mục và chứa socket bên trong → skip
-            if item.is_dir() and _dir_has_socket(item):
-                continue
-
-            # Layer 3: modified trong vòng 30 giây → skip (app đang active)
-            if _recently_modified(item):
-                continue
-
-            # Vượt qua cả 3 tầng → an toàn để xóa
-            try:
-                sz = self.dir_size(item)
-                r.freed_bytes += sz
-                r.files_removed += 1
-                # Populate rollback in both dry and real modes so Preview dialog works
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'user_cache',
-                    'path': str(item),
-                    'size': sz,
-                    'note': 'app cache — auto-rebuilds on next launch',
-                })
-                if not dry:
-                    safe_delete(item, use_trash=False)
-            except PermissionError:
-                pass   # snap cache dirs owned by root — skip silently
-            except OSError as e:
-                r.error = (r.error or '') + f'  [skip {item.name}: {e}]\n'
+        _, err, code = _cmd(['nix-collect-garbage', '--delete-older-than', '30d'], 1800)
+        if code != 0:
+            r.error = (err.strip().splitlines() or ['nix-collect-garbage failed'])[-1]
+        else:
+            r.rollback.append(_rb('Nix', 'user generations + store', 0, 'garbage collected'))
         return r
 
-    # ── Browser / thumbnails ──────────────────────────────
-    def _browser_or_thumbs(self, tid, dry):
-        r = CleanResult(tid)
-        home = Path.home()
-        paths = {
-            'chrome_cache':  [home/'.cache/google-chrome', home/'.cache/chromium',
-                               home/'.config/google-chrome/Default/Cache',
-                               home/'.config/chromium/Default/Cache'],
-            'firefox_cache': [home/'.cache/mozilla/firefox'],
-            'thumbnails':    [home/'.cache/thumbnails', home/'.thumbnails'],
-        }
-        for path in paths.get(tid, []):
-            if not path.exists(): continue
-            sz = self.dir_size(path)
-            r.freed_bytes += sz
-            # List files for preview in both dry and real modes
-            try:
-                for item in path.iterdir():
-                    try:
-                        isz = self.dir_size(item) if item.is_dir() else item.stat().st_size
-                        r.rollback.append({
-                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                            'type': tid,
-                            'path': str(item),
-                            'size': isz,
-                            'note': 'browser cache — auto-rebuilds on next launch',
-                        })
-                        r.files_removed += 1
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-            if not dry:
-                for item in path.iterdir():
-                    safe_delete(item, use_trash=False)
-        return r
+    # ── trash ──
+    def _trash_dirs(self) -> List[str]:
+        home = str(self.ctx.home)
+        dirs = [os.path.join(self.ctx.expand('$XDG_DATA_HOME') or os.path.join(home, '.local/share'), 'Trash')]
+        uid = real_uid()
+        for base in ('/media', '/run/media', '/mnt'):
+            for d1 in E.iter_dir(base):                                    # /media/<user>/<label>
+                for d2 in E.iter_dir(d1.path):
+                    for cand in (os.path.join(d2.path, f'.Trash-{uid}'), os.path.join(d2.path, '.Trash', str(uid))):
+                        if os.path.isdir(os.path.join(cand, 'files')):
+                            dirs.append(cand)
+        return [d for d in dirs if os.path.isdir(os.path.join(d, 'files'))]
 
-    # ── Pip cache ─────────────────────────────────────────
-    def _pip_cache(self, dry):
-        r = CleanResult('pip_cache')
-        pip_cache = Path.home() / '.cache/pip'
-        if not pip_cache.exists(): return r
-        r.freed_bytes = self.dir_size(pip_cache)
-        if not dry:
-            run('pip cache purge 2>/dev/null || pip3 cache purge 2>/dev/null')
-        return r
-
-    # ── Tmp files ─────────────────────────────────────────
-    def _tmp_files(self, dry):
-        import time as _t
-        r = CleanResult('tmp_files')
-        now = _t.time()
-        for f in Path('/tmp').iterdir():
-            try:
-                # Skip IPC runtime files — these are active sockets/FIFOs used
-                # by Wayland compositors (e.g. /tmp/wayland-0), X11, PipeWire, etc.
-                # Deleting any of these crashes the compositor or audio daemon immediately.
-                if f.is_socket() or f.is_fifo() or f.is_block_device() or f.is_char_device():
-                    continue
-                # Skip files modified recently — could be in active use
-                if (now - f.stat().st_mtime) / 86400 < TMP_DAYS:
-                    continue
-                sz = self.dir_size(f) if f.is_dir() else f.stat().st_size
-                r.freed_bytes += sz
-                r.files_removed += 1
-                # Populate rollback in both modes for preview dialog
-                r.rollback.append({
-                    'time': _t.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'tmp_files',
-                    'path': str(f),
-                    'size': sz,
-                    'note': f'temp file older than {TMP_DAYS} days',
-                })
-                if not dry:
-                    safe_delete(f, use_trash=False)
-            except (OSError, PermissionError):
-                pass   # files owned by other users, or deleted between scan and delete
-        return r
-
-    # ── Empty Trash ───────────────────────────────────────
-    def _empty_trash(self, dry):
-        """
-        Permanently delete files in the FreeDesktop Trash.
-
-        This is the #1 reason disk usage doesn't drop after running the cleaner:
-        safe_delete() sends items to Trash instead of permanent delete, freeing
-        zero disk space until the Trash is emptied here.
-
-        Covers:
-          ~/.local/share/Trash/            — main XDG trash
-          ~/.Trash/                        — legacy macOS/old-Linux fallback
-          /media/*/.../.Trash-<uid>/       — removable media trash dirs
-        """
-        r = CleanResult('empty_trash')
-        home = Path.home()
-        import os as _os
-
-        trash_roots = [
-            home / '.local/share/Trash',
-            home / '.Trash',
-        ]
-
-        # Also sweep removable media trash dirs (e.g. /media/user/disk/.Trash-1000)
+    @staticmethod
+    def _trash_original(info_path: str) -> str:
         try:
-            uid = _os.getuid() if hasattr(_os, 'getuid') else None
-            if uid is not None:
-                for media_root in [Path('/media'), Path('/run/media')]:
-                    if not media_root.exists():
-                        continue
-                    try:
-                        for mount in media_root.rglob(f'.Trash-{uid}'):
-                            if mount.is_dir():
-                                trash_roots.append(mount)
-                    except (OSError, PermissionError):
-                        pass
-        except Exception:
+            with open(info_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if line.startswith('Path='):
+                        from urllib.parse import unquote
+                        return unquote(line[5:].strip())
+        except OSError:
             pass
+        return ''
 
-        for trash_dir in trash_roots:
-            if not trash_dir.exists():
-                continue
-            for sub in ['files', 'expunged']:
-                sub_path = trash_dir / sub
-                if not sub_path.exists():
-                    continue
-                sz = self.dir_size(sub_path)
-                r.freed_bytes += sz
-                try:
-                    for item in sub_path.iterdir():
-                        try:
-                            isz = self.dir_size(item) if item.is_dir() else item.stat().st_size
-                            r.rollback.append({
-                                'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                                'type': 'empty_trash',
-                                'path': str(item),
-                                'size': isz,
-                                'note': 'permanently deleted from Trash',
-                            })
-                            r.files_removed += 1
-                        except OSError:
-                            pass
-                except (OSError, PermissionError):
-                    pass
-                if not dry:
-                    shutil.rmtree(sub_path, ignore_errors=True)
-                    sub_path.mkdir(parents=True, exist_ok=True)
-            # Clean up orphaned .trashinfo files (no matching file in files/)
-            if not dry:
-                info_dir  = trash_dir / 'info'
-                files_dir = trash_dir / 'files'
-                if info_dir.exists() and files_dir.exists():
-                    for info_file in list(info_dir.glob('*.trashinfo')):
-                        if not (files_dir / info_file.stem).exists():
-                            try:
-                                info_file.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-        return r
+    def _trash_plan(self) -> E.Plan:
+        plan = E.Plan('empty_trash')
+        guards = E.Guards()
+        pol = E.Policy(min_age_sec=0, require_owner=True, allow_special=True)    # ổ lạ có thể có socket; rác là rác
+        for tdir in self._trash_dirs():
+            files_dir = os.path.join(tdir, 'files')
+            info_dir = os.path.join(tdir, 'info')
+            for e in E.iter_dir(files_dir):
+                orig = self._trash_original(os.path.join(info_dir, e.name + '.trashinfo'))
+                it, why = E.make_item(e.path, pol, guards=guards, group='trash', risk='medium',
+                                      label=orig or e.name, note='permanently deleted — cannot be restored')
+                if it is not None:
+                    it.meta['info'] = os.path.join(info_dir, e.name + '.trashinfo')
+                    it.meta['trash'] = tdir
+                    plan.items.append(it)
+                elif why and why != 'gone':
+                    plan.skipped.append((e.path, why))
+        return plan
 
-    # ── Old System Logs ───────────────────────────────────
-    def _system_logs(self, dry):
-        """
-        Delete rotated/compressed log copies from /var/log.
+    def _rv_trash(self) -> ReviewScan:
+        plan = self._trash_plan()
+        self._review_cache['empty_trash'] = (time.monotonic(), plan)
+        scan = ReviewScan('empty_trash', permanent=True)
+        items = sorted(plan.items, key=lambda i: -i.size)
+        for it in items[:500]:
+            scan.items.append(ReviewItem(id=it.id, label=it.display, size=it.size, files=it.files, newest=it.newest,
+                                         detail=it.note, risk='medium', blocked=it.blocked,
+                                         payload={'path': it.path}))
+        rest = items[500:]
+        if rest:
+            scan.items.append(ReviewItem(id='__rest__', label=f'… and {len(rest)} more smaller items',
+                                         size=sum(i.size for i in rest), files=sum(i.files for i in rest),
+                                         detail='all remaining trash items', risk='medium',
+                                         payload={'ids': [i.id for i in rest]}))
+        scan.warning = 'Permanently deleted — NOT moved anywhere. Nothing is selected by default.'
+        return scan
 
-        SAFE rules:
-          • Only files matching *.gz / *.bz2 / *.xz / *.1 / *.2 / ... / *.old / *.bak
-          • Active logs (syslog, auth.log, kern.log, etc.) never touched
-          • Files modified in the last hour skipped (rotation still in progress)
-          • needs_root=True because most /var/log is root-owned
-
-        Why safe: logrotate itself created these as compressed/numbered archives.
-        Deleting them frees space without affecting any running logging process.
-        """
-        r = CleanResult('system_logs')
-        log_root = Path('/var/log')
-        if not log_root.exists():
-            return r
-
-        ROTATED_PATTERNS = [
-            '*.gz', '*.bz2', '*.xz', '*.zst',
-            '*.1', '*.2', '*.3', '*.4', '*.5',
-            '*.6', '*.7', '*.8', '*.9', '*.10',
-            '*.old', '*.bak', '*.archived',
-        ]
-        now = time.time()
-        RECENT_SEC = 3600   # skip files touched within last hour
-
-        seen = set()
-        files_to_clean = []
-        try:
-            for pattern in ROTATED_PATTERNS:
-                for f in log_root.rglob(pattern):
-                    key = str(f)
-                    if key in seen:
-                        continue
-                    seen.add(key)
+    def _rc_trash(self, item_ids: List[str], dry: bool) -> CleanResult:
+        cached = self._review_cache.get('empty_trash')
+        plan = cached[1] if cached and (time.monotonic() - cached[0]) < self.REVIEW_TTL else self._trash_plan()
+        ids = set(item_ids)
+        if '__rest__' in ids:
+            top = {i.id for i in sorted(plan.items, key=lambda i: -i.size)[:500]}
+            ids |= {i.id for i in plan.items if i.id not in top}
+        sel = E.Plan('empty_trash', [i for i in plan.items if i.id in ids], list(plan.skipped))
+        r = self.result_from_plan('empty_trash', sel, dry=dry, label='Trash')
+        if not dry:
+            for it in sel.items:
+                if not os.path.lexists(it.path):
                     try:
-                        if not f.is_file() or f.is_symlink():
-                            continue
-                        if (now - f.stat().st_mtime) < RECENT_SEC:
-                            continue
-                        files_to_clean.append(f)
+                        os.unlink(it.meta['info'])
                     except OSError:
                         pass
-        except (OSError, PermissionError) as e:
-            r.error = f'Cannot read /var/log: {e} — needs root'
-            return r
-
-        for f in files_to_clean:
-            try:
-                sz = f.stat().st_size
-                r.freed_bytes   += sz
-                r.files_removed += 1
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'system_logs',
-                    'path': str(f),
-                    'size': sz,
-                    'note': 'rotated log archive — active logs untouched',
-                })
-            except OSError:
-                pass
-
-        if not dry and files_to_clean:
-            # Build null-separated file list, pass to helper in ONE sudo call
-            # instead of N sudo calls (which would popup pkexec N times).
-            file_list = '\n'.join(str(f) for f in files_to_clean)
-            _, code = run_privileged('clean-rotated-logs', stdin_data=file_list)
-            if code != 0:
-                # Fallback: try raw sudo -n with xargs (still 1 call, not N)
-                paths_str = ' '.join(shlex.quote(str(f)) for f in files_to_clean)
-                _, code2 = run_privileged('raw', raw_cmd=f'rm -f {paths_str}')
-                if code2 != 0:
-                    r.error = 'Need root — run install.sh to configure NOPASSWD sudo'
-                    # Revert counted bytes since nothing was actually deleted
-                    r.freed_bytes   = 0
-                    r.files_removed = 0
-        return r
-
-    # ── Crash Reports ─────────────────────────────────────
-    def _crash_reports(self, dry):
-        """
-        Delete crash dumps and apport reports. All safe to remove.
-
-        Covers:
-          /var/crash/*.crash              — apport crash dumps (Ubuntu/Debian)
-          ~/.local/share/apport/          — user-level apport reports
-          /var/lib/systemd/coredump/      — systemd-coredump (Arch, Fedora, openSUSE)
-          ~/core + /tmp/core.*            — raw core dump files
-
-        IMPORTANT: freed_bytes is only counted AFTER a file is confirmed deleted.
-        Files in /var/crash / /var/lib/systemd/coredump are root-owned — if deletion
-        fails we escalate via run_privileged and only count success.
-        """
-        r = CleanResult('crash_reports')
-        home = Path.home()
-
-        # ── Separate candidates by ownership ──────────────────────────
-        user_candidates  = []   # deletable without root
-        root_candidates  = []   # need root (var/crash, coredump)
-
-        # 1. apport crash files in /var/crash (root-owned)
-        var_crash = Path('/var/crash')
-        if var_crash.exists():
-            try:
-                root_candidates += [f for f in var_crash.glob('*.crash') if f.is_file()]
-                root_candidates += [f for f in var_crash.glob('*.upload') if f.is_file()]
-            except (OSError, PermissionError):
-                pass
-
-        # 2. User-level apport reports (~/.local/share/apport)
-        user_apport = home / '.local/share/apport'
-        if user_apport.exists():
-            try:
-                user_candidates += [f for f in user_apport.rglob('*') if f.is_file()]
-            except (OSError, PermissionError):
-                pass
-
-        # 3. systemd-coredump (root-owned)
-        coredump_dir = Path('/var/lib/systemd/coredump')
-        if coredump_dir.exists():
-            try:
-                root_candidates += [f for f in coredump_dir.iterdir() if f.is_file()]
-            except (OSError, PermissionError):
-                pass
-
-        # 4. Raw core files in home / /tmp (user-owned)
-        for f in home.glob('core'):
-            if f.is_file():
-                user_candidates.append(f)
-        for f in Path('/tmp').glob('core.*'):
-            if f.is_file():
-                user_candidates.append(f)
-
-        need_root_bytes  = 0
-        need_root_count  = 0
-        root_fail_count  = 0
-
-        # ── Process user-owned files ───────────────────────────────────
-        for f in user_candidates:
-            try:
-                sz = f.stat().st_size
-            except OSError:
-                continue
-
-            # DRY-RUN: count estimate only
-            if dry:
-                r.freed_bytes   += sz
-                r.files_removed += 1
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'crash_reports',
-                    'path': str(f),
-                    'size': sz,
-                    'note': 'crash dump — safe to delete',
-                })
-                continue
-
-            # REAL DELETE: count only if deletion succeeds
-            deleted = False
-            try:
-                safe_delete(f, use_trash=False)
-                deleted = not f.exists()
-            except (OSError, PermissionError):
-                deleted = False
-
-            if deleted:
-                r.freed_bytes   += sz
-                r.files_removed += 1
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'crash_reports',
-                    'path': str(f),
-                    'size': sz,
-                    'note': 'crash dump — deleted',
-                })
-            # If not deleted: silently skip (another process may hold it)
-
-        # ── Process root-owned files ───────────────────────────────────
-        for f in root_candidates:
-            try:
-                sz = f.stat().st_size
-            except OSError:
-                continue
-
-            # DRY-RUN: always count (shows user what WOULD be freed with root)
-            if dry:
-                r.freed_bytes   += sz
-                r.files_removed += 1
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'crash_reports',
-                    'path': str(f),
-                    'size': sz,
-                    'note': 'crash dump (needs root) — dry-run estimate',
-                })
-
-        if not dry and root_candidates:
-            # Batch delete all root-owned files in ONE sudo call via helper
-            # (avoids per-file pkexec popups that would freeze the GUI)
-            file_list = '\n'.join(str(f) for f in root_candidates)
-            _, code = run_privileged('clean-crash-dirs', stdin_data=file_list)
-            if code != 0:
-                # Fallback: single xargs call via raw sudo -n
-                paths_str = ' '.join(shlex.quote(str(f)) for f in root_candidates)
-                _, code2 = run_privileged('raw', raw_cmd=f'rm -f {paths_str}')
-                code = code2
-
-            # Count only files that are actually gone
-            for f in root_candidates:
+            for tdir in {i.meta.get('trash') for i in sel.items if i.meta.get('trash')}:
                 try:
-                    sz = f.stat().st_size if f.exists() else None
-                    if sz is None:  # file is gone = successfully deleted
-                        try:
-                            # get size from rollback if we need it — use 0 as fallback
-                            orig_sz = next(
-                                (entry['size'] for entry in r.rollback
-                                 if entry.get('path') == str(f)), 0
-                            )
-                        except StopIteration:
-                            orig_sz = 0
-                        r.freed_bytes   += orig_sz
-                        r.files_removed += 1
-                        r.rollback.append({
-                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                            'type': 'crash_reports',
-                            'path': str(f),
-                            'size': orig_sz,
-                            'note': 'crash dump (root-owned) — deleted',
-                        })
-                    else:
-                        need_root_bytes += sz
-                        root_fail_count += 1
+                    os.unlink(os.path.join(tdir, 'directorysizes'))      # cache kích thước — được dựng lại
                 except OSError:
                     pass
-
-        # ── Surface permission error clearly if any root files remain ──
-        if root_fail_count > 0:
-            skipped_mb = need_root_bytes / (1024 * 1024)
-            r.error = (
-                f'{root_fail_count} file(s) ({skipped_mb:.1f} MB) need root — '
-                f'NOT counted as freed. Run install.sh or launch with sudo to delete them.'
-            )
-
-        return r
-
-    # ── Developer Caches ──────────────────────────────────
-    def _dev_cache(self, dry):
-        """
-        Clean developer tool caches. Marked 'caution' because packages will
-        re-download on the next build, costing time and bandwidth.
-
-        Covers (user-level only, no root needed):
-          npm / npx       ~/.npm/_cacache          (often 500 MB–3 GB)
-          yarn v1         ~/.yarn/cache
-          yarn (cache)    ~/.cache/yarn
-          pnpm            ~/.local/share/pnpm/store  (can exceed 5 GB)
-          Gradle          ~/.gradle/caches
-          Maven           ~/.m2/repository
-          Cargo           ~/.cargo/registry/cache   (NOT src/ — source kept)
-          Go dl cache     ~/go/pkg/mod/cache
-          Go build cache  ~/.cache/go-build
-          Cypress         ~/.cache/Cypress           (~300–600 MB per version)
-          JetBrains       ~/.cache/JetBrains
-          node-gyp        ~/.cache/node-gyp
-
-        Deliberately NOT included:
-          pip cache       — has its own dedicated target
-          yay/paru cache  — has its own aur_cache target
-          cargo src/      — source code, not cache; rebuilding needs it
-          go/pkg/mod/     — module source tree; only the cache/ subdir is removed
-        """
-        r = CleanResult('dev_cache')
-        home = Path.home()
-
-        dev_paths = [
-            (home / '.npm/_cacache',                'npm package cache'),
-            (home / '.yarn/cache',                  'yarn v1 cache'),
-            (home / '.cache/yarn',                  'yarn global cache'),
-            (home / '.local/share/pnpm/store',      'pnpm content-addressable store'),
-            (home / '.pnpm-store',                  'pnpm store (legacy path)'),
-            (home / '.gradle/caches',               'Gradle build + dependency cache'),
-            (home / '.m2/repository',               'Maven local repository'),
-            (home / '.cargo/registry/cache',        'Cargo crate download cache'),
-            (home / 'go/pkg/mod/cache',             'Go module download cache'),
-            (home / '.cache/go-build',              'Go build cache'),
-            (home / '.cache/Cypress',               'Cypress test runner (per version)'),
-            (home / '.cache/JetBrains',             'JetBrains IDE caches'),
-            (home / '.cache/node-gyp',              'node-gyp native build cache'),
-        ]
-
-        for path, label in dev_paths:
-            if not path.exists():
-                continue
-            try:
-                sz = self.dir_size(path)
-                if sz == 0:
-                    continue
-                r.freed_bytes   += sz
-                r.files_removed += sum(1 for _ in path.rglob('*') if _.is_file())
-                r.rollback.append({
-                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    'type': 'dev_cache',
-                    'path': str(path),
-                    'size': sz,
-                    'note': f'{label} — re-downloads on next build',
-                })
-                if not dry:
-                    shutil.rmtree(path, ignore_errors=True)
-                    # Recreate empty dir so tool doesn't error on next invocation
-                    path.mkdir(parents=True, exist_ok=True)
-            except (OSError, PermissionError):
-                pass
         return r

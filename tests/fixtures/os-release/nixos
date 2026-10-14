@@ -1,0 +1,3 @@
+NAME=NixOS
+ID=nixos
+VERSION_ID="24.05"

@@ -78,8 +78,11 @@ def check_deps():
     head(f'Checking dependencies  [v{VERSION}]')
     ok_all = True
     for pkg, hint in {
-        'psutil': 'sudo pacman -S python-psutil  OR  pip install psutil --break-system-packages',
-        'PyQt6':  'sudo pacman -S python-pyqt6   OR  pip install PyQt6  --break-system-packages',
+        'psutil':       'sudo pacman -S python-psutil  OR  pip install psutil --break-system-packages',
+        'PyQt6':        'sudo pacman -S python-pyqt6   OR  pip install PyQt6  --break-system-packages',
+        'cryptography': 'pip install cryptography --break-system-packages',
+        'send2trash':   'pip install send2trash --break-system-packages  '
+                         '(REQUIRED — without it, deletes silently become permanent instead of going to Trash)',
     }.items():
         try:
             __import__(pkg); ok(pkg)
@@ -108,6 +111,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         f'--add-data "version.py{sep}."',        # bundle version.py
         f'--add-data "core/*.py{sep}core"',
         f'--add-data "utils/*.py{sep}utils"',
+        f'--add-data "rules/*.toml{sep}rules"',   # luật dọn rác khai báo (core/rules.py)
         f'--add-data "assets{sep}assets"',
     ]
 
@@ -127,8 +131,16 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         '--hidden-import urllib.error',
         '--hidden-import tarfile',
         '--hidden-import tempfile',
+        '--hidden-import tomllib',
+        '--hidden-import ui_pages',
         '--hidden-import clr',
         '--hidden-import clr._extra',
+        # send2trash is only ever imported inside a try/except inside a function
+        # (core/os_detect.py) — PyInstaller's static scanner can miss that pattern.
+        # Without it bundled, HAS_SEND2TRASH silently becomes False at runtime and
+        # every "delete" becomes a permanent delete instead of going to Trash.
+        '--hidden-import send2trash',
+        '--hidden-import cryptography.hazmat.primitives.asymmetric.ed25519',
         '--exclude-module tkinter',
         '--exclude-module matplotlib',
         '--exclude-module numpy',
@@ -410,6 +422,17 @@ def build_linux_targz():
         return False
 
     DIST.mkdir(exist_ok=True)
+    # Helper đặc quyền + VERSION nằm CẠNH file thực thi, bên trong gói được ký:
+    #   • install.sh / `update-apply` lấy helper từ đây (một nguồn duy nhất, đã xác minh chữ ký);
+    #   • `update-apply` dùng VERSION để chống replay/downgrade.
+    bundle = DIST / APP
+    helper_src = ROOT / 'packaging' / 'cyber-clean-helper'
+    if not helper_src.exists():
+        err('packaging/cyber-clean-helper missing')
+        return False
+    shutil.copy2(helper_src, bundle / 'cyber-clean-helper')
+    (bundle / 'cyber-clean-helper').chmod(0o755)
+    (bundle / 'VERSION').write_text(VERSION + '\n', encoding='utf-8')
     out = DIST / f'{APP}-{VERSION}-linux-x86_64.tar.gz'
     run(f'tar -czf {out} -C {DIST} {APP}')
     if out.exists():

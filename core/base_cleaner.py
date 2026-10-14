@@ -1,22 +1,50 @@
 """
-CyberClean v2.0 — Base Cleaner
-Abstract interface every OS cleaner implements.
+CyberClean — Base Cleaner
+Abstract interface every OS cleaner implements + the plan-based mixin shared by
+Linux and Windows (rules → plan → guarded execute, see core/engine.py).
+
+Three tiers (what the UI shows, and what may run unattended):
+
+    auto     Always regenerable. Ticked by default. The ONLY tier the idle
+             scheduler may run (and only targets flagged `scheduled`).
+    review   Listed item-by-item for the user to tick. Never pre-ticked,
+             never run in the background.
+    advisor  Report only (see core/advisor.py) — the app never deletes these.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os, shutil, time
+from concurrent.futures import TimeoutError as FuturesTimeout
+import os, time
+
+from . import engine as E
+
+TIERS = ('auto', 'review', 'advisor')
+
 
 @dataclass
 class CleanTarget:
     id:       str
     name:     str
     desc:     str
-    safety:   str        # 'safe' | 'caution' | 'danger'
+    safety:   str        # 'safe' | 'caution' | 'danger'  (badge colour)
     needs_root: bool = False
     enabled:  bool = True
+    tier:     str = ''             # 'auto' | 'review' | 'advisor'; '' → derived from safety
+    scheduled: Optional[bool] = None   # may the idle scheduler run it? (auto tier only)
+
+    def __post_init__(self):
+        if not self.tier:
+            self.tier = 'auto' if self.safety == 'safe' else 'review'
+        if self.tier not in TIERS:
+            raise ValueError(f'bad tier {self.tier!r}')
+        if self.scheduled is None:
+            self.scheduled = self.tier == 'auto'
+        if self.tier != 'auto':
+            self.scheduled = False        # review / advisor NEVER run unattended
+
 
 @dataclass
 class CleanResult:
@@ -25,9 +53,40 @@ class CleanResult:
     files_removed: int = 0
     error:       Optional[str] = None
     rollback:    List[dict] = field(default_factory=list)
+    dry:         bool = True
+    planned_bytes: int = 0                       # what the plan said (dry-run == plan)
+    measured_bytes: Optional[int] = None         # real change in free disk space (shutil.disk_usage)
+    notes:       List[str] = field(default_factory=list)      # warnings (app running, snapshots...)
+    skipped:     List[Tuple[str, str]] = field(default_factory=list)   # (path, reason)
+    blocked:     int = 0
+    plan:        Optional["E.Plan"] = None       # kept on dry-runs so CLEAN executes exactly this plan
 
     @property
     def success(self): return self.error is None
+
+
+@dataclass
+class ReviewItem:
+    """One row in the Review dialog."""
+    id:      str
+    label:   str
+    size:    int = 0
+    files:   int = 0
+    newest:  float = 0.0
+    detail:  str = ''
+    risk:    str = 'low'          # low | medium | high
+    blocked: str = ''             # non-empty → cannot be selected right now (reason)
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass
+class ReviewScan:
+    target_id: str
+    items:     List[ReviewItem] = field(default_factory=list)
+    notes:     List[str] = field(default_factory=list)
+    warning:   str = ''           # shown prominently (e.g. "deleted volumes cannot be recovered")
+    permanent: bool = True        # False → items go to Trash / can be restored
+
 
 class BaseCleaner(ABC):
     """Every OS-specific cleaner inherits this."""
@@ -74,18 +133,35 @@ class BaseCleaner(ABC):
         ...
 
     @abstractmethod
-    def clean(self, target_id: str, dry: bool = True) -> CleanResult:
-        """Execute clean for a target. If dry=True, no changes made."""
+    def clean(self, target_id: str, dry: bool = True, *, unattended: bool = False,
+              plan: Optional["E.Plan"] = None) -> CleanResult:
+        """
+        Execute clean for a target. If dry=True, no changes made and the result
+        carries the PLAN. Passing that plan back (dry=False, plan=...) executes
+        exactly what was previewed — every item is re-validated right before it
+        is deleted, so anything that changed in between is skipped, never deleted.
+        unattended=True → background run: stricter age policy, auto-tier only.
+        """
         ...
 
+    # ── Review tier (per-item selection) ─────────────────────
+    def review_scan(self, target_id: str, progress_cb=None) -> ReviewScan:
+        raise NotImplementedError(target_id)
+
+    def review_clean(self, target_id: str, item_ids: List[str], dry: bool = False) -> CleanResult:
+        raise NotImplementedError(target_id)
+
+    def targets_by_tier(self, tier: str) -> List[CleanTarget]:
+        return [t for t in self.get_targets() if t.tier == tier]
+
     def clean_many(self, target_ids: List[str], dry: bool = True,
-                   progress_cb=None) -> List[CleanResult]:
+                   progress_cb=None, unattended: bool = False) -> List[CleanResult]:
         results = []
         for i, tid in enumerate(target_ids):
             if progress_cb:
                 pct = int((i / len(target_ids)) * 90)
                 progress_cb(pct, tid)
-            results.append(self.clean(tid, dry=dry))
+            results.append(self.clean(tid, dry=dry, unattended=unattended))
         if progress_cb:
             progress_cb(100, 'done')
         return results
@@ -158,7 +234,7 @@ class BaseCleaner(ABC):
                     if progress_cb:
                         pct = int((done_count / len(target_ids)) * 90)
                         progress_cb(pct, tid)
-            except TimeoutError:
+            except FuturesTimeout:
                 # Whole batch took too long — mark whatever hasn't finished
                 # yet as timed out and move on; those threads keep running
                 # in the background and will populate the cache whenever
@@ -207,20 +283,125 @@ class BaseCleaner(ABC):
 
     @staticmethod
     def remove_dir_contents(path: Path, rollback_list: list, label: str):
+        """Delete everything inside `path` (symlinks removed, never followed).
+        Returns bytes ACTUALLY freed — measured per item, not assumed."""
         freed = 0
-        for item in path.iterdir():
+        try:
+            children = list(os.scandir(path))
+        except OSError:
+            return 0
+        for entry in children:
             try:
-                sz = BaseCleaner.dir_size(item) if item.is_dir() else item.stat().st_size
+                before = E.tree_stats(entry.path).size
+                E.remove_path(entry.path)
+                left = E.tree_stats(entry.path).size if os.path.lexists(entry.path) else 0
+                done = max(0, before - left)
                 rollback_list.append({
                     'time':  time.strftime('%Y-%m-%dT%H:%M:%S'),
                     'type':  label,
-                    'path':  str(item),
-                    'size':  sz,
+                    'path':  entry.path,
+                    'size':  done,
                     'note':  'cache — auto-rebuilds',
                 })
-                if item.is_dir(): shutil.rmtree(item, ignore_errors=True)
-                else:             item.unlink(missing_ok=True)
-                freed += sz
+                freed += done
             except (OSError, PermissionError):
                 pass
         return freed
+
+
+# ══════════════════════════════════════════════════════════════
+# Plan-based mixin (rules → plan → guarded execute)
+# ══════════════════════════════════════════════════════════════
+
+class PlanCleanerMixin:
+    """
+    Gives a cleaner rule-driven targets (rules/*.toml). A cleaner using this
+    sets `self.ctx` (RuleContext) and `self.ruleset` (RuleSet); targets whose
+    rules live in the TOML files then need no code at all.
+    """
+    ctx = None
+    ruleset = None
+    _review_cache: dict = {}          # {target_id: (monotonic time, Plan)}
+    REVIEW_TTL = 600
+
+    # ── plan building (override for code-driven providers) ──
+    def build_plan(self, target_id: str, *, unattended: bool = False) -> "E.Plan":
+        return self.ruleset.plan(target_id, self.ctx, unattended=unattended)
+
+    def has_rules(self, target_id: str) -> bool:
+        return bool(self.ruleset and self.ruleset.rules_for(target_id, self.ctx))
+
+    def _execute(self, items: List["E.PlanItem"]) -> "E.ExecResult":
+        """Hook: cleaner con ghi đè để chạy thêm loại mục đặc biệt (vd. mục dùng helper root)."""
+        return E.execute_plan(items, guards=E.Guards(max_age=0))
+
+    # ── plan → CleanResult ──
+    def result_from_plan(self, target_id: str, plan: "E.Plan", *, dry: bool, label: str = '') -> CleanResult:
+        r = CleanResult(target_id, dry=dry)
+        items = plan.deletable
+        r.notes = list(plan.notes)
+        r.skipped = list(plan.skipped)
+        r.blocked = len(plan.items) - len(items)
+        r.planned_bytes = plan.total_bytes
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%S')
+        if dry:
+            r.freed_bytes = plan.total_bytes
+            r.files_removed = plan.total_files
+            r.plan = plan
+            r.rollback = [self._rb(stamp, label or target_id, it, it.size, plan_only=True) for it in items]
+            return r
+        meter = E.FreeSpaceMeter([i.path for i in items])
+        meter.begin()
+        res = self._execute(items)
+        measured = meter.end()
+        if measured is not None:
+            res.measured = measured
+        r.freed_bytes = res.freed
+        r.files_removed = res.removed
+        r.measured_bytes = res.measured
+        r.notes += [n for n in res.notes if n not in r.notes]
+        r.skipped += res.skipped
+        if res.errors:
+            r.error = '; '.join(res.errors[:3])
+        by_item = {o.item.path: o for o in res.outcomes}
+        r.rollback = [self._rb(stamp, label or target_id, it, by_item[it.path].freed)
+                      for it in items if it.path in by_item and by_item[it.path].status in ('removed', 'partial')]
+        return r
+
+    @staticmethod
+    def _rb(stamp: str, label: str, it: "E.PlanItem", size: int, plan_only: bool = False) -> dict:
+        note = it.note or 'cache — auto-rebuilds'
+        if it.kind == 'files':
+            note = f'{it.files} files · {note}'
+        return {'time': stamp, 'type': label, 'path': it.display, 'size': size, 'note': note}
+
+    def clean_rule_target(self, target_id: str, dry: bool, unattended: bool,
+                          plan: Optional["E.Plan"] = None, label: str = '') -> CleanResult:
+        if plan is None or (time.time() - plan.created) > 3600:
+            plan = self.build_plan(target_id, unattended=unattended)
+        res = self.result_from_plan(target_id, plan, dry=dry, label=label)
+        if not dry:
+            self._cache_invalidate(target_id)
+            self._review_cache.pop(target_id, None)
+        return res
+
+    # ── Review tier on top of plans ──
+    def review_scan(self, target_id: str, progress_cb=None) -> ReviewScan:
+        plan = self.build_plan(target_id, unattended=False)
+        self._review_cache[target_id] = (time.monotonic(), plan)
+        scan = ReviewScan(target_id, notes=list(plan.notes))
+        for it in sorted(plan.items, key=lambda i: -i.size):
+            scan.items.append(ReviewItem(
+                id=it.id, label=it.display, size=it.size, files=it.files, newest=it.newest,
+                detail=it.note, risk=it.risk, blocked=it.blocked, payload={'path': it.path, 'rule': it.group}))
+        return scan
+
+    def review_clean(self, target_id: str, item_ids: List[str], dry: bool = False) -> CleanResult:
+        cached = self._review_cache.get(target_id)
+        if cached and (time.monotonic() - cached[0]) < self.REVIEW_TTL:
+            plan = cached[1]
+        else:
+            plan = self.build_plan(target_id, unattended=False)       # rescan; ids are stable (hash of path)
+        wanted = set(item_ids)
+        sel = E.Plan(target_id, [i for i in plan.items if i.id in wanted], list(plan.skipped), list(plan.notes))
+        return self.result_from_plan(target_id, sel, dry=dry, label=target_id)
