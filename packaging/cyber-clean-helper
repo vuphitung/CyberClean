@@ -52,6 +52,17 @@ MCowBQYDK2VwAyEA0HIxLhJ7mZ31Bv7p6t1DK8gGC4/eyS6myJNYz9LYms0=
 -----END PUBLIC KEY-----
 PEM
 
+_on_term() {
+  local pids
+  pids=$(jobs -p 2>/dev/null || true)
+  if [[ -n $pids ]]; then
+    kill -TERM $pids 2>/dev/null || true
+    wait $pids 2>/dev/null || true
+  fi
+  exit 130
+}
+trap _on_term TERM INT HUP
+
 die()  { printf 'cyber-clean-helper: %s\n' "$1" >&2; exit "${2:-1}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed" 127; }
 nargs() { [[ $1 -eq $2 ]] || die "wrong number of arguments" 2; }   # nargs $# expected
@@ -88,21 +99,252 @@ PROTECTED_GLOBS=(
   python python3 python3-minimal 'libpython3*'
   cyberclean cyber-clean
 )
-is_protected_pkg() {
-  local g
+
+# Chuẩn hóa định danh gói trước khi kiểm tra danh sách bảo vệ:
+# - Bỏ tiền tố repo (core/gnome-shell)
+# - Bỏ hậu tố kiến trúc Debian/Ubuntu (:amd64, :i386, :arm64, :any, :native...)
+# - Bỏ hậu tố kiến trúc RPM/zypper (.x86_64, .i686, .noarch, .aarch64, .armv7hl...)
+# - Bỏ hậu tố phiên bản XBPS / RPM / Pacman (<name>-<ver>_<rev> hoặc <name>-<ver>-<rel>)
+normalize_pkg_id() {
+  local p=$1
+  p=${p##*/}
+  p=${p%%:*}
+  case $p in
+    *.x86_64|*.i686|*.i586|*.i386|*.noarch|*.aarch64|*.armv7hl|*.ppc64le|*.s390x|*.riscv64|*.src)
+      p=${p%.*} ;;
+  esac
+  printf '%s' "$p"
+}
+
+strip_pkg_ver() {
+  local p=$1
+  if [[ $p =~ ^([A-Za-z0-9][A-Za-z0-9+._-]*?)-[0-9][A-Za-z0-9+._:~-]*$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+_match_protected_one() {
+  local cand=$1 cand_low g g_low
+  [[ -n $cand ]] || return 1
+  cand_low=${cand,,}
   for g in "${PROTECTED_GLOBS[@]}"; do
+    g_low=${g,,}
     # shellcheck disable=SC2053  # so sánh glob có chủ ý
-    [[ $1 == $g ]] && return 0
+    if [[ $cand == $g || $cand_low == $g_low ]]; then
+      return 0
+    fi
   done
   return 1
 }
 
+is_protected_pkg() {
+  local raw=$1 norm stripped
+  norm=$(normalize_pkg_id "$raw")
+  stripped=$(strip_pkg_ver "$norm")
+  _match_protected_one "$raw" && return 0
+  _match_protected_one "$norm" && return 0
+  _match_protected_one "$stripped" && return 0
+  return 1
+}
+
+# Kiểm tra giao dịch dự kiến (bao gồm các gói bị gỡ kéo theo bởi dependency).
+# Nếu bất kỳ gói nào trong giao dịch thuộc diện bảo vệ, hoặc kết quả mô phỏng
+# không thể phân tích đáng tin cậy → từ chối thực thi (exit 3).
+verify_pacman_tx() {
+  local out line pkg count=0 noop=0
+  out=$(pacman -Rsp "$@" 2>&1) || die "cannot simulate pacman removal transaction" 3
+  [[ -n ${out//[[:space:]]/} ]] || die "cannot verify pacman removal transaction (empty output)" 3
+  while IFS= read -r line; do
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    if [[ $line =~ ^[[:space:]]*(there[[:space:]]+is[[:space:]]+nothing[[:space:]]+to[[:space:]]+do|nothing[[:space:]]+to[[:space:]]+do)[[:space:]]*$ ]]; then
+      noop=1
+      continue
+    fi
+    if [[ $line == *[[:space:]]* ]] || ! valid_pkg "$line" || [[ ! $line =~ -[0-9] ]]; then
+      die "cannot parse pacman removal transaction: $line" 3
+    fi
+    pkg=$(strip_pkg_ver "$(normalize_pkg_id "$line")")
+    if is_protected_pkg "$line" || is_protected_pkg "$pkg"; then
+      die "refusing transaction: would remove protected package ($line)" 3
+    fi
+    count=$((count + 1))
+  done <<< "$out"
+  if (( count == 0 )); then
+    die "cannot verify pacman removal transaction (no removable packages parsed)" 3
+  fi
+}
+
+verify_apt_tx() {
+  local out line remv count=0 noop=0 mode=${1:-}
+  out=$(DEBIAN_FRONTEND=noninteractive apt-get -s "$@" 2>&1) || die "cannot simulate apt removal transaction" 3
+  [[ -n ${out//[[:space:]]/} ]] || die "cannot verify apt removal transaction (empty output)" 3
+  while IFS= read -r line; do
+    if [[ $line =~ ^(Remv|Purg)[[:space:]]+([^[:space:]]+) ]]; then
+      remv=${BASH_REMATCH[2]}
+      valid_pkg "$remv" || die "cannot parse apt removal package: $remv" 3
+      if is_protected_pkg "$remv"; then
+        die "refusing transaction: would remove protected package ($remv)" 3
+      fi
+      count=$((count + 1))
+    elif [[ $line =~ ^(E:|W:[[:space:]]*Unable|Broken|The[[:space:]]+following[[:space:]]+packages[[:space:]]+have[[:space:]]+unmet[[:space:]]+dependencies) ]]; then
+      die "cannot verify apt removal transaction: $line" 3
+    elif [[ $line =~ ^[0-9]+[[:space:]]+upgraded,[[:space:]]+[0-9]+[[:space:]]+newly[[:space:]]+installed,[[:space:]]+0[[:space:]]+to[[:space:]]+remove ]]; then
+      noop=1
+    fi
+  done <<< "$out"
+  if (( count == 0 )); then
+    if [[ $mode == "autoremove" && $noop -eq 1 ]]; then
+      return 0
+    fi
+    die "cannot verify apt removal transaction (unparseable or empty removal set)" 3
+  fi
+}
+
+verify_dnf_tx() {
+  local out line pkg_tok arch_tok rc=0 count=0 noop=0 in_remove=0 mode=${1:-}
+  out=$(dnf --assumeno "$@" 2>&1) || rc=$?
+  (( rc <= 1 )) || die "cannot simulate dnf removal transaction" 3
+  [[ -n ${out//[[:space:]]/} ]] || die "cannot verify dnf removal transaction (empty output)" 3
+  if [[ $out == *"Error:"* || $out == *"Problem:"* || $out == *"No match for argument:"* || $out == *"No packages marked for removal"* ]]; then
+    die "cannot verify dnf removal transaction" 3
+  fi
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*Nothing[[:space:]]+to[[:space:]]+do\.?[[:space:]]*$ ]]; then
+      noop=1
+      in_remove=0
+      continue
+    fi
+    if [[ $line =~ ^(Removing|Removing[[:space:]]+dependent[[:space:]]+packages|Removing[[:space:]]+unused[[:space:]]+dependencies):[[:space:]]*$ ]]; then
+      in_remove=1
+      continue
+    fi
+    if [[ $line =~ ^(Installing|Upgrading|Downgrading|Reinstalling|Skipping|Transaction[[:space:]]+Summary|=====) ]]; then
+      in_remove=0
+      continue
+    fi
+    if [[ $line =~ ^[[:space:]]*(Removing|Erasing|Remove):?[[:space:]]+([A-Za-z0-9][A-Za-z0-9+._:@-]*)[[:space:]]*$ ]]; then
+      pkg_tok=${BASH_REMATCH[2]}
+      valid_pkg "$pkg_tok" || die "cannot parse dnf removal package: $pkg_tok" 3
+      if is_protected_pkg "$pkg_tok"; then
+        die "refusing transaction: would remove protected package ($pkg_tok)" 3
+      fi
+      count=$((count + 1))
+      continue
+    fi
+    if (( in_remove == 1 )); then
+      if [[ -z ${line//[[:space:]]/} ]]; then
+        in_remove=0
+        continue
+      fi
+      if [[ $line =~ ^[[:space:]]+([A-Za-z0-9][A-Za-z0-9+._:@-]*)[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+([0-9A-Za-z+._:~-]+) ]]; then
+        pkg_tok=${BASH_REMATCH[1]}
+        arch_tok=${BASH_REMATCH[2]}
+        valid_pkg "$pkg_tok" || die "cannot parse dnf removal package: $pkg_tok" 3
+        if is_protected_pkg "$pkg_tok" || is_protected_pkg "${pkg_tok}.${arch_tok}"; then
+          die "refusing transaction: would remove protected package ($pkg_tok)" 3
+        fi
+        count=$((count + 1))
+      else
+        die "cannot parse dnf removal transaction row: $line" 3
+      fi
+    fi
+  done <<< "$out"
+  if (( count == 0 )); then
+    if [[ $mode == "autoremove" && $noop -eq 1 ]]; then
+      return 0
+    fi
+    die "cannot verify dnf removal transaction (unrecognized transaction layout)" 3
+  fi
+}
+
+verify_zypper_tx() {
+  local out line tok count=0 noop=0 in_remove=0
+  out=$(zypper --non-interactive remove --dry-run "$@" 2>&1) || die "cannot simulate zypper removal transaction" 3
+  [[ -n ${out//[[:space:]]/} ]] || die "cannot verify zypper removal transaction (empty output)" 3
+  if [[ $out == *"Problem:"* || $out == *"No provider"* || $out == *"not found in package names"* ]]; then
+    die "cannot verify zypper removal transaction" 3
+  fi
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*Nothing[[:space:]]+to[[:space:]]+do\.?[[:space:]]*$ ]]; then
+      noop=1
+      in_remove=0
+      continue
+    fi
+    if [[ $line =~ ^The[[:space:]]+following[[:space:]]+.*package.*are[[:space:]]+going[[:space:]]+to[[:space:]]+be[[:space:]]+removed: ]]        || [[ $line =~ ^The[[:space:]]+following[[:space:]]+package[[:space:]]+is[[:space:]]+going[[:space:]]+to[[:space:]]+be[[:space:]]+removed: ]]; then
+      in_remove=1
+      continue
+    fi
+    if [[ $line =~ ^[0-9]+[[:space:]]+package.*to[[:space:]]+remove ]]; then
+      in_remove=0
+      continue
+    fi
+    if [[ $line =~ ^[[:space:]]*(Removing|Remove):?[[:space:]]+([A-Za-z0-9][A-Za-z0-9+._:@-]*)[[:space:]]*$ ]]; then
+      tok=${BASH_REMATCH[2]}
+      valid_pkg "$tok" || die "cannot parse zypper removal package: $tok" 3
+      if is_protected_pkg "$tok"; then
+        die "refusing transaction: would remove protected package ($tok)" 3
+      fi
+      count=$((count + 1))
+      continue
+    fi
+    if (( in_remove == 1 )); then
+      if [[ -z ${line//[[:space:]]/} ]]; then
+        in_remove=0
+        continue
+      fi
+      if [[ $line =~ ^[[:space:]]{2,}(.+)$ ]]; then
+        for tok in ${BASH_REMATCH[1]}; do
+          valid_pkg "$tok" || die "cannot parse zypper removal package: $tok" 3
+          if is_protected_pkg "$tok"; then
+            die "refusing transaction: would remove protected package ($tok)" 3
+          fi
+          count=$((count + 1))
+        done
+      else
+        die "cannot parse zypper removal transaction line: $line" 3
+      fi
+    fi
+  done <<< "$out"
+  if (( count == 0 )); then
+    die "cannot verify zypper removal transaction (unrecognized transaction layout)" 3
+  fi
+}
+
+verify_xbps_tx() {
+  local out line pkg_spec count=0 noop=0 mode=${1:-}
+  out=$(xbps-remove -n "$@" 2>&1) || die "cannot simulate xbps removal transaction" 3
+  [[ -n ${out//[[:space:]]/} ]] || die "cannot verify xbps removal transaction (empty output)" 3
+  if [[ $out == *"ERROR:"* || $out == *"broken"* || $out == *"not currently installed"* ]]; then
+    die "cannot verify xbps removal transaction" 3
+  fi
+  while IFS= read -r line; do
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    if [[ $line =~ ^[[:space:]]*(There[[:space:]]+are[[:space:]]+no[[:space:]]+orphaned[[:space:]]+packages|Nothing[[:space:]]+to[[:space:]]+do)\.?[[:space:]]*$ ]]; then
+      noop=1
+      continue
+    fi
+    if [[ $line =~ ^[[:space:]]*([A-Za-z0-9][A-Za-z0-9+._-]*-[0-9][A-Za-z0-9+._:~-]*_[0-9]+)([[:space:]]+(remove|unlink)([[:space:]]+.*)?)?[[:space:]]*$ ]]; then
+      pkg_spec=${BASH_REMATCH[1]}
+      valid_pkg "$pkg_spec" || die "cannot parse xbps package: $pkg_spec" 3
+      if is_protected_pkg "$pkg_spec"; then
+        die "refusing transaction: would remove protected package ($pkg_spec)" 3
+      fi
+      count=$((count + 1))
+    else
+      die "cannot parse xbps removal transaction line: $line" 3
+    fi
+  done <<< "$out"
+  if (( count == 0 )); then
+    if [[ $mode == "-o" && $noop -eq 1 ]]; then
+      return 0
+    fi
+    die "cannot verify xbps removal transaction (unrecognized transaction layout)" 3
+  fi
+}
+
 # ── An toàn đường dẫn ────────────────────────────────────────────────────────
-# Thư mục "đáng tin": thuộc root, không ai khác ghi được → user thường không hoán đổi được thành phần
-# đường dẫn (chống TOCTOU / symlink swap).
-# Ngoại lệ có kiểm soát: thư mục group-writable bởi một NHÓM HỆ THỐNG không có người dùng thường nào
-# thuộc về. Ubuntu để /var/log là `root:syslog 775` — nếu từ chối thì helper không dọn được log nào
-# trên distro phổ biến nhất. Nhóm có thành viên (kể cả primary group) với uid >= 1000 thì KHÔNG đáng tin.
 trusted_group() {
   local gid=$1 line members m uid
   [[ $gid =~ ^[0-9]+$ ]] || return 1
@@ -112,9 +354,8 @@ trusted_group() {
   members=${line##*:}
   for m in ${members//,/ }; do
     uid=$(getent passwd "$m" 2>/dev/null | cut -d: -f3)
-    [[ $uid =~ ^[0-9]+$ ]] && (( uid < 1000 )) || return 1      # thành viên là người dùng thường / không rõ
+    [[ $uid =~ ^[0-9]+$ ]] && (( uid < 1000 )) || return 1
   done
-  # người dùng thường có primary group = gid này?
   getent passwd 2>/dev/null | awk -F: -v g="$gid" '$4 == g && $3 >= 1000 { f = 1 } END { exit f }' || return 1
   return 0
 }
@@ -123,11 +364,10 @@ trusted_dir() {
   st=$(stat -c '%u %a %g' -- "$1" 2>/dev/null) || return 1
   read -r own mode gid <<< "$st"
   [[ $own == 0 ]] || return 1
-  (( (8#$mode & 8#002) == 0 )) || return 1            # other-writable: không bao giờ
-  (( (8#$mode & 8#020) == 0 )) && return 0            # group-writable? chỉ khi nhóm hệ thống sạch
+  (( (8#$mode & 8#002) == 0 )) || return 1
+  (( (8#$mode & 8#020) == 0 )) && return 0
   trusted_group "$gid"
 }
-# /var/crash là 1777 (sticky) trên Ubuntu: chấp nhận khi chỉ xóa con trực tiếp.
 sticky_root_dir() {
   local st own mode
   st=$(stat -c '%u %a' -- "$1" 2>/dev/null) || return 1
@@ -135,9 +375,6 @@ sticky_root_dir() {
   [[ $own == 0 && ${#mode} -eq 4 && ${mode:0:1} == 1 ]]
 }
 
-# safe_unlink <path> <root> <maxdepth>
-# Chỉ xóa file thường, không symlink, đường dẫn chuẩn hóa tuyệt đối nằm trong
-# <root>, mọi thư mục cha từ <root> đến file đều đáng tin, file không mới sửa.
 safe_unlink() {
   local p=$1 root=$2 maxdepth=$3
   [[ $p == "$root"/* ]] || return 1
@@ -152,7 +389,6 @@ safe_unlink() {
   local dir=${p%/*}
   while :; do
     if ! trusted_dir "$dir"; then
-      # ngoại lệ duy nhất: chính $CRASH_ROOT (sticky) và file nằm trực tiếp trong đó
       [[ $dir == "$root" && $root == "$CRASH_ROOT" ]] && sticky_root_dir "$dir" || return 1
     fi
     [[ $dir == "$root" ]] && break
@@ -161,7 +397,7 @@ safe_unlink() {
   done
   local c
   c=$(realpath -e -- "$p" 2>/dev/null) || return 1
-  [[ $c == "$p" ]] || return 1            # có symlink ở thành phần cha
+  [[ $c == "$p" ]] || return 1
   [[ -z $(find "$p" -maxdepth 0 -mmin "-$RECENT_MINUTES" 2>/dev/null) ]] || return 1
   rm -f -- "$p"
 }
@@ -182,7 +418,6 @@ is_coredump_name() { case ${1##*/} in core.*) return 0 ;; esac; return 1; }
 pacman_busy() {
   [[ -e $PACMAN_LOCK ]] && return 0
   local pid st
-  # bỏ qua tiến trình zombie (đã chết nhưng chưa được reap) — không phải "đang chạy"
   while read -r pid; do
     st=$(ps -o stat= -p "$pid" 2>/dev/null) || continue
     [[ $st == Z* ]] || return 0
@@ -224,7 +459,6 @@ update_apply() {
   # shellcheck disable=SC2064
   trap "rm -rf --one-file-system -- '$work'" EXIT
 
-  # 1) sao chép MỘT lần vào vùng root-owned; mọi bước sau chỉ đọc bản sao này
   cp -P -- "$tarball" "$work/pkg.tar.gz" || die "cannot copy tarball" 1
   cp -P -- "$sigfile"  "$work/sig.b64"    || die "cannot copy signature" 1
   [[ -f $work/pkg.tar.gz && ! -L $work/pkg.tar.gz && -f $work/sig.b64 && ! -L $work/sig.b64 ]] \
@@ -235,24 +469,19 @@ update_apply() {
   [[ $(stat -c %s -- "$work/sig.bin") -eq 64 ]] || die "signature must be 64 bytes" 3
   printf '%s\n' "$RELEASE_PUBKEY_PEM" > "$work/pub.pem"
 
-  # 2) xác minh chữ ký trên bản sao
   openssl pkeyutl -verify -pubin -inkey "$work/pub.pem" -rawin \
       -in "$work/pkg.tar.gz" -sigfile "$work/sig.bin" >/dev/null 2>&1 \
     || die "SIGNATURE INVALID — update refused" 3
 
-  # 3) giải nén vào thư mục root-owned
   mkdir "$work/x" || die "mkdir failed" 1
   tar -xzf "$work/pkg.tar.gz" -C "$work/x" --no-same-owner 2>/dev/null || die "cannot extract archive" 1
   local new=$work/x/CyberClean l tgt
   [[ -d $new && ! -L $new && -f $new/CyberClean && -x $new/CyberClean ]] || die "unexpected archive layout" 1
-  # symlink phải trỏ vào trong cây vừa giải nén
   while IFS= read -r -d '' l; do
     tgt=$(readlink -f -- "$l" 2>/dev/null) || die "bad symlink in archive" 3
     [[ $tgt == "$work/x/"* ]] || die "symlink escapes archive: ${l#"$work"/}" 3
   done < <(find "$work/x" -type l -print0)
 
-  # 4) chống replay/downgrade: bản mới phải mang VERSION khớp tag và mới hơn bản đang cài.
-  #    Các release cũ (đã ký nhưng không có VERSION) vì vậy bị từ chối.
   [[ -f $new/VERSION && ! -L $new/VERSION ]] || die "archive has no VERSION file — refused" 3
   local newver curver=""
   newver=$(tr -d ' \t\r\n' < "$new/VERSION")
@@ -267,7 +496,6 @@ update_apply() {
     fi
   fi
 
-  # 5) quyền hạn: root sở hữu, không setuid/setgid, không ai khác ghi được
   chown -R root:root "$work/x" || die "chown failed" 1
   find "$work/x" -perm /6000 -exec chmod u-s,g-s {} + 2>/dev/null
   chmod -R go-w "$work/x"
@@ -275,18 +503,20 @@ update_apply() {
   find "$work/x" -type f -perm /u+x -exec chmod go+rx {} + 2>/dev/null
   find "$work/x" -type f ! -perm /u+x -exec chmod go+r {} + 2>/dev/null
 
-  # 6) hoán đổi (cùng filesystem → rename); lỗi thì khôi phục bản cũ
+  # Bảo vệ bước hoán đổi nguyên tử thư mục cài đặt khỏi bị ngắt nửa chừng bởi tín hiệu dừng
+  trap '' TERM INT HUP
   local backup=$APP_PARENT/_backup
   rm -rf --one-file-system -- "$backup"
   if [[ -e $APP_DIR ]]; then
-    mv -T -- "$APP_DIR" "$backup" || die "cannot move the current install aside" 1
+    mv -T -- "$APP_DIR" "$backup" || { trap _on_term TERM INT HUP; die "cannot move the current install aside" 1; }
   fi
   if ! mv -T -- "$new" "$APP_DIR"; then
     [[ -e $backup ]] && mv -T -- "$backup" "$APP_DIR"
+    trap _on_term TERM INT HUP
     die "install failed — rolled back" 1
   fi
+  trap _on_term TERM INT HUP
 
-  # 7) nếu release kèm helper mới (đã nằm trong gói được ký) thì cập nhật helper
   if [[ -f $APP_DIR/cyber-clean-helper && ! -L $APP_DIR/cyber-clean-helper ]]; then
     if head -n1 "$APP_DIR/cyber-clean-helper" | grep -q '^#!/bin/bash' \
        && grep -q '^HELPER_PROTOCOL=' "$APP_DIR/cyber-clean-helper" \
@@ -298,9 +528,6 @@ update_apply() {
   echo "updated=$newver"
 }
 
-# ── Tự cài helper + sudoers (dùng bởi install.sh và nâng cấp helper trong app) ─
-# CHỈ chạy được khi: euid=0 VÀ script đang nằm đúng ở $APP_DIR (root-owned).
-# Gọi từ /usr/local/bin qua sudo sẽ bị từ chối → user thường không lợi dụng được.
 install_helper() {
   [[ $EUID -eq 0 ]] || die "install-helper must run as root (use pkexec)" 1
   local self
@@ -365,22 +592,25 @@ case $action in
     DEBIAN_FRONTEND=noninteractive apt-get clean ;;
   apt-autoremove)
     nargs $# 0; need apt-get
+    verify_apt_tx autoremove
     DEBIAN_FRONTEND=noninteractive apt-get autoremove -y ;;
   dnf-clean)
     nargs $# 0; need dnf
     dnf clean all ;;
   dnf-autoremove)
     nargs $# 0; need dnf
+    verify_dnf_tx autoremove
     dnf autoremove -y ;;
   zypper-clean)
     nargs $# 0; need zypper
     zypper --non-interactive clean --all ;;
   xbps-clean-cache)
     nargs $# 0; need xbps-remove
-    xbps-remove -o ;;
+    xbps-remove -O ;;
   xbps-orphans)
     nargs $# 0; need xbps-remove
-    xbps-remove -O ;;
+    verify_xbps_tx -o
+    xbps-remove -y -o ;;
   apk-clean)
     nargs $# 0; need apk
     apk cache clean ;;
@@ -394,7 +624,7 @@ case $action in
     nargs $# 0; need journalctl
     journalctl --vacuum-time=7d --vacuum-size=500M ;;
 
-  # ── gỡ gói: đúng MỘT tên đã kiểm tra, không phải gói lõi ──────────────────
+  # ── gỡ gói: đúng MỘT tên đã kiểm tra, chuẩn hóa định danh + kiểm tra giao dịch ──
   pacman-remove|apt-remove|dnf-remove|zypper-remove|xbps-remove)
     nargs $# 1
     pkg=$1
@@ -404,18 +634,23 @@ case $action in
       pacman-remove)
         need pacman
         pacman_busy && die "pacman is running (db.lck present)" 75
+        verify_pacman_tx -- "$pkg"
         pacman -Rns --noconfirm -- "$pkg" ;;
       apt-remove)
         need apt-get
+        verify_apt_tx remove -- "$pkg"
         DEBIAN_FRONTEND=noninteractive apt-get remove -y -- "$pkg" ;;
       dnf-remove)
         need dnf
+        verify_dnf_tx remove -- "$pkg"
         dnf remove -y -- "$pkg" ;;
       zypper-remove)
         need zypper
+        verify_zypper_tx -- "$pkg"
         zypper --non-interactive remove -- "$pkg" ;;
       xbps-remove)
         need xbps-remove
+        verify_xbps_tx -- "$pkg"
         xbps-remove -y -- "$pkg" ;;
     esac ;;
 
@@ -438,6 +673,7 @@ case $action in
     done
     (( ${#pkgs[@]} > 0 )) || die "no packages given" 2
     (( ${#pkgs[@]} <= 200 )) || die "too many packages in one call" 2
+    verify_pacman_tx -- "${pkgs[@]}"
     pacman -Rns --noconfirm -- "${pkgs[@]}" ;;
 
   snap-remove-rev)
@@ -481,6 +717,18 @@ case $action in
     nargs $# 1
     [[ $1 =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= 200 )) || die "swappiness must be 0-200" 2
     echo "$((10#$1))" > /proc/sys/vm/swappiness ;;
+  renice-game)
+    nargs $# 1
+    [[ $1 =~ ^[0-9]{1,9}$ ]] && (( 10#$1 > 10 )) || die "invalid pid" 2
+    [[ -d "/proc/$1" ]] || die "process not found" 2
+    proc_uid=$(stat -c '%u' "/proc/$1" 2>/dev/null) || die "cannot stat process" 2
+    caller_uid=${SUDO_UID:-${PKEXEC_UID:-0}}
+    if (( caller_uid >= 1000 )); then
+      [[ $proc_uid == "$caller_uid" ]] || die "refusing to renice process not owned by caller" 3
+    else
+      (( proc_uid >= 1000 )) || die "refusing to renice system process" 3
+    fi
+    renice -n -10 -p "$1" >/dev/null 2>&1 ;;
 
   update-apply)  update_apply "$@" ;;
   install-helper) nargs $# 0; install_helper ;;

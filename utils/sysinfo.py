@@ -214,6 +214,8 @@ def _read_temperature():
                             all_temps[f'{name}/{e.label or "core"}'] = e.current
                 if all_temps:
                     max_temp = max(all_temps.values())
+                    with _temp_lock:
+                        _temp_cache = (max_temp, all_temps, time.time())
                     return all_temps, max_temp
     except Exception:
         pass
@@ -233,6 +235,8 @@ def _read_temperature():
                     pass
             if all_temps:
                 max_temp = max(all_temps.values())
+                with _temp_lock:
+                    _temp_cache = (max_temp, all_temps, time.time())
                 return all_temps, max_temp
         except Exception:
             pass
@@ -253,6 +257,8 @@ def _read_temperature():
                         pass
             if all_temps:
                 max_temp = max(all_temps.values())
+                with _temp_lock:
+                    _temp_cache = (max_temp, all_temps, time.time())
                 return all_temps, max_temp
         except Exception:
             pass
@@ -268,6 +274,8 @@ def _read_temperature():
                     all_temps[f'acpi/zone{i}'] = v
             if all_temps:
                 max_temp = max(all_temps.values())
+                with _temp_lock:
+                    _temp_cache = (max_temp, all_temps, time.time())
                 return all_temps, max_temp
         except Exception:
             pass
@@ -283,6 +291,8 @@ def _read_temperature():
                         all_temps[f'ohm/{s.Name}'] = v
             if all_temps:
                 max_temp = max(all_temps.values())
+                with _temp_lock:
+                    _temp_cache = (max_temp, all_temps, time.time())
                 return all_temps, max_temp
         except Exception:
             pass
@@ -308,6 +318,8 @@ def _read_temperature():
                     pass
             if all_temps:
                 max_temp = max(all_temps.values())
+                with _temp_lock:
+                    _temp_cache = (max_temp, all_temps, time.time())
                 return all_temps, max_temp
         except Exception:
             pass
@@ -319,7 +331,7 @@ def _read_temperature():
 
 # ── Process skip list ──────────────────────────────────────────
 _SKIP_NAMES = {
-    'python3', 'python', 'python.exe', 'py.exe', 'ps', 'grep', 'pgrep',
+    'python3', 'python', 'python.exe', 'py.exe', 'cyberclean', 'cyberclean.exe', 'ps', 'grep', 'pgrep',
     # Windows pseudo-processes with bogus CPU%
     'system idle process', 'system', 'registry', 'memory compression',
     'secure system', 'smss.exe', 'ntoskrnl.exe',
@@ -339,6 +351,23 @@ def _strip_exe(n: str) -> str:
     return n[:-4] if n.endswith('.exe') else n
 
 _SKIP_NAMES_NORM = {_strip_exe(n) for n in _SKIP_NAMES}
+_KERNEL_PREFIXES = (
+    "kworker/", "ksoftirqd/", "migration/", "irq/", "rcu_", "cpuhp/",
+    "watchdog/", "nvme-", "scsi_", "jbd2/", "ext4-", "btrfs-",
+)
+
+
+def _is_kernel_or_skipped_proc(arg1, arg2=None) -> bool:
+    if isinstance(arg1, int):
+        pid, name = arg1, str(arg2 or "")
+    else:
+        name, pid = str(arg1 or ""), int(arg2) if isinstance(arg2, int) else -1
+    if 0 <= pid <= 2:
+        return True
+    norm = _strip_exe(name)
+    if not norm or norm in _SKIP_NAMES_NORM:
+        return True
+    return norm.startswith(_KERNEL_PREFIXES)
 
 
 def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
@@ -440,7 +469,7 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
             pname = p.info['name'] or ''
             if _IS_WIN and p.info['pid'] in (0, 4):
                 continue
-            if _strip_exe(pname) in _SKIP_NAMES_NORM:
+            if _is_kernel_or_skipped_proc(pname):
                 continue
             raw_cpu = p.info['cpu_percent'] or 0
             # Normalise: psutil can report > 100% on multi-core systems

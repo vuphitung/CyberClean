@@ -117,6 +117,9 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             self._rules_error = str(e)
         else:
             self._rules_error = ''
+        self._estimate_cache = {}
+        self._approved_plans = {}
+        self._review_cache = {}
         self._targets: Dict[str, CleanTarget] = {}
         self._refresh_targets()
 
@@ -158,9 +161,9 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         elif pm == 'xbps' and HAS_XBPS:
             t += [
                 CleanTarget('xbps_cache', 'XBPS Package Cache',
-                            'Obsolete packages in /var/cache/xbps (xbps-remove -o)', 'safe', needs_root=True),
+                            'Obsolete packages in /var/cache/xbps (xbps-remove -O)', 'safe', needs_root=True),
                 CleanTarget('xbps_orphaned', 'XBPS Orphaned Packages',
-                            'Packages no longer required (xbps-remove -O)', 'caution',
+                            'Packages no longer required (xbps-remove -o)', 'caution',
                             needs_root=True, tier='review'),
             ]
         elif pm == 'apk' and HAS_APK:
@@ -252,6 +255,8 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         try:
             fn = self._handlers().get(target_id)
             if fn:
+                if target_id in ('system_logs', 'crash_reports'):
+                    return fn(dry, unattended, plan)
                 return fn(dry, unattended)
             if tgt.tier == 'review' and not self.has_rules(target_id):       # chỉ để ước tính dung lượng
                 scan = self.review_scan(target_id)
@@ -292,7 +297,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             return self._trash_plan()
         return plan
 
-    def _execute(self, items: List[E.PlanItem]) -> E.ExecResult:
+    def _execute(self, items: List[E.PlanItem], stop=None) -> E.ExecResult:
         """Mục có meta['helper'] chạy bằng helper root; phần còn lại qua engine."""
         mine = [i for i in items if not i.meta.get('helper')]
         helper = [i for i in items if i.meta.get('helper')]
@@ -570,13 +575,39 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         reason = '' if status == 'removed' else f'{len(keep) - len(gone)} files refused by the helper (not trusted / changed)'
         return E.Outcome(item, status, freed, len(gone), reason)
 
-    def _system_logs(self, dry: bool, unattended: bool = False) -> CleanResult:
-        plan = E.Plan('system_logs', self._log_items())
-        return self.result_from_plan('system_logs', plan, dry=dry, label='Old System Logs')
+    def _system_logs(self, dry: bool, unattended: bool = False, plan: Optional[E.Plan] = None) -> CleanResult:
+        if not dry and not unattended and plan is None and hasattr(self, "get_approved_plan"):
+            bound_plan, expired = self.get_approved_plan('system_logs')
+            if expired:
+                r = CleanResult('system_logs', dry=False)
+                r.error = "Previewed plan expired — please run DRY-RUN or PREVIEW FILES again before cleaning"
+                return r
+            plan = bound_plan
+        if plan is None:
+            plan = E.Plan('system_logs', self._log_items())
+        res = self.result_from_plan('system_logs', plan, dry=dry, label='Old System Logs')
+        if dry and res.plan is not None:
+            self.bind_approved_plan('system_logs', res.plan)
+        if not dry:
+            self._cache_invalidate('system_logs')
+        return res
 
-    def _crash_reports(self, dry: bool, unattended: bool = False) -> CleanResult:
-        plan = self.build_plan('crash_reports', unattended=unattended)
-        return self.result_from_plan('crash_reports', plan, dry=dry, label='Crash Reports')
+    def _crash_reports(self, dry: bool, unattended: bool = False, plan: Optional[E.Plan] = None) -> CleanResult:
+        if not dry and not unattended and plan is None and hasattr(self, "get_approved_plan"):
+            bound_plan, expired = self.get_approved_plan('crash_reports')
+            if expired:
+                r = CleanResult('crash_reports', dry=False)
+                r.error = "Previewed plan expired — please run DRY-RUN or PREVIEW FILES again before cleaning"
+                return r
+            plan = bound_plan
+        if plan is None:
+            plan = self.build_plan('crash_reports', unattended=unattended)
+        res = self.result_from_plan('crash_reports', plan, dry=dry, label='Crash Reports')
+        if dry and res.plan is not None:
+            self.bind_approved_plan('crash_reports', res.plan)
+        if not dry:
+            self._cache_invalidate('crash_reports')
+        return res
 
     # ══════════════════════════════════════════════════════
     # REVIEW tier
@@ -592,7 +623,10 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         if tgt is None or tgt.tier != 'review':
             raise ValueError(f'{target_id} is not a review target')
         if fn:
-            return fn()
+            scan = fn()
+            if target_id not in ('empty_trash', 'flatpak_cache'):
+                self._ensure_review_cache_dict()[target_id] = (time.monotonic(), scan)
+            return scan
         return PlanCleanerMixin.review_scan(self, target_id, progress_cb)
 
     def review_clean(self, target_id: str, item_ids: List[str], dry: bool = False) -> CleanResult:
@@ -601,6 +635,8 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             r = CleanResult(target_id, dry=dry)
             r.error = f'{target_id} is not a review target'
             return r
+        if not item_ids:
+            return CleanResult(target_id, dry=dry)
         fn = {
             'orphaned_pkgs': self._rc_pacman_orphans, 'apt_autoremove': self._rc_apt_autoremove,
             'dnf_autoremove': self._rc_dnf_autoremove, 'xbps_orphaned': self._rc_xbps_orphans,
@@ -608,6 +644,8 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             'nix_gc': self._rc_nix, 'empty_trash': self._rc_trash,
         }.get(target_id)
         if fn:
+            if self._get_fresh_review_cache(target_id) is None:
+                return self._expired_review_result(target_id, dry)
             return fn(item_ids, dry)
         return PlanCleanerMixin.review_clean(self, target_id, item_ids, dry)
 
@@ -667,6 +705,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         scan.items = self._pkg_items(names, self._pacman_sizes(names), 'installed as a dependency, nothing needs it')
         scan.warning = ('Review the list: some orphans are things you use directly but installed as a dependency. '
                         'Removal uses pacman -Rns.')
+        self._ensure_review_cache_dict()['orphaned_pkgs'] = (time.monotonic(), scan)
         return scan
 
     def _rc_pacman_orphans(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -709,6 +748,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         scan = ReviewScan('apt_autoremove')
         scan.items = self._pkg_items(names, self._dpkg_sizes(names), 'no longer required (apt autoremove)')
         scan.warning = 'Kernel images appear here too — the running kernel is never listed.'
+        self._ensure_review_cache_dict()['apt_autoremove'] = (time.monotonic(), scan)
         return scan
 
     def _rc_apt_autoremove(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -752,6 +792,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         scan.items = self._pkg_items(names, self._rpm_sizes(names), 'unneeded dependency')
         if not names:
             scan.notes.append('Nothing listed (or `dnf repoquery --unneeded` is unavailable).')
+        self._ensure_review_cache_dict()['dnf_autoremove'] = (time.monotonic(), scan)
         return scan
 
     def _rc_dnf_autoremove(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -762,7 +803,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
 
     # ── xbps orphans ──
     def _xbps_orphans(self) -> List[str]:
-        out, _, _ = _cmd(['xbps-remove', '-n', '-O'], 60)
+        out, _, _ = _cmd(['xbps-remove', '-n', '-o'], 60)
         names = []
         for l in out.splitlines():
             m = re.match(r'^\s*(\S+?)-[\w.]+_\d+\b', l)
@@ -773,8 +814,9 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
     def _rv_xbps_orphans(self) -> ReviewScan:
         names = self._xbps_orphans()
         scan = ReviewScan('xbps_orphaned')
-        scan.items = self._pkg_items(names, {}, 'orphan (xbps-remove -O)')
+        scan.items = self._pkg_items(names, {}, 'orphan (xbps-remove -o)')
         scan.notes.append('xbps removes all orphans in one transaction — select all to proceed.')
+        self._ensure_review_cache_dict()['xbps_orphaned'] = (time.monotonic(), scan)
         return scan
 
     def _rc_xbps_orphans(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -830,6 +872,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         scan.items.sort(key=lambda i: -i.size)
         if not refs:
             scan.notes.append('Nothing unused (or this flatpak version cannot list unused refs).')
+        self._ensure_review_cache_dict()['flatpak'] = (time.monotonic(), scan)
         return scan
 
     def _rc_flatpak(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -863,6 +906,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         scan = ReviewScan('docker')
         if not tool:
             scan.notes.append('No container runtime found.')
+            self._ensure_review_cache_dict()['docker'] = (time.monotonic(), scan)
             return scan
         out, err, code = _cmd([tool, 'images', '-f', 'dangling=true', '--format',
                                '{{.ID}}\t{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'], 30)
@@ -894,12 +938,30 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         for l in out.splitlines():
             p = l.split('\t')
             if len(p) == 2 and p[0].strip().lower().startswith('build cache') and parse_size(p[1]):
+                bc_blocked = ''
+                bc_detail = f're-built on the next {tool} build'
+                if tool != 'docker' and not self._podman_supports_builder_prune(tool):
+                    bc_blocked = (
+                        f'{tool} does not support standalone build-cache prune (`{tool} builder prune`) — '
+                        f'disabled to avoid `{tool} system prune` deleting containers/networks/pods'
+                    )
+                    bc_detail = bc_blocked
                 scan.items.append(ReviewItem(id='buildcache:all', label='build cache  (all unused layers)',
-                                             size=parse_size(p[1]), detail='re-built on the next docker build',
+                                             size=parse_size(p[1]), detail=bc_detail,
+                                             blocked=bc_blocked,
                                              payload={'kind': 'buildcache'}))
         scan.warning = 'Volumes are NOT recoverable. Nothing is selected by default.'
         scan.items.sort(key=lambda i: (-i.size, i.label))
+        self._ensure_review_cache_dict()['docker'] = (time.monotonic(), scan)
         return scan
+
+    @staticmethod
+    def _podman_supports_builder_prune(tool: str = 'podman') -> bool:
+        out, err, code = _cmd([tool, 'builder', 'prune', '--help'], 10)
+        combined = f'{out}\n{err}'.lower()
+        if code != 0 or 'unknown' in combined or 'unrecognized' in combined or 'invalid' in combined:
+            return False
+        return 'prune' in combined
 
     def _rc_docker(self, item_ids: List[str], dry: bool) -> CleanResult:
         r = CleanResult('docker', dry=dry)
@@ -912,14 +974,23 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             it = known.get(iid)
             if not it:
                 continue
+            if it.blocked:
+                r.skipped.append((it.label, it.blocked))
+                continue
             kind, ref = it.payload.get('kind'), it.payload.get('ref', '')
+            if kind == 'buildcache' and tool != 'docker' and not self._podman_supports_builder_prune(tool):
+                r.skipped.append((
+                    it.label,
+                    f'{tool} builder prune is unsupported on this version (refusing `{tool} system prune`)',
+                ))
+                continue
             r.planned_bytes += it.size
             if dry:
                 r.freed_bytes += it.size
                 continue
             argv = {'image': [tool, 'rmi', ref], 'container': [tool, 'rm', ref],
                     'volume': [tool, 'volume', 'rm', ref],
-                    'buildcache': [tool, 'builder', 'prune', '-f'] if tool == 'docker' else [tool, 'system', 'prune', '-f']
+                    'buildcache': [tool, 'builder', 'prune', '-f'],
                     }.get(kind)
             if not argv or (ref and not DOCKER_ID_RE.match(ref)):
                 continue
@@ -957,6 +1028,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
                                          detail='disabled revision — only needed to roll back a refresh',
                                          payload={'name': name, 'rev': rev}))
         scan.items.sort(key=lambda i: -i.size)
+        self._ensure_review_cache_dict()['snap_old'] = (time.monotonic(), scan)
         return scan
 
     def _rc_snap(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -986,6 +1058,7 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
             id='nix:gc30', label='User-profile generations older than 30 days + unreferenced store paths',
             detail='nix-collect-garbage --delete-older-than 30d', risk='medium', payload={'days': 30}))
         scan.notes.append('System generations (NixOS) need root: run `sudo nix-collect-garbage -d` yourself.')
+        self._ensure_review_cache_dict()['nix_gc'] = (time.monotonic(), scan)
         return scan
 
     def _rc_nix(self, item_ids: List[str], dry: bool) -> CleanResult:
@@ -1031,10 +1104,16 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         for tdir in self._trash_dirs():
             files_dir = os.path.join(tdir, 'files')
             info_dir = os.path.join(tdir, 'info')
+            try:
+                from utils.i18n import _t as _tr
+            except Exception:
+                _tr = lambda k, d='': d
             for e in E.iter_dir(files_dir):
                 orig = self._trash_original(os.path.join(info_dir, e.name + '.trashinfo'))
+                trash_loc = ('~' + e.path[len(self.ctx.home):]) if (self.ctx.home and e.path.startswith(self.ctx.home)) else e.path
+                note_txt = f"🗑 {_tr('trash_in_dir', 'In Trash')}: {trash_loc} — {_tr('trash_perm_del', 'permanently deleted — cannot be restored')}"
                 it, why = E.make_item(e.path, pol, guards=guards, group='trash', risk='medium',
-                                      label=orig or e.name, note='permanently deleted — cannot be restored')
+                                      label=orig or e.name, note=note_txt)
                 if it is not None:
                     it.meta['info'] = os.path.join(info_dir, e.name + '.trashinfo')
                     it.meta['trash'] = tdir
@@ -1058,12 +1137,19 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
                                          size=sum(i.size for i in rest), files=sum(i.files for i in rest),
                                          detail='all remaining trash items', risk='medium',
                                          payload={'ids': [i.id for i in rest]}))
-        scan.warning = 'Permanently deleted — NOT moved anywhere. Nothing is selected by default.'
+        try:
+            from utils.i18n import _t as _tr
+        except Exception:
+            _tr = lambda k, d='': d
+        scan.warning = _tr('warn_trash', 'Permanently deleted — NOT moved anywhere. Nothing is selected by default.')
         return scan
 
     def _rc_trash(self, item_ids: List[str], dry: bool) -> CleanResult:
-        cached = self._review_cache.get('empty_trash')
-        plan = cached[1] if cached and (time.monotonic() - cached[0]) < self.REVIEW_TTL else self._trash_plan()
+        if not item_ids:
+            return CleanResult('empty_trash', dry=dry)
+        plan = self._get_fresh_review_cache('empty_trash')
+        if plan is None or not isinstance(plan, E.Plan):
+            return self._expired_review_result('empty_trash', dry)
         ids = set(item_ids)
         if '__rest__' in ids:
             top = {i.id for i in sorted(plan.items, key=lambda i: -i.size)[:500]}
@@ -1071,8 +1157,9 @@ class LinuxCleaner(PlanCleanerMixin, BaseCleaner):
         sel = E.Plan('empty_trash', [i for i in plan.items if i.id in ids], list(plan.skipped))
         r = self.result_from_plan('empty_trash', sel, dry=dry, label='Trash')
         if not dry:
+            removed_displays = {rb.get('path') for rb in r.rollback}
             for it in sel.items:
-                if not os.path.lexists(it.path):
+                if it.display in removed_displays and not os.path.lexists(it.path):
                     try:
                         os.unlink(it.meta['info'])
                     except OSError:

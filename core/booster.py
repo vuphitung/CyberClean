@@ -54,7 +54,7 @@ NEW: _bypass_compositor_on/off() — FPS unlocker
 import os, re, sys, ctypes, shutil, subprocess, glob, platform, struct, signal, atexit
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Dict, List
+from typing import Callable, Optional, Dict, List, Tuple
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX   = platform.system() == "Linux"
@@ -99,18 +99,23 @@ def _timer_resolution_set(log) -> bool:
         return False
 
 
-def _timer_resolution_restore(was_set: bool, log):
-    """Restore Windows timer resolution."""
+def _timer_resolution_restore(was_set: bool, log) -> bool:
+    """Restore Windows timer resolution. Returns True on success or not-applicable, False on failure."""
     if not IS_WINDOWS or not was_set:
-        return
+        return True
     import platform as _plat
     if _plat.machine().lower() in ('arm64', 'aarch64'):
-        return
+        return True
     try:
-        ctypes.windll.winmm.timeEndPeriod(1)
+        rc = ctypes.windll.winmm.timeEndPeriod(1)
+        if rc not in (0, None):
+            log(f"  ⚠ Timer resolution restore failed (timeEndPeriod returned {rc})", "warn")
+            return False
         log("  + Timer resolution: restored to default", "ok")
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        log(f"  ⚠ Timer resolution restore error: {e}", "warn")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -135,7 +140,7 @@ class _PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
 
 def _set_ecoqos(pid: int, enable: bool) -> bool:
     """Apply or remove EcoQoS (power efficiency mode) for a process."""
-    if not IS_WINDOWS:
+    if not IS_WINDOWS or not hasattr(ctypes, "windll"):
         return False
     kernel32 = ctypes.windll.kernel32
     handle = kernel32.OpenProcess(0x0200 | 0x0400, False, pid)
@@ -851,32 +856,45 @@ def _disable_nagle(log) -> list:
     return changed
 
 
-def _restore_nagle(changed: list, log):
-    """Restore Nagle algorithm settings."""
+def _restore_nagle(changed: list, log) -> bool:
+    """Restore Nagle algorithm settings. Preserves un-restored interfaces in `changed` on failure."""
     if not IS_WINDOWS or not changed:
-        return
+        return True
     try:
         import winreg
-        for iface_path, old_ack, old_delay in changed:
+    except Exception as e:
+        log(f"  ⚠ Network Nagle restore error: {e}", "warn")
+        return False
+    failed = []
+    for iface_path, old_ack, old_delay in list(changed):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, iface_path, 0, winreg.KEY_SET_VALUE)
             try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, iface_path, 0,
-                                     winreg.KEY_SET_VALUE)
                 if old_ack is None:
-                    try: winreg.DeleteValue(key, "TcpAckFrequency")
-                    except Exception: pass
+                    try:
+                        winreg.DeleteValue(key, "TcpAckFrequency")
+                    except FileNotFoundError:
+                        pass
                 else:
-                    winreg.SetValueEx(key, "TcpAckFrequency", 0, winreg.REG_DWORD, old_ack)
+                    winreg.SetValueEx(key, "TcpAckFrequency", 0, winreg.REG_DWORD, int(old_ack))
                 if old_delay is None:
-                    try: winreg.DeleteValue(key, "TCPNoDelay")
-                    except Exception: pass
+                    try:
+                        winreg.DeleteValue(key, "TCPNoDelay")
+                    except FileNotFoundError:
+                        pass
                 else:
-                    winreg.SetValueEx(key, "TCPNoDelay", 0, winreg.REG_DWORD, old_delay)
+                    winreg.SetValueEx(key, "TCPNoDelay", 0, winreg.REG_DWORD, int(old_delay))
+            finally:
                 winreg.CloseKey(key)
-            except Exception:
-                pass
-        log("  + Network: Nagle algorithm restored", "ok")
-    except Exception:
-        pass
+        except Exception as e:
+            failed.append((iface_path, old_ack, old_delay))
+            log(f"  ⚠ Network Nagle restore failed for {iface_path}: {e}", "warn")
+    if isinstance(changed, list):
+        changed[:] = failed
+    if failed:
+        return False
+    log("  + Network: Nagle algorithm restored", "ok")
+    return True
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1120,9 +1138,69 @@ class BoostResult:
     action:   str
     success:  bool  = True
     mb_freed: float = 0.0
+    mb_affected: float = 0.0
     count:    int   = 0
     error:    str   = ""
     rollback: list  = field(default_factory=list)
+
+
+def _proc_identity(p) -> Tuple[str, float]:
+    """Trả về (name, create_time) để xác minh PID không bị tái sử dụng trước khi phục hồi."""
+    name = ""
+    ctime = 0.0
+    try:
+        name = (p.name() or "").lower()
+    except Exception:
+        pass
+    try:
+        if hasattr(p, "create_time"):
+            ctime = float(p.create_time() or 0.0)
+        elif hasattr(p, "info") and isinstance(p.info, dict) and p.info.get("create_time"):
+            ctime = float(p.info["create_time"])
+    except Exception:
+        pass
+    return name, ctime
+
+
+def _same_process_identity(p, rec) -> bool:
+    """Kiểm tra tiến trình hiện tại ở PID có đúng là tiến trình đã lưu lúc áp dụng không."""
+    if not isinstance(rec, dict):
+        return True
+    exp_name = (rec.get("name") or "").lower()
+    exp_ctime = rec.get("create_time")
+    cur_name, cur_ctime = _proc_identity(p)
+    if exp_name and cur_name and exp_name != cur_name:
+        return False
+    if exp_ctime and cur_ctime and abs(cur_ctime - float(exp_ctime)) > 2.0:
+        return False
+    return True
+
+
+def _can_restore_linux_nice(orig_nice: int) -> bool:
+    """
+    Linux: user thường có thể TĂNG nice (vd 0 -> 15), nhưng GIẢM nice về lại giá trị cũ
+    (15 -> 0) bị kernel từ chối (EPERM/EACCES) trừ khi có quyền root / CAP_SYS_NICE
+    hoặc RLIMIT_NICE >= 20 - orig_nice.
+    Chỉ cho phép tăng nice khi bảo đảm khôi phục được về `orig_nice`.
+    """
+    if not IS_LINUX:
+        return True
+    try:
+        if os.geteuid() == 0:
+            return True
+    except AttributeError:
+        pass
+    try:
+        import resource
+        rlim_nice = getattr(resource, "RLIMIT_NICE", None)
+        if rlim_nice is not None:
+            soft, _ = resource.getrlimit(rlim_nice)
+            # Theo chuẩn Linux: ceiling = 20 - rlim_cur. Để đặt lại orig_nice cần rlim_cur >= 20 - orig_nice.
+            if soft == resource.RLIM_INFINITY or soft >= (20 - int(orig_nice)):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _run(cmd, timeout=30):
@@ -1180,7 +1258,7 @@ class _MEMORY_PRIORITY_INFO(ctypes.Structure):
 
 
 def _set_process_memory_priority(pid: int, priority: int) -> bool:
-    if not IS_WINDOWS:
+    if not IS_WINDOWS or not hasattr(ctypes, "windll"):
         return False
     kernel32 = ctypes.windll.kernel32
     handle = kernel32.OpenProcess(
@@ -1662,63 +1740,102 @@ def _bypass_compositor_on(log, saved: dict):
             saved["compositor_bypassed"] = []
 
 
-def _bypass_compositor_off(saved: dict, log):
-    """Restore compositor after gaming session."""
+def _bypass_compositor_off(saved: dict, log) -> bool:
+    """Restore compositor after gaming session. Returns True only if all restore steps succeeded."""
     if IS_LINUX:
-        bypassed = saved.get("compositor_bypassed") or []
+        bypassed = list(saved.get("compositor_bypassed") or [])
+        failed = []
         resumed = 0
+        ok = True
         for entry in bypassed:
             method, pid, name, _ = entry
             try:
                 if method == "sigstop":
-                    os.kill(pid, signal.SIGCONT)
+                    os.kill(int(pid), signal.SIGCONT)
                     resumed += 1
                     log(f"  ▶ Compositor resumed: {name} (pid {pid})", "ok")
                 elif method == "kwin_nice":
                     if HAS_PSUTIL:
-                        psutil.Process(pid).nice(0)
-            except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied):
+                        psutil.Process(int(pid)).nice(0)
+                    else:
+                        failed.append(entry)
+                        ok = False
+            except ProcessLookupError:
                 pass
+            except Exception as e:
+                if HAS_PSUTIL and isinstance(e, getattr(psutil, "NoSuchProcess", ())) :
+                    pass
+                else:
+                    failed.append(entry)
+                    ok = False
+                    log(f"  ⚠ Compositor restore failed for {name} (pid {pid}): {e}", "warn")
+        if failed:
+            saved["compositor_bypassed"] = failed
+        else:
+            saved.pop("compositor_bypassed", None)
 
-        # Restore _NET_WM_BYPASS_COMPOSITOR
-        if saved.get("xprop_bypass_set") and shutil.which("xprop"):
-            try:
-                subprocess.run(
-                    ["xprop", "-root", "-f", "_NET_WM_BYPASS_COMPOSITOR", "32c",
-                     "-set", "_NET_WM_BYPASS_COMPOSITOR", "0"],
-                    capture_output=True, timeout=3
-                )
-            except Exception:
-                pass
+        if saved.get("xprop_bypass_set"):
+            if shutil.which("xprop"):
+                try:
+                    r = subprocess.run(
+                        ["xprop", "-root", "-f", "_NET_WM_BYPASS_COMPOSITOR", "32c",
+                         "-set", "_NET_WM_BYPASS_COMPOSITOR", "0"],
+                        capture_output=True, timeout=3
+                    )
+                    if getattr(r, "returncode", 1) == 0:
+                        saved.pop("xprop_bypass_set", None)
+                    else:
+                        ok = False
+                        log("  ⚠ xprop compositor restore returned non-zero status", "warn")
+                except Exception as e:
+                    ok = False
+                    log(f"  ⚠ xprop compositor restore failed: {e}", "warn")
+            else:
+                ok = False
+                log("  ⚠ xprop not available to restore _NET_WM_BYPASS_COMPOSITOR", "warn")
 
-        if resumed == 0 and bypassed:
+        if resumed == 0 and bypassed and not failed:
             log("  i Compositor: process exited during session (normal if user restarted it)", "ok")
+        return ok
 
     elif IS_WINDOWS:
-        changes = saved.get("compositor_bypassed") or []
+        changes = list(saved.get("compositor_bypassed") or [])
+        if not changes:
+            saved.pop("compositor_bypassed", None)
+            return True
         try:
             import winreg
-            for key_name, orig_val in changes:
+        except Exception as e:
+            log(f"  ⚠ DWM fullscreen restore error: {e}", "warn")
+            return False
+        failed_changes = []
+        for key_name, orig_val in changes:
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\DirectX\UserGpuPreferences",
+                    0, winreg.KEY_SET_VALUE
+                )
                 try:
-                    key = winreg.OpenKey(
-                        winreg.HKEY_LOCAL_MACHINE,
-                        r"SOFTWARE\Microsoft\DirectX\UserGpuPreferences",
-                        0, winreg.KEY_SET_VALUE
-                    )
                     if orig_val is None:
                         try:
                             winreg.DeleteValue(key, key_name)
-                        except Exception:
+                        except FileNotFoundError:
                             pass
                     else:
                         winreg.SetValueEx(key, key_name, 0, winreg.REG_SZ, orig_val)
+                finally:
                     winreg.CloseKey(key)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if changes:
-            log("  + DWM: exclusive fullscreen setting restored", "ok")
+            except Exception as e:
+                failed_changes.append((key_name, orig_val))
+                log(f"  ⚠ DWM fullscreen restore failed for {key_name}: {e}", "warn")
+        if failed_changes:
+            saved["compositor_bypassed"] = failed_changes
+            return False
+        saved.pop("compositor_bypassed", None)
+        log("  + DWM: exclusive fullscreen setting restored", "ok")
+        return True
+    return True
 
 
 def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, protected_extra: Optional[set] = None) -> BoostResult:
@@ -1748,9 +1865,12 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
 
     # Dynamic threshold — scales with available RAM
     try:
-        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        vm = psutil.virtual_memory()
+        ram_gb = vm.total / (1024 ** 3)
+        ram_before_mb = vm.available / (1024 * 1024)
     except Exception:
         ram_gb = 8.0
+        ram_before_mb = 0.0
     OOM_THRESHOLD    = max(75, int(300 * 4 / ram_gb))
     MEM_THRESHOLD_MB = 150
 
@@ -1857,30 +1977,73 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
 
                 tag = "zombie" if is_zombie else f"bloat {mem_mb:.0f}MB"
 
-                if IS_LINUX and use_sigstop and not is_zombie:
-                    try:
-                        os.kill(p.pid, signal.SIGSTOP)
-                        frozen_pids[p.pid] = p.name()
-                        acted += 1
-                        result.mb_freed += mem_mb
-                        log(f"  ⏸ Frozen [{tag}] {p.name()} — {mem_mb:.0f} MB", "warn")
-                    except ProcessLookupError:
-                        pass
-                else:
+                if is_zombie:
                     try:
                         p.terminate()
                         try:
-                            p.wait(timeout=2)
+                            p.wait(timeout=1)
                         except psutil.TimeoutExpired:
                             p.kill()
                         acted += 1
-                        result.mb_freed += mem_mb
-                        log(f"  ✕ Killed [{tag}] {p.name()} — {mem_mb:.0f} MB", "warn")
+                        log(f"  ✕ Reaped [zombie] {p.name()} (PID {p.pid})", "warn")
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                elif IS_LINUX:
+                    # SAFE THROTTLE (IPC/D-Bus safe): Never SIGSTOP desktop/user apps.
+                    # Only raise nice(+15) when we can guarantee restoring orig_nice later.
+                    try:
+                        orig_nice = p.nice()
+                        if orig_nice < 15:
+                            if not _can_restore_linux_nice(orig_nice):
+                                log(
+                                    f"  ~ Skipped nice(+15) for {p.name()} (PID {p.pid}): "
+                                    f"cannot guarantee restoring nice({orig_nice}) without RLIMIT_NICE/CAP_SYS_NICE",
+                                    "warn",
+                                )
+                                continue
+                            p.nice(15)
+                        pname, pctime = _proc_identity(p)
+                        frozen_pids[p.pid] = {
+                            "name": pname or p.name(),
+                            "create_time": pctime,
+                            "mode": "nice",
+                            "orig_nice": orig_nice,
+                        }
+                        acted += 1
+                        result.mb_affected += mem_mb
+                        log(f"  ⏸ Throttled [{tag}] {p.name()} → nice(+15) (IPC-safe, ~{mem_mb:.0f} MB deprioritized)", "warn")
+                    except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
+                        pass
+                elif IS_WINDOWS:
+                    # SAFE THROTTLE (Data-loss safe): Never terminate/kill user processes on Windows,
+                    # which would destroy unsaved work in creative/office apps. Apply EcoQoS +
+                    # BELOW_NORMAL priority + low memory priority so Windows evicts their pages first.
+                    try:
+                        orig_nice = p.nice()
+                        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                        _set_ecoqos(p.pid, True)
+                        _set_process_memory_priority(p.pid, MEMORY_PRIORITY_LOW)
+                        pname, pctime = _proc_identity(p)
+                        frozen_pids[p.pid] = {
+                            "name": pname or p.name(),
+                            "create_time": pctime,
+                            "mode": "win_eco",
+                            "orig_nice": orig_nice,
+                        }
+                        acted += 1
+                        result.mb_affected += mem_mb
+                        log(f"  ⏸ Eco-Throttled [{tag}] {p.name()} → EcoQoS + Low Mem Priority (~{mem_mb:.0f} MB deprioritized)", "warn")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, ValueError):
                         pass
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+    try:
+        ram_after_mb = psutil.virtual_memory().available / (1024 * 1024)
+        result.mb_freed = max(0.0, ram_after_mb - ram_before_mb)
+    except Exception:
+        result.mb_freed = 0.0
 
     result.count    = acted
     result.rollback = [{"frozen_pids": frozen_pids}]
@@ -1900,35 +2063,80 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
         if top_str:
             log(f"  i Top processes: {top_str} — all actively needed", "ok")
     else:
-        log(f"✓ Done — {acted} processes suspended, ~{result.mb_freed:.0f} MB freed", "ok")
+        log(
+            f"✓ Done — {acted} processes throttled (~{result.mb_affected:.0f} MB deprioritized, "
+            f"{result.mb_freed:.0f} MB RAM freed)",
+            "ok",
+        )
         if frozen_pids and IS_LINUX:
-            log("  i Frozen processes will resume when Game Mode turns off", "ok")
+            log("  i Throttled processes will restore normal priority when Boost turns off", "ok")
 
-    if frozen_pids and IS_LINUX:
+    if frozen_pids:
         def _resume_frozen():
-            for pid in frozen_pids:
-                try:
-                    os.kill(pid, signal.SIGCONT)
-                except ProcessLookupError:
-                    pass
+            restore_bloat(frozen_pids, lambda *_a, **_k: None)
         _register_cleanup(_resume_frozen)
 
     return result
 
 
-def restore_bloat(frozen_pids: dict, log):
-    """SIGCONT tất cả processes đã SIGSTOP. Gọi khi tắt Game Mode."""
-    if not IS_LINUX or not frozen_pids:
-        return
+def restore_bloat(frozen_pids: dict, log) -> bool:
+    """
+    Khôi phục các tiến trình đã throttle (nice / EcoQoS) hoặc SIGSTOP cũ.
+    Xác minh danh tính tiến trình (name + create_time) để tránh PID tái sử dụng.
+    Giữ lại các mục phục hồi thất bại trong `frozen_pids` và báo lỗi rõ ràng.
+    """
+    if not frozen_pids:
+        return True
     resumed = 0
-    for pid, name in frozen_pids.items():
+    failed = []
+    for pid_raw, info in list(frozen_pids.items()):
         try:
-            os.kill(pid, signal.SIGCONT)
+            pid = int(pid_raw)
+        except (ValueError, TypeError):
+            frozen_pids.pop(pid_raw, None)
+            continue
+        try:
+            if isinstance(info, dict):
+                mode = info.get("mode")
+                orig_nice = info.get("orig_nice")
+                if mode == "nice" and HAS_PSUTIL and orig_nice is not None:
+                    proc = psutil.Process(pid)
+                    if not _same_process_identity(proc, info):
+                        # PID đã được cấp cho tiến trình khác → bỏ qua, không đụng nhầm
+                        frozen_pids.pop(pid_raw, None)
+                        continue
+                    proc.nice(int(orig_nice))
+                elif mode == "win_eco" and HAS_PSUTIL:
+                    proc = psutil.Process(pid)
+                    if not _same_process_identity(proc, info):
+                        frozen_pids.pop(pid_raw, None)
+                        continue
+                    _set_ecoqos(pid, False)
+                    if orig_nice is not None:
+                        proc.nice(int(orig_nice))
+                elif IS_LINUX:
+                    if HAS_PSUTIL:
+                        proc = psutil.Process(pid)
+                        if not _same_process_identity(proc, info):
+                            frozen_pids.pop(pid_raw, None)
+                            continue
+                    os.kill(pid, signal.SIGCONT)
+            elif IS_LINUX:
+                os.kill(pid, signal.SIGCONT)
+            frozen_pids.pop(pid_raw, None)
             resumed += 1
-        except ProcessLookupError:
-            pass   # process tự thoát trong lúc bị freeze — OK
+        except (ProcessLookupError, psutil.NoSuchProcess):
+            # Tiến trình đã kết thúc tự nhiên
+            frozen_pids.pop(pid_raw, None)
+        except (psutil.AccessDenied, PermissionError, ValueError, OSError) as e:
+            pname = info.get("name", f"PID {pid}") if isinstance(info, dict) else f"PID {pid}"
+            failed.append(f"{pname} (PID {pid}): {e}")
     if resumed:
-        log(f"  ▶ Resumed {resumed} frozen processes", "ok")
+        log(f"  ▶ Restored {resumed} background processes to normal scheduling", "ok")
+    if failed:
+        log(f"  ⚠ Failed to restore priority for {len(failed)} process(es): {'; '.join(failed[:3])}", "warn")
+        return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1985,10 +2193,16 @@ def free_ram(log) -> BoostResult:
             log("  ~ compact-memory: needs root (run install.sh)", "warn")
 
     elif IS_WINDOWS:
-        # Step 1: Trim working sets — actually releases physical pages
-        trimmed = _trim_working_sets(log)
-        if trimmed:
-            log(f"  + Working set trimmed: {trimmed} idle processes", "ok")
+        # Step 1: Only trim working sets if RAM usage is genuinely high (>= 85%).
+        # Unconditional EmptyWorkingSet forces warm pages into pagefile.sys on SSD,
+        # causing hard page faults and frame stutters when games/apps access memory.
+        ram_pct = psutil.virtual_memory().percent
+        if ram_pct >= 85.0:
+            trimmed = _trim_working_sets(log)
+            if trimmed:
+                log(f"  + High memory pressure ({ram_pct:.0f}%): trimmed working sets of {trimmed} idle processes", "ok")
+        else:
+            log(f"  i RAM pressure is healthy ({ram_pct:.0f}%) — skipping forced working-set flush to prevent page-fault stutter", "ok")
 
         # Step 2: Memory priority hints — guides future eviction order
         lowered = 0
@@ -2073,11 +2287,14 @@ def memory_tune(log) -> BoostResult:
             log("  + Memory compacted", "ok")
 
     elif IS_WINDOWS:
-        # FIX v2.4: gc.collect() was useless — only freed Python objects (~2MB).
-        # Now: trim working sets of all idle processes → actual physical page release.
-        trimmed = _trim_working_sets(log)
+        # Only trim working sets if RAM usage is high (>= 80%) to avoid forcing warm pages to pagefile.sys
+        ram_pct = psutil.virtual_memory().percent if HAS_PSUTIL else 85.0
+        if ram_pct >= 80.0:
+            trimmed = _trim_working_sets(log)
+            log(f"  + Working set trimmed: {trimmed} idle processes — physical pages released", "ok")
+        else:
+            log(f"  i RAM usage healthy ({ram_pct:.0f}%) — applying low memory priority hints without forced page-out", "ok")
         import gc; gc.collect()
-        log(f"  + Working set trimmed: {trimmed} idle processes — physical pages released", "ok")
 
     if HAS_PSUTIL:
         mem = psutil.virtual_memory()
@@ -2087,16 +2304,32 @@ def memory_tune(log) -> BoostResult:
     return result
 
 
-def memory_tune_restore(originals: dict, log):
-    """Restore kernel vm params. Called on app exit."""
+def memory_tune_restore(originals: dict, log) -> bool:
+    """Restore kernel vm params. Preserves un-restored entries in `originals` and returns True if all succeeded."""
     if not IS_LINUX or not originals:
-        return
-    for param, orig_val in originals.items():
+        return True
+    ok = True
+    for param, orig_val in list(originals.items()):
         try:
-            Path(f"/proc/sys/vm/{param}").write_text(orig_val)
+            Path(f"/proc/sys/vm/{param}").write_text(str(orig_val))
+            originals.pop(param, None)
             log(f"  + Restored vm.{param} = {orig_val}", "ok")
         except (PermissionError, OSError) as e:
-            log(f"  ~ Could not restore vm.{param}: {e}", "warn")
+            restored_helper = False
+            if param == "swappiness":
+                try:
+                    from core import privileged as _PRIV
+                    r_sw = _PRIV.run_helper("set-swappiness", str(orig_val), timeout=5, use_pkexec=False)
+                    if getattr(r_sw, "ok", False):
+                        originals.pop(param, None)
+                        log(f"  + Restored vm.{param} = {orig_val}", "ok")
+                        restored_helper = True
+                except Exception:
+                    pass
+            if not restored_helper:
+                ok = False
+                log(f"  ~ Could not restore vm.{param}: {e}", "warn")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2104,10 +2337,15 @@ def memory_tune_restore(originals: dict, log):
 # ══════════════════════════════════════════════════════════════
 
 def clear_disk_cache(log) -> BoostResult:
-    """Clear GPU shader cache, browser GPU cache."""
+    """Clear stale browser WebGPU/GPU caches while preserving compiled game driver shaders."""
     result = BoostResult("clear_disk_cache")
-    log("Clearing disk & GPU cache...", "head")
+    log("Clearing stale browser GPU cache (preserving game driver shaders)...", "head")
     total = 0
+
+    running_games, _ = _detect_running_games()
+    if running_games:
+        log("  ⚠ Active game detected — skipping GPU cache cleanup to prevent shader stutter", "warn")
+        return result
 
     if IS_WINDOWS:
         local = os.environ.get("LOCALAPPDATA", "")
@@ -2119,9 +2357,9 @@ def clear_disk_cache(log) -> BoostResult:
         ]
     else:
         home  = str(Path.home())
+        # NOTE: Preserves ~/.cache/mesa_shader_cache and ~/.cache/nvidia so games
+        # never suffer from on-the-fly shader recompilation micro-stutters.
         paths = [
-            f"{home}/.cache/mesa_shader_cache",
-            f"{home}/.cache/nvidia",
             f"{home}/.config/google-chrome/Default/GPUCache",
             f"{home}/.config/google-chrome/Default/ShaderCache",
             f"{home}/.config/chromium/Default/GPUCache",
@@ -2130,7 +2368,6 @@ def clear_disk_cache(log) -> BoostResult:
         if Path(f"{home}/.var/app").exists():
             paths += glob.glob(f"{home}/.var/app/*/config/*/GPUCache")
             paths += glob.glob(f"{home}/.var/app/*/config/*/ShaderCache")
-            paths += glob.glob(f"{home}/.var/app/*/cache/mesa_shader_cache")
         if Path(f"{home}/snap").exists():
             paths += glob.glob(f"{home}/snap/*/common/.cache/*/GPUCache")
             paths += glob.glob(f"{home}/snap/*/common/.config/*/GPUCache")
@@ -2189,39 +2426,79 @@ def _safe_guid(guid: str) -> str:
     return POWER_BALANCED
 
 
+def _read_current_linux_governor() -> str:
+    cpufreq = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    try:
+        if cpufreq.exists():
+            gov = cpufreq.read_text().strip()
+            if gov:
+                return gov
+    except OSError:
+        pass
+    avail = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors")
+    try:
+        if avail.exists():
+            opts = avail.read_text().split()
+            if "schedutil" in opts:
+                return "schedutil"
+            if "powersave" in opts:
+                return "powersave"
+    except OSError:
+        pass
+    return "schedutil"
+
+
 def _enable_kernel_performance(log):
     """
-    Set CPU governor to performance mode.
-    Thứ tự ưu tiên (Linux):
-    1. powerprofilesctl  — GNOME Power Profiles daemon (phổ biến nhất)
-    2. tuned-adm         — Red Hat / Fedora tuning daemon
-    3. cpupower          — kernel tool, cần root
-    4. /sys/cpufreq      — direct sysfs write, cần root
-    5. skip gracefully
-
-    FIXED: shutil.which() check trước khi gọi → không còn lỗi "command not found"
+    Set CPU governor to performance mode while capturing the exact original
+    profile/governor so _restore_kernel_performance() restores the user's real
+    prior state (including 'powersave' on intel_pstate systems).
     """
     if IS_LINUX:
         # Option 1: powerprofilesctl (GNOME, KDE Plasma 5.26+)
         if shutil.which("powerprofilesctl"):
+            orig_prof = "balanced"
+            try:
+                g = subprocess.run(
+                    ["powerprofilesctl", "get"],
+                    capture_output=True, text=True, timeout=3
+                )
+                if g.returncode == 0 and g.stdout.strip():
+                    orig_prof = g.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
             r = subprocess.run(
                 ["powerprofilesctl", "set", "performance"],
                 capture_output=True, timeout=5
             )
             if r.returncode == 0:
                 log("  + CPU governor: performance (powerprofilesctl)", "ok")
-                return "powerprofiles"
+                return f"powerprofiles:{orig_prof}"
             log("  ~ powerprofilesctl: failed (profile locked?)", "warn")
 
         # Option 2: tuned-adm (Fedora / RHEL / Rocky)
         if shutil.which("tuned-adm"):
+            orig_prof = "balanced"
+            try:
+                g = subprocess.run(
+                    ["tuned-adm", "active"],
+                    capture_output=True, text=True, timeout=3
+                )
+                if g.returncode == 0 and ":" in g.stdout:
+                    cand = g.stdout.split(":", 1)[1].strip()
+                    if cand:
+                        orig_prof = cand
+            except (OSError, subprocess.TimeoutExpired):
+                pass
             r = subprocess.run(
                 ["tuned-adm", "profile", "throughput-performance"],
                 capture_output=True, timeout=5
             )
             if r.returncode == 0:
                 log("  + CPU tuning: throughput-performance (tuned-adm)", "ok")
-                return "tuned"
+                return f"tuned:{orig_prof}"
+
+        orig_gov = _read_current_linux_governor()
 
         # Option 3: cpupower (needs root / sudo -n)
         if shutil.which("cpupower"):
@@ -2231,7 +2508,7 @@ def _enable_kernel_performance(log):
             )
             if r.returncode == 0:
                 log("  + CPU governor: performance (cpupower)", "ok")
-                return "cpupower"
+                return f"cpupower:{orig_gov}"
 
         # Option 4: direct sysfs write (needs root)
         cpufreq = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
@@ -2240,7 +2517,7 @@ def _enable_kernel_performance(log):
                 for gov_path in Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor"):
                     gov_path.write_text("performance")
                 log("  + CPU governor: performance (direct sysfs)", "ok")
-                return "sysfs"
+                return f"sysfs:{orig_gov}"
             except OSError:
                 pass
 
@@ -2249,11 +2526,8 @@ def _enable_kernel_performance(log):
         return None
 
     elif IS_WINDOWS:
-        # FIX v2.4: Skip power plan switch if on battery.
-        # Laptop on battery + High Performance = CPU runs hot, throttles, net result slower.
         if _is_on_battery():
             log("  ~ Power Plan: on battery — keeping current plan (plug in for best perf)", "warn")
-            # Still return a dummy guid so restore logic knows original plan
             try:
                 out = subprocess.run(
                     "powercfg /getactivescheme", shell=True,
@@ -2292,46 +2566,114 @@ def _enable_kernel_performance(log):
         return orig_guid
 
 
-def _restore_kernel_performance(method, log):
+def _restore_kernel_performance(method, log) -> bool:
+    if not method:
+        return True
     if IS_LINUX:
-        if method == "powerprofiles":
-            if shutil.which("powerprofilesctl"):
-                subprocess.run(["powerprofilesctl", "set", "balanced"],
-                               capture_output=True, timeout=5)
-        elif method == "tuned":
-            if shutil.which("tuned-adm"):
-                subprocess.run(["tuned-adm", "profile", "balanced"],
-                               capture_output=True, timeout=5)
-        elif method == "cpupower":
-            if shutil.which("cpupower"):
-                subprocess.run(
-                    ["sudo", "-n", "cpupower", "frequency-set", "-g", "schedutil"],
+        kind, orig_target = (method.split(":", 1) if isinstance(method, str) and ":" in method
+                             else (str(method), None))
+        if kind == "powerprofiles":
+            target = orig_target or "balanced"
+            if not shutil.which("powerprofilesctl"):
+                log("  ⚠ powerprofilesctl not found to restore CPU governor", "warn")
+                return False
+            try:
+                r = subprocess.run(["powerprofilesctl", "set", target],
+                                   capture_output=True, timeout=5)
+                if getattr(r, "returncode", 1) != 0:
+                    log(f"  ⚠ powerprofilesctl restore to {target} failed", "warn")
+                    return False
+            except Exception as e:
+                log(f"  ⚠ powerprofilesctl restore error: {e}", "warn")
+                return False
+            log(f"  + CPU governor: {target} [RESTORED]", "ok")
+            return True
+        elif kind == "tuned":
+            target = orig_target or "balanced"
+            if not shutil.which("tuned-adm"):
+                log("  ⚠ tuned-adm not found to restore CPU profile", "warn")
+                return False
+            try:
+                r = subprocess.run(["tuned-adm", "profile", target],
+                                   capture_output=True, timeout=5)
+                if getattr(r, "returncode", 1) != 0:
+                    log(f"  ⚠ tuned-adm restore to {target} failed", "warn")
+                    return False
+            except Exception as e:
+                log(f"  ⚠ tuned-adm restore error: {e}", "warn")
+                return False
+            log(f"  + CPU tuning: {target} [RESTORED]", "ok")
+            return True
+        elif kind == "cpupower":
+            target = orig_target or _read_current_linux_governor()
+            if not shutil.which("cpupower"):
+                log("  ⚠ cpupower not found to restore CPU governor", "warn")
+                return False
+            try:
+                r = subprocess.run(
+                    ["sudo", "-n", "cpupower", "frequency-set", "-g", target],
                     capture_output=True, timeout=5
                 )
-        elif method == "sysfs":
-            try:
-                for gov_path in Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor"):
-                    gov_path.write_text("schedutil")
-            except OSError:
-                pass
-        if method:
-            log("  + CPU governor: balanced [RESTORED]", "ok")
+                if getattr(r, "returncode", 1) != 0:
+                    if orig_target is None and target != "powersave":
+                        r2 = subprocess.run(
+                            ["sudo", "-n", "cpupower", "frequency-set", "-g", "powersave"],
+                            capture_output=True, timeout=5
+                        )
+                        if getattr(r2, "returncode", 1) != 0:
+                            log("  ⚠ cpupower restore failed", "warn")
+                            return False
+                    else:
+                        log(f"  ⚠ cpupower restore to {target} failed", "warn")
+                        return False
+            except Exception as e:
+                log(f"  ⚠ cpupower restore error: {e}", "warn")
+                return False
+            log(f"  + CPU governor: {target} [RESTORED]", "ok")
+            return True
+        elif kind == "sysfs":
+            target = orig_target or _read_current_linux_governor()
+            gov_paths = list(Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor"))
+            if not gov_paths:
+                log("  ⚠ No sysfs scaling_governor files found to restore", "warn")
+                return False
+            ok = True
+            for gov_path in gov_paths:
+                try:
+                    gov_path.write_text(target)
+                except OSError:
+                    if orig_target is None and target != "powersave":
+                        try:
+                            gov_path.write_text("powersave")
+                        except OSError:
+                            ok = False
+                    else:
+                        ok = False
+            if not ok:
+                log(f"  ⚠ Could not restore sysfs CPU governor to {target}", "warn")
+                return False
+            log(f"  + CPU governor: {target} [RESTORED]", "ok")
+            return True
+        return False
 
     elif IS_WINDOWS:
-        if method:
-            subprocess.run(
+        try:
+            r = subprocess.run(
                 ["powercfg", "/setactive", _safe_guid(str(method))],
-                # shell=False: method validated as UUID via _safe_guid
                 capture_output=True, creationflags=0x08000000, timeout=5
             )
+            if getattr(r, "returncode", 1) != 0:
+                log("  ⚠ Windows Power Plan restore failed", "warn")
+                return False
             log("  + Windows Power Plan: original restored", "ok")
+            return True
+        except Exception as e:
+            log(f"  ⚠ Windows Power Plan restore error: {e}", "warn")
+            return False
+    return True
 
 
 def _freeze_windows_services(log):
-    # FIX v2.4: Conditional SysMain — only stop on SSD.
-    # SysMain (Superfetch) prefetches frequently-used apps.
-    # On HDD: stopping it makes app launches SLOWER (prefetch is valuable on slow disks).
-    # On SSD: neutral (SSD already fast enough, prefetch adds minimal value).
     on_ssd = _has_only_ssd()
     if not on_ssd:
         log("  ~ SysMain: HDD detected — keeping Superfetch active (helps app launch on HDD)", "warn")
@@ -2354,23 +2696,32 @@ def _freeze_windows_services(log):
     return stopped
 
 
-def _restore_windows_services(stopped_services, log):
-    for svc in stopped_services:
-        subprocess.run(
-            ["net", "start", svc], capture_output=True,
-            creationflags=0x08000000, timeout=15
-        )
-    if stopped_services:
-        log(f"  + Restored {len(stopped_services)} Windows services", "ok")
+def _restore_windows_services(stopped_services, log) -> bool:
+    if not IS_WINDOWS or not stopped_services:
+        return True
+    failed = []
+    restored = 0
+    for svc in list(stopped_services):
+        try:
+            r = subprocess.run(
+                ["net", "start", svc], capture_output=True, text=True,
+                creationflags=0x08000000, timeout=15
+            )
+            combined = f"{getattr(r, 'stdout', '') or ''}\n{getattr(r, 'stderr', '') or ''}".lower()
+            if getattr(r, "returncode", 1) == 0 or "already been started" in combined or "1056" in combined:
+                restored += 1
+            else:
+                failed.append(svc)
+                log(f"  ⚠ Could not restart Windows service {svc}", "warn")
+        except Exception as e:
+            failed.append(svc)
+            log(f"  ⚠ Windows service restore error ({svc}): {e}", "warn")
+    if isinstance(stopped_services, list):
+        stopped_services[:] = failed
+    if restored:
+        log(f"  + Restored {restored} Windows services", "ok")
+    return len(failed) == 0
 
-
-# ══════════════════════════════════════════════════════════════
-# NEW v2.5 — WINDOWS GAME DVR / GAME BAR DISABLE
-# ══════════════════════════════════════════════════════════════
-# Xbox Game DVR records a video buffer continuously when it detects a game.
-# This uses CPU + RAM + disk I/O constantly → can reduce FPS by 5-15%.
-# Razer Cortex and Windows 11 Auto Game Mode both disable this.
-# No admin required — HKCU key.
 
 def _disable_gamedvr(log) -> Optional[int]:
     """Disable Windows GameDVR/Game Bar. Returns original value for restore."""
@@ -2394,20 +2745,24 @@ def _disable_gamedvr(log) -> Optional[int]:
         return None
 
 
-def _restore_gamedvr(orig_val: Optional[int], log):
-    """Restore GameDVR to original state."""
+def _restore_gamedvr(orig_val: Optional[int], log) -> bool:
+    """Restore GameDVR to original state. Returns True on success or not-applicable, False on failure."""
     if not IS_WINDOWS or orig_val is None:
-        return
+        return True
     try:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\GameDVR"
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
                              winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, "AppCaptureEnabled", 0, winreg.REG_DWORD, int(orig_val))
-        winreg.CloseKey(key)
+        try:
+            winreg.SetValueEx(key, "AppCaptureEnabled", 0, winreg.REG_DWORD, int(orig_val))
+        finally:
+            winreg.CloseKey(key)
         log("  + GameDVR: restored", "ok")
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        log(f"  ⚠ GameDVR restore failed: {e}", "warn")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2471,7 +2826,7 @@ def _set_realtime_scheduling(game_pids: list, log, saved: dict):
         return
     import ctypes as _ct
 
-    SCHED_FIFO = 1
+    SCHED_RR = 2      # Round-Robin with time quantum (safer than SCHED_FIFO — prevents spinlocks)
     RT_PRIORITY = 1   # lowest real-time — never starve OS
 
     class _sched_param(_ct.Structure):
@@ -2512,27 +2867,33 @@ def _set_realtime_scheduling(game_pids: list, log, saved: dict):
         except (OSError, ValueError):
             pass
 
+        orig_proc_nice = None
+        if HAS_PSUTIL:
+            try:
+                orig_proc_nice = psutil.Process(pid).nice()
+            except Exception:
+                orig_proc_nice = 0
+
+        nice_applied_for_pid = False
         for tid in tids:
             try:
                 if libc:
                     param = _sched_param(0)
-                    # Get current policy
                     orig_policy = libc.sched_getscheduler(tid)
                     libc.sched_getparam(tid, _ct.byref(param))
                     orig_prio = param.sched_priority
 
                     param.sched_priority = RT_PRIORITY
-                    ret = libc.sched_setscheduler(tid, SCHED_FIFO, _ct.byref(param))
+                    ret = libc.sched_setscheduler(tid, SCHED_RR, _ct.byref(param))
                     if ret == 0:
                         rt_entries[tid] = (orig_policy, orig_prio)
                         used_rt = True
-                    else:
-                        # No rt permission — fallback to nice
-                        if HAS_PSUTIL:
-                            p = psutil.Process(pid)
-                            cur_nice = p.nice()
-                            p.nice(-10)
-                            rt_entries[tid] = ("nice", cur_nice)
+                    elif HAS_PSUTIL and not nice_applied_for_pid:
+                        # Fallback to nice once per process so we don't overwrite orig_proc_nice with -10
+                        p = psutil.Process(pid)
+                        p.nice(-10)
+                        rt_entries[pid] = ("nice", orig_proc_nice if orig_proc_nice is not None else 0)
+                        nice_applied_for_pid = True
             except Exception:
                 pass
 
@@ -2547,14 +2908,15 @@ def _set_realtime_scheduling(game_pids: list, log, saved: dict):
     saved["rt_sched"] = rt_entries
 
 
-def _restore_realtime_scheduling(saved: dict, log):
+def _restore_realtime_scheduling(saved: dict, log) -> bool:
     """Restore original scheduling policy for game threads."""
     if not IS_LINUX:
-        return
+        return True
     import ctypes as _ct
-    rt_entries = saved.get("rt_sched", {})
-    if not rt_entries:
-        return
+    rt_entries = saved.get("rt_sched")
+    if not rt_entries or not isinstance(rt_entries, dict):
+        saved.pop("rt_sched", None)
+        return True
 
     SCHED_OTHER = 0
     class _sched_param(_ct.Structure):
@@ -2569,21 +2931,40 @@ def _restore_realtime_scheduling(saved: dict, log):
             pass
 
     restored = 0
-    for tid, (orig_policy, orig_prio) in rt_entries.items():
+    ok = True
+    for tid_k, (orig_policy, orig_prio) in list(rt_entries.items()):
         try:
+            tid = int(tid_k)
             if orig_policy == "nice":
                 if HAS_PSUTIL:
                     psutil.Process(tid).nice(orig_prio)
+                    rt_entries.pop(tid_k, None)
                     restored += 1
+                else:
+                    ok = False
             elif libc:
-                param = _sched_param(orig_prio)
-                policy = orig_policy if orig_policy >= 0 else SCHED_OTHER
-                libc.sched_setscheduler(tid, policy, _ct.byref(param))
-                restored += 1
-        except Exception:
-            pass
+                param = _sched_param(int(orig_prio))
+                policy = int(orig_policy) if int(orig_policy) >= 0 else SCHED_OTHER
+                rc = libc.sched_setscheduler(tid, policy, _ct.byref(param))
+                if rc == 0:
+                    rt_entries.pop(tid_k, None)
+                    restored += 1
+                else:
+                    ok = False
+            else:
+                ok = False
+        except ProcessLookupError:
+            rt_entries.pop(tid_k, None)
+        except Exception as e:
+            if HAS_PSUTIL and isinstance(e, getattr(psutil, "NoSuchProcess", ())):
+                rt_entries.pop(tid_k, None)
+            else:
+                ok = False
+    if not rt_entries:
+        saved.pop("rt_sched", None)
     if restored:
         log(f"  + Scheduling policy restored for {restored} threads", "ok")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2633,16 +3014,30 @@ def _protect_game_from_oom(game_pids: list, log, saved: dict):
     saved["oom_protected"] = orig_scores
 
 
-def _restore_game_oom(saved: dict, log):
+def _restore_game_oom(saved: dict, log) -> bool:
     """Restore oom_score_adj for game processes."""
     if not IS_LINUX:
-        return
+        return True
     from pathlib import Path as _P
-    for pid, orig in saved.get("oom_protected", {}).items():
+    oom_map = saved.get("oom_protected")
+    if not oom_map or not isinstance(oom_map, dict):
+        saved.pop("oom_protected", None)
+        return True
+    ok = True
+    for pid, orig in list(oom_map.items()):
+        proc_dir = _P(f"/proc/{pid}")
+        if not proc_dir.exists():
+            oom_map.pop(pid, None)
+            continue
         try:
-            _P(f"/proc/{pid}/oom_score_adj").write_text(orig + "\n")
-        except (OSError, PermissionError):
-            pass
+            (proc_dir / "oom_score_adj").write_text(str(orig) + "\n")
+            oom_map.pop(pid, None)
+        except (OSError, PermissionError) as e:
+            ok = False
+            log(f"  ⚠ Could not restore oom_score_adj for PID {pid}: {e}", "warn")
+    if not oom_map:
+        saved.pop("oom_protected", None)
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2782,20 +3177,33 @@ def _pin_game_to_perf_cores(game_pids: list, log, saved: dict):
     saved["game_core_affinity"] = orig_affinities
 
 
-def _restore_game_core_affinity(saved: dict, log):
+def _restore_game_core_affinity(saved: dict, log) -> bool:
     """Restore original CPU affinity for game processes."""
-    if not IS_LINUX or not HAS_PSUTIL:
-        return
+    if not IS_LINUX:
+        return True
+    aff_map = saved.get("game_core_affinity")
+    if not aff_map or not isinstance(aff_map, dict):
+        saved.pop("game_core_affinity", None)
+        return True
+    if not HAS_PSUTIL:
+        return False
     restored = 0
-    for pid, orig in saved.get("game_core_affinity", {}).items():
+    ok = True
+    for pid_k, orig in list(aff_map.items()):
         try:
-            psutil.Process(pid).cpu_affinity(orig)
+            psutil.Process(int(pid_k)).cpu_affinity(orig)
+            aff_map.pop(pid_k, None)
             restored += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied,
-                NotImplementedError, psutil.ZombieProcess):
-            pass
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            aff_map.pop(pid_k, None)
+        except (psutil.AccessDenied, PermissionError, NotImplementedError, ValueError, OSError) as e:
+            ok = False
+            log(f"  ⚠ Could not restore CPU affinity for PID {pid_k}: {e}", "warn")
+    if not aff_map:
+        saved.pop("game_core_affinity", None)
     if restored:
         log(f"  + P-core pinning: restored affinity for {restored} game processes", "ok")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2870,18 +3278,26 @@ def _set_thp_game(game_pids: list, log, saved: dict):
     saved["thp_orig"] = orig_thp
 
 
-def _restore_thp(saved: dict, log):
+def _restore_thp(saved: dict, log) -> bool:
     """Restore THP global setting."""
     if not IS_LINUX:
-        return
+        return True
     orig = saved.get("thp_orig")
     if not orig:
-        return
+        saved.pop("thp_orig", None)
+        return True
     thp_file = Path("/sys/kernel/mm/transparent_hugepage/enabled")
     try:
-        thp_file.write_text(orig + "\n")
-    except PermissionError:
-        _run_no_shell(["sudo", "-n", "tee", str(thp_file)], stdin_data=orig, timeout=3)
+        thp_file.write_text(str(orig) + "\n")
+        saved.pop("thp_orig", None)
+        return True
+    except (PermissionError, OSError):
+        _, code = _run_no_shell(["sudo", "-n", "tee", str(thp_file)], stdin_data=str(orig), timeout=3)
+        if code == 0:
+            saved.pop("thp_orig", None)
+            return True
+        log(f"  ⚠ Could not restore THP setting to {orig}", "warn")
+        return False
 
 
 def _set_gpu_performance(log, saved: dict):
@@ -2934,38 +3350,56 @@ def _set_gpu_performance(log, saved: dict):
     if gpu_orig:
         saved["gpu_perf_orig"] = gpu_orig
     else:
-        log("  ~ GPU performance: no supported GPU found (AMD DRM / NVIDIA)", "warn")
+        log("  i GPU clock: managed dynamically by kernel DRM driver (Intel / integrated GPU)", "ok")
 
 
-def _restore_gpu_performance(saved: dict, log):
-    """Restore GPU performance level."""
+def _restore_gpu_performance(saved: dict, log) -> bool:
+    """Restore GPU performance level. Preserves un-restored entries in `saved['gpu_perf_orig']` on failure."""
     if not IS_LINUX:
-        return
-    gpu_orig = saved.get("gpu_perf_orig", {})
-    if not gpu_orig:
-        return
+        return True
+    gpu_orig = saved.get("gpu_perf_orig")
+    if not gpu_orig or not isinstance(gpu_orig, dict):
+        saved.pop("gpu_perf_orig", None)
+        return True
 
-    for path_str, orig_val in gpu_orig.items():
+    ok = True
+    for path_str, orig_val in list(gpu_orig.items()):
         if path_str == "nvidia_autoboost":
             try:
-                subprocess.run(
+                r = subprocess.run(
                     ["nvidia-smi", "--auto-boost-default=1"],
                     capture_output=True, timeout=5
                 )
-            except Exception:
-                pass
+                if getattr(r, "returncode", 1) == 0:
+                    gpu_orig.pop(path_str, None)
+                else:
+                    ok = False
+                    log("  ⚠ NVIDIA auto-boost restore failed", "warn")
+            except Exception as e:
+                ok = False
+                log(f"  ⚠ NVIDIA auto-boost restore error: {e}", "warn")
             continue
         try:
-            Path(path_str).write_text(orig_val)
+            Path(path_str).write_text(str(orig_val))
+            gpu_orig.pop(path_str, None)
         except Exception:
             try:
-                subprocess.run(
+                r = subprocess.run(
                     ["sudo", "-n", "tee", path_str],
-                    input=orig_val, text=True, capture_output=True, timeout=5
+                    input=str(orig_val), text=True, capture_output=True, timeout=5
                 )
-            except Exception:
-                pass
-    log("  + GPU performance level: restored", "ok")
+                if getattr(r, "returncode", 1) == 0:
+                    gpu_orig.pop(path_str, None)
+                else:
+                    ok = False
+                    log(f"  ⚠ GPU performance restore failed for {path_str}", "warn")
+            except Exception as e:
+                ok = False
+                log(f"  ⚠ GPU performance restore error for {path_str}: {e}", "warn")
+    if not gpu_orig:
+        saved.pop("gpu_perf_orig", None)
+        log("  + GPU performance level: restored", "ok")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3031,25 +3465,37 @@ def _set_io_scheduler(log, saved: dict):
         saved["io_sched_orig"] = io_orig
 
 
-def _restore_io_scheduler(saved: dict, log):
-    """Restore I/O schedulers."""
+def _restore_io_scheduler(saved: dict, log) -> bool:
+    """Restore I/O schedulers. Preserves un-restored entries in `saved['io_sched_orig']` on failure."""
     if not IS_LINUX:
-        return
-    io_orig = saved.get("io_sched_orig", {})
-    if not io_orig:
-        return
-    for sched_file, orig in io_orig.items():
+        return True
+    io_orig = saved.get("io_sched_orig")
+    if not io_orig or not isinstance(io_orig, dict):
+        saved.pop("io_sched_orig", None)
+        return True
+    ok = True
+    for sched_file, orig in list(io_orig.items()):
         try:
-            Path(sched_file).write_text(orig)
+            Path(sched_file).write_text(str(orig))
+            io_orig.pop(sched_file, None)
         except Exception:
             try:
-                subprocess.run(
+                r = subprocess.run(
                     ["sudo", "-n", "tee", sched_file],
-                    input=orig, text=True, capture_output=True, timeout=5
+                    input=str(orig), text=True, capture_output=True, timeout=5
                 )
-            except Exception:
-                pass
-    log("  + I/O schedulers: restored", "ok")
+                if getattr(r, "returncode", 1) == 0:
+                    io_orig.pop(sched_file, None)
+                else:
+                    ok = False
+                    log(f"  ⚠ I/O scheduler restore failed for {sched_file}", "warn")
+            except Exception as e:
+                ok = False
+                log(f"  ⚠ I/O scheduler restore error for {sched_file}: {e}", "warn")
+    if not io_orig:
+        saved.pop("io_sched_orig", None)
+        log("  + I/O schedulers: restored", "ok")
+    return ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3102,30 +3548,45 @@ def _inhibit_screensaver(log, saved: dict):
         saved["inhibit_proc"] = inhibit_proc
 
 
-def _restore_screensaver(saved: dict, log):
-    """Stop screensaver inhibitor."""
+def _restore_screensaver(saved: dict, log) -> bool:
+    """Stop screensaver inhibitor. Returns True on success or not-applicable, False on failure."""
     if not IS_LINUX:
-        return
+        return True
     inhibit = saved.get("inhibit_proc")
     if inhibit is None:
-        return
+        saved.pop("inhibit_proc", None)
+        return True
     if inhibit == "xdg":
         try:
-            subprocess.run(["xdg-screensaver", "resume", "0"],
-                           capture_output=True, timeout=5)
+            r = subprocess.run(["xdg-screensaver", "resume", "0"],
+                               capture_output=True, timeout=5)
+            if getattr(r, "returncode", 1) != 0:
+                log("  ⚠ xdg-screensaver resume returned non-zero status", "warn")
+                return False
+            saved.pop("inhibit_proc", None)
             log("  + Screensaver: resumed", "ok")
-        except Exception:
-            pass
+            return True
+        except Exception as e:
+            log(f"  ⚠ Screensaver resume failed: {e}", "warn")
+            return False
     elif hasattr(inhibit, "terminate"):
         try:
             inhibit.terminate()
             inhibit.wait(timeout=3)
+            saved.pop("inhibit_proc", None)
             log("  + Sleep inhibit: released", "ok")
+            return True
         except Exception:
             try:
                 inhibit.kill()
-            except Exception:
-                pass
+                if hasattr(inhibit, "wait"):
+                    inhibit.wait(timeout=2)
+                saved.pop("inhibit_proc", None)
+                return True
+            except Exception as e:
+                log(f"  ⚠ Could not release sleep inhibitor: {e}", "warn")
+                return False
+    return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3151,11 +3612,99 @@ _ADAPTER_NAME_RE = re.compile(r"^[\w .\-()#*+@]{1,128}$")
 _IP_TEXT_RE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]{2,39})$")
 
 
+def _parse_netsh_dns_output(dns_out: str) -> Optional[dict]:
+    """
+    Phân tích output của `netsh interface ip show dns name="<adapter>"` thành cấu trúc:
+        {"mode": "dhcp" | "static", "servers": ["8.8.8.8", "8.8.4.4", ...]}
+    Trả về None nếu không phân tích được cấu hình gốc một cách đáng tin cậy.
+    """
+    if dns_out is None:
+        return None
+    if not dns_out.strip():
+        # Empty output (e.g. default DHCP with no static overrides) → DHCP
+        return {"mode": "dhcp", "servers": []}
+    text = dns_out.strip()
+    low = text.lower()
+    mode: Optional[str] = None
+    if "dhcp" in low:
+        mode = "dhcp"
+    elif "statically" in low or "static" in low:
+        mode = "static"
+
+    servers: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        l_low = line.lower()
+        if l_low.startswith("configuration for interface") or l_low.startswith("register with"):
+            continue
+        if ":" in line:
+            rhs = line.split(":", 1)[1].strip()
+            if not rhs or rhs.lower() == "none":
+                continue
+            cand = rhs.split()[0]
+            if _IP_TEXT_RE.match(cand):
+                if cand not in servers:
+                    servers.append(cand)
+            else:
+                # Có token ở dòng DNS nhưng không phải IP hợp lệ → không đáng tin cậy
+                return None
+        else:
+            tokens = line.split()
+            if len(tokens) == 1 and _IP_TEXT_RE.match(tokens[0]):
+                if tokens[0] not in servers:
+                    servers.append(tokens[0])
+            elif any(c.isdigit() for c in line):
+                # Dòng có số nhưng không khớp định dạng IP chuẩn → không đáng tin cậy
+                return None
+
+    if mode == "dhcp":
+        return {"mode": "dhcp", "servers": servers}
+    if mode == "static":
+        if not servers:
+            return None
+        return {"mode": "static", "servers": servers}
+    if servers:
+        return {"mode": "static", "servers": servers}
+    return None
+
+
+def _normalize_legacy_dns_spec(orig_spec) -> Optional[dict]:
+    """Hỗ trợ cả dict cấu trúc mới lẫn list chuỗi cũ trong các test trước đây."""
+    if isinstance(orig_spec, dict):
+        mode = orig_spec.get("mode")
+        servers = list(orig_spec.get("servers") or [])
+        if mode == "dhcp" and all(_IP_TEXT_RE.match(str(s)) for s in servers):
+            return {"mode": "dhcp", "servers": [str(s) for s in servers]}
+        if mode == "static" and servers and all(_IP_TEXT_RE.match(str(s)) for s in servers):
+            return {"mode": "static", "servers": [str(s) for s in servers]}
+        return None
+    if isinstance(orig_spec, (list, tuple)):
+        if not orig_spec:
+            return {"mode": "dhcp", "servers": []}
+        servers: List[str] = []
+        for item in orig_spec:
+            s = str(item).strip()
+            if not s:
+                continue
+            cand = s.split()[-1]
+            if not _IP_TEXT_RE.match(cand):
+                # Legacy list entry with unparseable/corrupt IP → fall back to safe DHCP
+                return {"mode": "dhcp", "servers": []}
+            if cand not in servers:
+                servers.append(cand)
+        if not servers:
+            return {"mode": "dhcp", "servers": []}
+        return {"mode": "static", "servers": servers}
+    return None
+
+
 def _boost_dns_windows(log) -> list:
     """
     Switch DNS to Cloudflare (1.1.1.1) on all active adapters.
-    Returns list of (adapter_name, orig_dns_list) for restore.
-    Only applies if running as admin — silently skips otherwise.
+    Returns list of (adapter_name, orig_dns_config_dict) for restore.
+    Only applies if running as admin and original DNS config can be reliably read.
     """
     if not IS_WINDOWS:
         return []
@@ -3169,12 +3718,15 @@ def _boost_dns_windows(log) -> list:
 
     changed = []
     try:
-        # Get active adapters
-        out = subprocess.run(
+        r_if = subprocess.run(
             'netsh interface show interface',
             shell=True, capture_output=True, text=True,
             creationflags=0x08000000, timeout=8
-        ).stdout
+        )
+        if getattr(r_if, "returncode", 0) != 0:
+            log("  ~ DNS boost: could not query network interfaces", "warn")
+            return []
+        out = r_if.stdout or ""
 
         adapters = []
         for line in out.splitlines():
@@ -3187,14 +3739,18 @@ def _boost_dns_windows(log) -> list:
             if not _ADAPTER_NAME_RE.match(adapter):
                 log(f"  ~ DNS: skipped adapter with unusual characters in its name ({adapter!r})", "warn")
                 continue
-            # Read current DNS
-            dns_out = subprocess.run(
+            dns_res = subprocess.run(
                 f'netsh interface ip show dns name="{adapter}"',
                 shell=True, capture_output=True, text=True,
                 creationflags=0x08000000, timeout=5
-            ).stdout
-            orig_dns = [l.strip() for l in dns_out.splitlines()
-                        if l.strip() and any(c.isdigit() for c in l)]
+            )
+            if getattr(dns_res, "returncode", 0) != 0:
+                log(f"  ~ DNS: skipped {adapter} (could not read current DNS config)", "warn")
+                continue
+            orig_cfg = _parse_netsh_dns_output(dns_res.stdout or "")
+            if orig_cfg is None:
+                log(f"  ~ DNS: skipped {adapter} (unrecognized DNS configuration output)", "warn")
+                continue
 
             # Set Cloudflare DNS
             r1 = subprocess.run(
@@ -3206,18 +3762,13 @@ def _boost_dns_windows(log) -> list:
                 shell=True, capture_output=True, creationflags=0x08000000, timeout=5
             )
             if r1.returncode == 0:
-                changed.append((adapter, orig_dns))
+                changed.append((adapter, orig_cfg))
                 if r2.returncode == 0:
                     log(f"  + DNS: {adapter} → 1.1.1.1/1.0.0.1 (Cloudflare)", "ok")
                 else:
-                    # Primary DNS switched fine but the secondary (backup) DNS
-                    # entry failed to add — still a working, faster DNS setup,
-                    # just without a fallback resolver. Report accurately
-                    # instead of claiming both succeeded.
                     log(f"  + DNS: {adapter} → 1.1.1.1 (secondary 1.0.0.1 failed, primary only)", "ok")
 
         if changed:
-            # Flush DNS cache
             subprocess.run("ipconfig /flushdns", shell=True, capture_output=True,
                            creationflags=0x08000000, timeout=5)
             log("  + DNS cache flushed", "ok")
@@ -3226,37 +3777,72 @@ def _boost_dns_windows(log) -> list:
     return changed
 
 
-def _restore_dns_windows(changed: list, log):
-    """Restore DNS settings."""
+def _restore_dns_windows(changed: list, log) -> bool:
+    """
+    Phục hồi cấu hình DNS Windows đúng chế độ (DHCP hoặc static) và đầy đủ danh sách
+    DNS server theo đúng thứ tự. Kiểm tra returncode của từng lệnh; chỉ báo restored
+    khi thực sự thành công.
+    """
     if not IS_WINDOWS or not changed:
-        return
-    for adapter, orig_dns in changed:
-        if not _ADAPTER_NAME_RE.match(adapter):
+        return True
+    all_ok = True
+    restored_any = False
+    items = list(changed.items()) if isinstance(changed, dict) else list(changed)
+    for adapter, orig_dns in items:
+        if not _ADAPTER_NAME_RE.match(str(adapter)):
+            log(f"  ~ DNS restore: skipped invalid adapter name ({adapter!r})", "warn")
+            all_ok = False
+            continue
+        cfg = _normalize_legacy_dns_spec(orig_dns)
+        if cfg is None:
+            log(f"  ⚠ DNS restore: invalid saved DNS config for {adapter!r} — refusing unsafe command", "warn")
+            all_ok = False
             continue
         try:
-            if not orig_dns:
-                subprocess.run(
+            if cfg["mode"] == "dhcp":
+                r = subprocess.run(
                     f'netsh interface ip set dns name="{adapter}" dhcp',
                     shell=True, capture_output=True, creationflags=0x08000000, timeout=5
                 )
+                if getattr(r, "returncode", 1) != 0:
+                    all_ok = False
+                    log(f"  ⚠ DNS restore failed for {adapter} (DHCP)", "warn")
+                else:
+                    restored_any = True
             else:
-                _ip = orig_dns[0].split()[-1]
-                if not _IP_TEXT_RE.match(_ip):
-                    # không đọc được địa chỉ cũ một cách đáng tin → trả về DHCP thay vì đặt giá trị lạ
-                    subprocess.run(
-                        f'netsh interface ip set dns name="{adapter}" dhcp',
-                        shell=True, capture_output=True, creationflags=0x08000000, timeout=5
-                    )
-                    continue
-                subprocess.run(
-                    f'netsh interface ip set dns name="{adapter}" static {_ip}',
+                servers = cfg["servers"]
+                r0 = subprocess.run(
+                    f'netsh interface ip set dns name="{adapter}" static {servers[0]}',
                     shell=True, capture_output=True, creationflags=0x08000000, timeout=5
                 )
-        except Exception:
-            pass
-    subprocess.run("ipconfig /flushdns", shell=True, capture_output=True,
-                   creationflags=0x08000000, timeout=5)
-    log("  + DNS: restored", "ok")
+                if getattr(r0, "returncode", 1) != 0:
+                    all_ok = False
+                    log(f"  ⚠ DNS restore failed for {adapter} (primary {servers[0]})", "warn")
+                    continue
+                adapter_ok = True
+                for idx, ip in enumerate(servers[1:], start=2):
+                    rk = subprocess.run(
+                        f'netsh interface ip add dns name="{adapter}" {ip} index={idx}',
+                        shell=True, capture_output=True, creationflags=0x08000000, timeout=5
+                    )
+                    if getattr(rk, "returncode", 1) != 0:
+                        adapter_ok = False
+                        all_ok = False
+                        log(f"  ⚠ DNS restore failed for {adapter} (secondary #{idx} {ip})", "warn")
+                if adapter_ok:
+                    restored_any = True
+        except Exception as e:
+            all_ok = False
+            log(f"  ⚠ DNS restore error for {adapter}: {e}", "warn")
+
+    if restored_any:
+        subprocess.run("ipconfig /flushdns", shell=True, capture_output=True,
+                       creationflags=0x08000000, timeout=5)
+    if all_ok and restored_any:
+        log("  + DNS: restored", "ok")
+    elif not all_ok:
+        log("  ⚠ DNS: restoration incomplete — some adapters failed to restore", "warn")
+    return all_ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3535,11 +4121,20 @@ def game_mode_on(log) -> dict:
                         # be doing useful work during gaming
                         saved["affinity"][p.pid] = p.cpu_affinity()
                         p.cpu_affinity(trash_cores)
-                        saved["nice"][p.pid] = p.nice()
+                        orig_n = p.nice()
                         if IS_WINDOWS:
+                            saved["nice"][p.pid] = orig_n
                             p.nice(psutil.IDLE_PRIORITY_CLASS)
-                        elif IS_LINUX and os.geteuid() == 0:
-                            p.nice(19)
+                        elif IS_LINUX and _can_restore_linux_nice(orig_n):
+                            try:
+                                p.nice(19)
+                                saved["nice"][p.pid] = {
+                                    "orig_nice": orig_n,
+                                    "name": _proc_identity(p)[0],
+                                    "create_time": _proc_identity(p)[1],
+                                }
+                            except (PermissionError, psutil.AccessDenied):
+                                pass
                         jailed += 1
                         log(f"  v Bloat: {nm} → core {trash_cores} + idle", "warn")
 
@@ -3550,37 +4145,43 @@ def game_mode_on(log) -> dict:
 
                     elif nm in COMMS_MEDIA_APPS and has_game:
                         if cpu_now > ACTIVE_CPU_THRESHOLD:
-                            # App is ACTIVELY being used (call encoding, music decoding,
-                            # streaming video, etc). DO NOT jail it — only lower priority
-                            # softly so OS gives game preference during contention.
-                            saved["nice"][p.pid] = p.nice()
+                            orig_n = p.nice()
                             if IS_WINDOWS:
-                                # Active comms on Windows: do NOT lower priority.
-                                # WASAPI audio threads need normal priority.
                                 pass
-                            elif IS_LINUX and os.geteuid() == 0:
-                                p.nice(5)
+                            elif IS_LINUX and _can_restore_linux_nice(orig_n):
+                                try:
+                                    p.nice(5)
+                                    saved["nice"][p.pid] = {
+                                        "orig_nice": orig_n,
+                                        "name": _proc_identity(p)[0],
+                                        "create_time": _proc_identity(p)[1],
+                                    }
+                                except (PermissionError, psutil.AccessDenied):
+                                    pass
                             soft_throttled += 1
                             log(f"  ~ Active: {nm} ({cpu_now:.1f}% CPU) → untouched (audio-safe)", "ok")
                         else:
-                            # Idle comms/media can still suddenly become active (voice/chat/video).
-                            # On Windows, avoid affinity jail to prevent capture/overlay instability.
-                            saved["nice"][p.pid] = p.nice()
+                            orig_n = p.nice()
                             if IS_WINDOWS:
-                                # Keep NORMAL priority for comms/media on Windows.
-                                # BELOW_NORMAL deprioritizes WASAPI audio threads
-                                # -> Discord voice stutters, Spotify/YouTube cuts out.
-                                # Just track it as soft-throttled without touching priority.
                                 soft_throttled += 1
                                 log(f"  ~ Kept: {nm} → normal priority (audio-safe on Windows)", "ok")
-                            elif IS_LINUX and os.geteuid() == 0:
+                            elif IS_LINUX:
                                 if cores >= 6:
                                     idle_cores = list(range(cores // 2, cores))
                                 else:
                                     idle_cores = [cores - 1]
                                 saved["affinity"][p.pid] = p.cpu_affinity()
                                 p.cpu_affinity(idle_cores)
-                                p.nice(10)
+                                if _can_restore_linux_nice(orig_n):
+                                    try:
+                                        p.nice(10)
+                                        saved["nice"][p.pid] = {
+                                            "orig_nice": orig_n,
+                                            "name": _proc_identity(p)[0],
+                                            "create_time": _proc_identity(p)[1],
+                                        }
+                                    except (PermissionError, psutil.AccessDenied):
+                                        pass
                                 jailed += 1
                                 log(f"  v Idle: {nm} → cores {idle_cores} (was idle at {cpu_now:.1f}%)", "warn")
                             else:
@@ -3656,9 +4257,13 @@ def game_mode_on(log) -> dict:
                     HIGH_PRIORITY_CLASS = 0x00000080
                     h = _wct.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
                     if h:
+                        if pid not in saved["game_priority"] and HAS_PSUTIL:
+                            try:
+                                saved["game_priority"][pid] = psutil.Process(pid).nice()
+                            except Exception:
+                                saved["game_priority"][pid] = psutil.NORMAL_PRIORITY_CLASS
                         _wct.windll.kernel32.SetPriorityClass(h, HIGH_PRIORITY_CLASS)
                         _wct.windll.kernel32.CloseHandle(h)
-                        saved["game_priority"][pid] = "high"
                         log(f"  ↑ Windows: game process set to HIGH priority class", "ok")
                 except Exception:
                     pass
@@ -3743,68 +4348,140 @@ def game_mode_on(log) -> dict:
     return saved
 
 
-def game_mode_off(saved: dict, log):
+def game_mode_off(saved: dict, log) -> bool:
+    if not isinstance(saved, dict):
+        return True
     log("↺ Restoring system...", "head")
+    all_ok = True
 
-    # Resume frozen (SIGSTOP) processes first
-    if saved.get("frozen") and IS_LINUX:
-        restore_bloat(saved["frozen"], log)
+    if saved.get("frozen"):
+        if restore_bloat(saved["frozen"], log):
+            saved.pop("frozen", None)
+        else:
+            all_ok = False
 
-    # Linux: restore new v2.5 features
     if IS_LINUX:
-        _restore_screensaver(saved, log)
-        _restore_io_scheduler(saved, log)
-        _restore_gpu_performance(saved, log)
-        _bypass_compositor_off(saved, log)
-        # Restore deep game-process optimizations
-        _restore_realtime_scheduling(saved, log)
-        _restore_game_oom(saved, log)
-        _restore_game_core_affinity(saved, log)
-        _restore_thp(saved, log)
+        if not _restore_screensaver(saved, log):
+            all_ok = False
+        if not _restore_io_scheduler(saved, log):
+            all_ok = False
+        if not _restore_gpu_performance(saved, log):
+            all_ok = False
+        if not _bypass_compositor_off(saved, log):
+            all_ok = False
+        if not _restore_realtime_scheduling(saved, log):
+            all_ok = False
+        if not _restore_game_oom(saved, log):
+            all_ok = False
+        if not _restore_game_core_affinity(saved, log):
+            all_ok = False
+        if not _restore_thp(saved, log):
+            all_ok = False
 
     if IS_WINDOWS:
         if saved.get("services"):
-            _restore_windows_services(saved["services"], log)
+            if _restore_windows_services(saved["services"], log):
+                saved.pop("services", None)
+            else:
+                all_ok = False
         if saved.get("nagle_changed"):
-            _restore_nagle(saved["nagle_changed"], log)
-        _timer_resolution_restore(saved.get("timer_set", False), log)
-        _restore_gamedvr(saved.get("gamedvr_orig"), log)
+            if _restore_nagle(saved["nagle_changed"], log):
+                saved.pop("nagle_changed", None)
+            else:
+                all_ok = False
+        if saved.get("timer_set"):
+            if _timer_resolution_restore(bool(saved.get("timer_set")), log):
+                saved.pop("timer_set", None)
+            else:
+                all_ok = False
+        if saved.get("gamedvr_orig") is not None:
+            if _restore_gamedvr(saved.get("gamedvr_orig"), log):
+                saved.pop("gamedvr_orig", None)
+            else:
+                all_ok = False
         if saved.get("dns_changed"):
-            _restore_dns_windows(saved["dns_changed"], log)
-        _bypass_compositor_off(saved, log)
+            if _restore_dns_windows(saved["dns_changed"], log):
+                saved.pop("dns_changed", None)
+            else:
+                all_ok = False
+        if not _bypass_compositor_off(saved, log):
+            all_ok = False
 
-    # Restore game process priority
-    for pid, orig_nice in saved.get("game_priority", {}).items():
-        try:
-            psutil.Process(pid).nice(orig_nice)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    if saved.get("game_priority"):
-        log(f"  + Game priority restored for {len(saved['game_priority'])} processes", "ok")
+    gp_map = saved.get("game_priority")
+    if isinstance(gp_map, dict) and gp_map:
+        gp_restored = 0
+        for pid, orig_nice in list(gp_map.items()):
+            try:
+                target_nice = orig_nice
+                if target_nice == "high" and IS_WINDOWS:
+                    target_nice = psutil.NORMAL_PRIORITY_CLASS
+                psutil.Process(int(pid)).nice(target_nice)
+                gp_map.pop(pid, None)
+                gp_restored += 1
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                gp_map.pop(pid, None)
+            except (psutil.AccessDenied, PermissionError, TypeError, ValueError, OSError) as e:
+                all_ok = False
+                log(f"  ⚠ Could not restore game priority for PID {pid}: {e}", "warn")
+        if not gp_map:
+            saved.pop("game_priority", None)
+        if gp_restored:
+            log(f"  + Game priority restored for {gp_restored} processes", "ok")
 
-    for pid, orig in saved.get("nice", {}).items():
-        try:
-            psutil.Process(pid).nice(orig)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
+    nice_map = saved.get("nice")
+    if isinstance(nice_map, dict) and nice_map:
+        for pid, orig in list(nice_map.items()):
+            try:
+                proc = psutil.Process(int(pid))
+                if isinstance(orig, dict):
+                    if not _same_process_identity(proc, orig):
+                        nice_map.pop(pid, None)
+                        continue
+                    proc.nice(int(orig["orig_nice"]))
+                else:
+                    proc.nice(int(orig))
+                nice_map.pop(pid, None)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                nice_map.pop(pid, None)
+            except (psutil.AccessDenied, PermissionError, ValueError, OSError) as e:
+                all_ok = False
+                log(f"  ⚠ Could not restore nice for PID {pid}: {e}", "warn")
+        if not nice_map:
+            saved.pop("nice", None)
 
-    restored = 0
-    for pid, orig in saved.get("affinity", {}).items():
-        try:
-            psutil.Process(pid).cpu_affinity(orig)
-            restored += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    if restored:
-        log(f"  + CPU affinity restored for {restored} processes", "ok")
+    aff_map = saved.get("affinity")
+    if isinstance(aff_map, dict) and aff_map:
+        restored = 0
+        for pid, orig in list(aff_map.items()):
+            try:
+                psutil.Process(int(pid)).cpu_affinity(orig)
+                aff_map.pop(pid, None)
+                restored += 1
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                aff_map.pop(pid, None)
+            except (psutil.AccessDenied, PermissionError, OSError) as e:
+                all_ok = False
+                log(f"  ⚠ Could not restore affinity for PID {pid}: {e}", "warn")
+        if not aff_map:
+            saved.pop("affinity", None)
+        if restored:
+            log(f"  + CPU affinity restored for {restored} processes", "ok")
 
     if saved.get("power") is not None:
-        _restore_kernel_performance(saved["power"], log)
+        if _restore_kernel_performance(saved["power"], log):
+            saved.pop("power", None)
+        else:
+            all_ok = False
 
-    if saved.get("_crash_cleanup_fn"):
+    if all_ok and saved.get("_crash_cleanup_fn"):
         _unregister_cleanup(saved["_crash_cleanup_fn"])
+        saved.pop("_crash_cleanup_fn", None)
 
-    log("✓ GAME MODE OFF — system restored", "ok")
+    if all_ok:
+        log("✓ GAME MODE OFF — system restored", "ok")
+    else:
+        log("⚠ GAME MODE OFF — partial restore (some settings could not be restored)", "warn")
+    return all_ok
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3954,31 +4631,54 @@ def _eco_mode_on_nice_fallback(log) -> dict:
     return saved
 
 
-def eco_mode_off(saved: dict, log):
+def eco_mode_off(saved: dict, log) -> bool:
     if not saved:
-        return
+        return True
     mode = saved.get("mode")
+    all_ok = True
 
     if mode == "windows_memprio":
         log("ECO MODE OFF — restoring background processes...", "head")
-        # FIX v2.4: Removed _mmcss_boost_off() — MMCSS was boosting wrong thread.
-        # Restore EcoQoS if was applied (Win11+)
-        for pid in saved.get("eco_pids", []):
-            _set_ecoqos(pid, False)
-        if saved.get("eco_pids"):
-            log(f"  + EcoQoS restored for {len(saved['eco_pids'])} processes", "ok")
-        # Restore memory priority
+        eco_pids = list(saved.get("eco_pids") or [])
+        failed_eco = []
+        for pid in eco_pids:
+            if not _set_ecoqos(pid, False):
+                if HAS_PSUTIL and psutil.pid_exists(int(pid)):
+                    failed_eco.append(pid)
+                    all_ok = False
+        if failed_eco:
+            saved["eco_pids"] = failed_eco
+        else:
+            saved.pop("eco_pids", None)
+        if eco_pids and not failed_eco:
+            log(f"  + EcoQoS restored for {len(eco_pids)} processes", "ok")
+
         restored = 0
-        for pid in saved.get("mem_lowered", []):
+        failed_mem = []
+        for pid in list(saved.get("mem_lowered") or []):
             if _set_process_memory_priority(pid, MEMORY_PRIORITY_NORMAL):
                 restored += 1
+            elif HAS_PSUTIL and psutil.pid_exists(int(pid)):
+                failed_mem.append(pid)
+                all_ok = False
+        if failed_mem:
+            saved["mem_lowered"] = failed_mem
+        else:
+            saved.pop("mem_lowered", None)
         log(f"  + Memory priority restored for {restored} processes", "ok")
+        if all_ok:
+            saved.pop("mode", None)
+        return all_ok
 
     elif mode == "linux_cgroup":
         log("ECO MODE OFF — removing cgroup throttle...", "head")
         cg_path  = saved.get("cgroup_path")
         restored = 0
-        for pid, orig_cg in saved.get("cgroup_procs", {}).items():
+        cg_procs = saved.get("cgroup_procs") or {}
+        for pid, orig_cg in list(cg_procs.items()):
+            if not Path(f"/proc/{pid}").exists():
+                cg_procs.pop(pid, None)
+                continue
             if orig_cg:
                 ok = _cgroup_restore(pid, orig_cg)
             else:
@@ -3988,22 +4688,40 @@ def eco_mode_off(saved: dict, log):
                 except (OSError, PermissionError):
                     ok = False
             if ok:
+                cg_procs.pop(pid, None)
                 restored += 1
+            else:
+                all_ok = False
         log(f"  + {restored} processes returned to normal cgroup", "ok")
-        if cg_path:
-            _cgroup_destroy(cg_path, log)
+        if not cg_procs:
+            saved.pop("cgroup_procs", None)
+            if cg_path:
+                _cgroup_destroy(cg_path, log)
+                saved.pop("cgroup_path", None)
+            saved.pop("mode", None)
+        return all_ok
 
     elif mode == "linux_nice":
         restored = 0
-        for pid, orig in saved.get("nice_saved", {}).items():
+        nice_saved = saved.get("nice_saved") or {}
+        for pid, orig in list(nice_saved.items()):
             try:
-                psutil.Process(pid).nice(orig)
+                psutil.Process(int(pid)).nice(orig)
+                nice_saved.pop(pid, None)
                 restored += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                nice_saved.pop(pid, None)
+            except (psutil.AccessDenied, PermissionError, OSError) as e:
+                all_ok = False
+                log(f"  ⚠ Could not restore nice for PID {pid}: {e}", "warn")
+        if not nice_saved:
+            saved.pop("nice_saved", None)
+            saved.pop("mode", None)
         log(f"ECO MODE OFF — nice restored for {restored} processes", "ok")
+        return all_ok
     else:
         log("ECO MODE OFF — nothing to restore", "ok")
+        return True
 
 
 # ══════════════════════════════════════════════════════════════
@@ -4060,18 +4778,22 @@ def _tweak_windows_visuals(low_end: bool, log):
         return None
 
 
-def _restore_windows_visuals(orig_val, log):
+def _restore_windows_visuals(orig_val, log) -> bool:
     if not IS_WINDOWS or orig_val is None:
-        return
+        return True
     try:
         import winreg
         key_path = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, 'EnableTransparency', 0, winreg.REG_DWORD, int(orig_val))
-        winreg.CloseKey(key)
+        try:
+            winreg.SetValueEx(key, 'EnableTransparency', 0, winreg.REG_DWORD, int(orig_val))
+        finally:
+            winreg.CloseKey(key)
         log("  + Windows transparency restored", "ok")
+        return True
     except Exception as e:
         log(f"  ~ Transparency restore skipped: {e}", "warn")
+        return False
 
 
 def smart_boost_on(log) -> dict:
@@ -4128,20 +4850,45 @@ def smart_boost_on(log) -> dict:
     return saved
 
 
-def smart_boost_off(saved: dict, log):
+def smart_boost_off(saved: dict, log) -> bool:
     if not saved:
-        return
+        return True
     tier = saved.get('tier', 'mid')
     log(f'Smart Boost OFF — restoring [{tier}]...', 'head')
+    all_ok = True
 
-    # Stop PSI monitor
     if saved.get('psi_stop'):
-        saved['psi_stop'].set()
+        try:
+            saved['psi_stop'].set()
+            saved.pop('psi_stop', None)
+            saved.pop('psi_monitor', None)
+        except Exception:
+            pass
 
     if saved.get('eco'):
-        eco_mode_off(saved['eco'], log)
-    if saved.get('game') is not None:
-        game_mode_off(saved['game'], log)
+        if eco_mode_off(saved['eco'], log):
+            saved.pop('eco', None)
+        else:
+            all_ok = False
+    if saved.get('game'):
+        if game_mode_off(saved['game'], log):
+            saved.pop('game', None)
+        else:
+            all_ok = False
+    elif 'game' in saved:
+        saved.pop('game', None)
+    if saved.get('power') and not (isinstance(saved.get('game'), dict) and saved['game'].get('power')):
+        if _restore_kernel_performance(saved['power'], log):
+            saved.pop('power', None)
+        else:
+            all_ok = False
     if saved.get('visuals_orig') is not None:
-        _restore_windows_visuals(saved['visuals_orig'], log)
-    log('✓ Smart Boost OFF — system restored', 'ok')
+        if _restore_windows_visuals(saved['visuals_orig'], log):
+            saved.pop('visuals_orig', None)
+        else:
+            all_ok = False
+    if all_ok:
+        log('✓ Smart Boost OFF — system restored', 'ok')
+    else:
+        log('⚠ Smart Boost OFF — partial restore (some settings could not be restored)', 'warn')
+    return all_ok

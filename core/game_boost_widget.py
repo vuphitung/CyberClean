@@ -1,207 +1,933 @@
 """
-core/game_boost_widget.py — CyberClean Game Boost UI
-══════════════════════════════════════════════════════
-1 nút orbit tròn, 4 giai đoạn, neon cyber.
-Dùng đúng design tokens C/MONO từ ui_widgets.py.
-
-Tích hợp: xem patch_booster_page.py
+core/game_boost_widget.py — CyberClean System Booster UI & Lifecycle (v4.0)
+═══════════════════════════════════════════════════════════════════════════
+• Collision-Free OrbitButton HUD (4 corner badges outside rings + non-overlapping sphere text)
+• Elevated MetricCards + PhaseBar + Interactive Pill Module Toggles + One-shot Tools
+• Full state capture & deterministic restoration (CPU governor/power plan, swappiness,
+  Hyprland misc:vfr & misc:no_direct_scanout, process niceness, environment variables)
+• Crash-safe state persistence (boost_state.json) + synchronous shutdown() hook
+• Full EN/VI internationalization via _t() and retranslate()
 """
-import os, time, threading, platform, shutil, subprocess
+import atexit
+import json
+import os
+import platform
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QGridLayout, QScrollBar,
-    QSizePolicy, QBoxLayout,
-)
-from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QRectF, QSize
-from PyQt6.QtGui   import (
+
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QRectF, QSize, QPointF
+from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont,
     QTextCursor, QTextCharFormat, QPainterPath,
 )
-from PyQt6.QtWidgets import QTextEdit
+try:
+    from PyQt6.QtGui import QRadialGradient, QLinearGradient
+except ImportError:
+    QRadialGradient = QLinearGradient = object
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QFrame, QGridLayout, QCheckBox,
+    QSizePolicy, QBoxLayout, QTextEdit,
+)
 
 IS_LINUX   = platform.system() == "Linux"
 IS_WINDOWS = platform.system() == "Windows"
 
-# FIX: psutil is required (see requirements.txt) but several call sites
-# below did `import psutil as _psu` with no guard. If it's ever missing
-# (running from source without a full `pip install -r requirements.txt`,
-# or a PyInstaller build missing the hidden import), those call sites
-# would raise an unhandled ImportError straight into the Qt event loop —
-# crashing the whole app instead of just disabling the affected feature.
 try:
     import psutil as _psutil_check  # noqa: F401
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
 
-# ── Dùng design tokens từ ui_widgets ─────────────────────────
 try:
-    from ui_widgets import C, MONO, UI
+    from ui_widgets import (
+        C, MONO, UI, _btn, _t, is_dark_theme, _rgba,
+        ElevatedCard, apply_elevation_shadow, _global_check_icon_path,
+    )
 except ImportError:
     C = {
-        'bg': '#07090B', 'bg2': '#0C1114', 'bg3': '#12181C', 'bg4': '#182026',
-        'cyan': '#00E8FF', 'cyan2': '#22D3EE', 'cyan_dim': '#06343A',
-        'red': '#FF4D5A', 'red_dim': '#3A0B12',
-        'yellow': '#F5C542', 'yel_dim': '#3A2E0A',
-        'green': '#00FF41', 'grn_dim': '#063016',
-        'purple': '#C084FC',
-        'text': '#E8F1F4', 'text2': '#B4C9D4', 'text3': '#8BA3B0',
-        'dim': '#5C7380', 'border': '#152028', 'border2': '#1C2A33', 'border3': '#2A3D48',
-        'radius': '8px',
+        'bg': '#060911', 'bg2': '#0E1626', 'bg3': '#152036', 'bg4': '#1E2D4A',
+        'well_bg': '#05080F',
+        'cyan': '#00E5FF', 'cyan2': '#38BDF8', 'cyan_dim': '#062838',
+        'red': '#FF2E63', 'red_dim': '#3B0A19',
+        'yellow': '#FFB300', 'yel_dim': '#382405',
+        'green': '#00E676', 'grn_dim': '#05331E',
+        'purple': '#A855F7', 'magenta': '#EC4899',
+        'text': '#F8FAFC', 'text2': '#CBD5E1', 'text3': '#94A3B8',
+        'dim': '#64748B', 'border': '#152033', 'border2': '#1E2D47', 'border3': '#2E446B',
+        'radius': '10px',
     }
-    MONO = "'JetBrains Mono','Fira Code','Consolas',monospace"
+    MONO = "'JetBrains Mono','Cascadia Code','Fira Code','Consolas',monospace"
     UI   = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
 
+    def is_dark_theme() -> bool:
+        return True
+
+    def _rgba(hexcolor: str, alpha: float) -> str:
+        h = str(hexcolor).lstrip('#')
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f'rgba({r},{g},{b},{max(0.0, min(1.0, float(alpha))):.2f})'
+
+    def _global_check_icon_path() -> str:
+        return ""
+
+    def apply_elevation_shadow(w, **_):
+        pass
+
+    class ElevatedCard(QFrame):
+        def __init__(self, border_color=None, accent_color=None, top_accent=None, shadow=True, parent=None):
+            super().__init__(parent)
+
+    def _t(key: str, default: str = "") -> str:
+        try:
+            from utils.i18n import _t as _t_real
+            return _t_real(key, default)
+        except Exception:
+            return default or key
+
+    def _btn(text, color='cyan', small=False):
+        return QPushButton(text)
+
+
+# ── Crash-safe state file & Hyprland helpers ─────────────────
+def _boost_state_file() -> Path:
+    base = Path.home() / ".local/share/cyber-clean"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "boost_state.json"
+    except OSError:
+        return Path(tempfile.gettempdir()) / "cyberclean_boost_state.json"
+
+
+_PERSIST_KEYS = (
+    "power", "swappiness_orig", "hyprland_vfr",
+    "hyprland_vfr_orig", "hyprland_scanout_orig",
+    "game_nice", "bg_nice", "env_orig",
+    "timer_set", "gamedvr_orig", "gpu_perf_orig",
+    "io_sched_orig", "game_core_affinity",
+    "compositor_bypassed", "xprop_bypass_set",
+    "services", "nagle_changed", "dns_changed",
+    "thp_orig", "visuals_orig", "oom_protected", "rt_sched",
+)
+
+
+def _load_boost_state_disk() -> dict:
+    st_file = _boost_state_file()
+    if not st_file.exists():
+        return {}
+    try:
+        data = json.loads(st_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _merge_unrestored_state(prior=None, current=None) -> dict:
+    """
+    Merge any un-restored state from a prior session into `current` so original pre-boost
+    settings are never overwritten or dropped if Boost is toggled on again before full recovery.
+    """
+    merged = dict(current or {})
+    if not isinstance(prior, dict) or not prior:
+        return merged
+    for k, old_val in prior.items():
+        if old_val is None:
+            continue
+        if isinstance(old_val, dict):
+            cur_val = merged.get(k)
+            if isinstance(cur_val, dict):
+                # Keep prior original values if the same key/PID was touched again
+                combined = dict(cur_val)
+                combined.update(old_val)
+                merged[k] = combined
+            elif old_val:
+                merged[k] = dict(old_val)
+        elif isinstance(old_val, list):
+            cur_val = merged.get(k)
+            if isinstance(cur_val, list):
+                combined_list = list(old_val)
+                for item in cur_val:
+                    if item not in combined_list:
+                        combined_list.append(item)
+                merged[k] = combined_list
+            elif old_val:
+                merged[k] = list(old_val)
+        else:
+            # Scalar original setting (e.g. gamedvr_orig, power, swappiness_orig): prior holds the true pre-boost original
+            merged[k] = old_val
+    return merged
+
+
+def _save_boost_state_disk(saved: dict) -> None:
+    if not saved:
+        return
+    serializable = {}
+    for k in _PERSIST_KEYS:
+        if k in saved and saved[k] is not None:
+            if k in ("game_nice", "bg_nice") and isinstance(saved[k], dict):
+                serializable[k] = {
+                    str(pid): (dict(val) if isinstance(val, dict) else int(val))
+                    for pid, val in saved[k].items()
+                }
+            elif k == "game_core_affinity" and isinstance(saved[k], dict):
+                serializable[k] = {str(pid): list(cores) for pid, cores in saved[k].items()}
+            else:
+                serializable[k] = saved[k]
+    try:
+        _boost_state_file().write_text(json.dumps(serializable), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _get_boost_skip_set() -> set:
+    """Build comprehensive cross-platform protected process set so audio, DE/WM, Xwayland, and launchers are never throttled."""
+    skip = {
+        "xwayland", "xorg", "x", "wineserver", "winedevice", "plugplay", "services",
+        "gamescope", "gamemoded", "mangohud", "goverlay",
+        "steam", "steamwebhelper", "epicgameslauncher", "riotclientservices", "riotclientux",
+        "vgc", "vgctray", "beservice", "easyanticheat", "easyanticheat_eos", "battleye",
+        "audiodg", "dwm", "explorer", "csrss", "winlogon", "wininit", "lsass", "svchost",
+        "smss", "sihost", "taskhostw", "fontdrvhost", "runtimebroker", "spoolsv",
+        "searchindexer", "ctfmon", "conhost", "dllhost", "wmiprvse",
+        "obs", "obs64", "obs32", "pulseaudio", "pipewire", "wireplumber",
+        "pipewire-pulse", "pipewire-media", "jackd", "jackdbus",
+        "gnome-shell", "mutter", "kwin_x11", "kwin_wayland", "plasmashell",
+        "xfwm4", "cinnamon", "muffin", "marco", "openbox", "cosmic-comp",
+        "niri", "river", "hyprland", "sway", "waybar", "ags", "dunst", "mako", "swaync",
+        "fcitx", "fcitx5", "ibus", "ibus-daemon", "dbus-daemon", "dbus-broker",
+        "systemd", "init", "polkitd", "rtkit-daemon", "upowerd", "udisksd",
+        "networkmanager", "wpa_supplicant", "iwd", "bluetoothd",
+        "discord", "vesktop", "telegram", "signal", "slack", "zalo", "teams", "zoom",
+        "firefox", "chrome", "chromium", "msedge", "brave", "vivaldi", "opera",
+        "spotify", "code", "cursor", "cyberclean", "python", "python3",
+    }
+    try:
+        from core.booster import get_de_protected, _NEVER_GAME, _BLOAT_SKIP_ALWAYS, _WIN_RAM_SKIP
+        skip.update(n.lower().replace(".exe", "") for n in get_de_protected())
+        skip.update(n.lower().replace(".exe", "") for n in _NEVER_GAME)
+        skip.update(n.lower().replace(".exe", "") for n in _BLOAT_SKIP_ALWAYS)
+        skip.update(n.lower().replace(".exe", "") for n in _WIN_RAM_SKIP)
+    except Exception:
+        pass
+    return skip
+
+
+def _should_skip_bg_proc(p, skip_set: set, game_pids: set) -> bool:
+    """Return True if process `p` must NOT have its priority lowered."""
+    try:
+        if p.pid in game_pids or p.pid <= 10:
+            return True
+        nm = ((p.info.get("name") if hasattr(p, "info") and isinstance(p.info, dict) else None) or p.name() or "").lower()
+        nm_clean = nm[:-4] if nm.endswith(".exe") else nm
+        if not nm_clean or nm_clean in skip_set or nm in skip_set:
+            return True
+        try:
+            from core.booster import _is_protected
+            if _is_protected(nm_clean):
+                return True
+        except Exception:
+            pass
+        if IS_WINDOWS:
+            try:
+                uname = (p.username() or "").upper()
+                if any(sys_acct in uname for sys_acct in ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE", "DWM-", "UMFD-", "FONT DRIVER")):
+                    return True
+            except Exception:
+                return True
+        try:
+            cmdline_str = " ".join(p.cmdline() or ()).lower()
+            if any(k in cmdline_str for k in ("--type=gpu-process", "--type=renderer", "--utility-sub-type=audio", "xwayland", "wineserver", "proton", "steam")):
+                return True
+        except Exception:
+            pass
+    except Exception:
+        return True
+    return False
+
+
+def _record_proc_nice_entry(p, orig_nice: int) -> dict:
+    from core.booster import _proc_identity
+    nm, ct = _proc_identity(p)
+    return {"orig_nice": int(orig_nice), "name": nm, "create_time": ct}
+
+
+def _apply_game_nice(p, pid: int, saved: dict) -> bool:
+    """Boost priority of a game process; on Linux falls back to privileged helper `renice-game` when user lacks CAP_SYS_NICE."""
+    try:
+        import psutil as _psu
+        orig = p.nice()
+        if IS_WINDOWS:
+            if orig != _psu.HIGH_PRIORITY_CLASS:
+                p.nice(_psu.HIGH_PRIORITY_CLASS)
+                saved.setdefault("game_nice", {})[pid] = _record_proc_nice_entry(p, orig)
+                return True
+        else:
+            if orig > -10:
+                try:
+                    p.nice(-10)
+                    saved.setdefault("game_nice", {})[pid] = _record_proc_nice_entry(p, orig)
+                    return True
+                except (PermissionError, _psu.AccessDenied):
+                    try:
+                        from core import privileged as _PRIV
+                        r = _PRIV.run_helper("renice-game", str(pid), timeout=5, use_pkexec=False)
+                        if r.ok:
+                            saved.setdefault("game_nice", {})[pid] = _record_proc_nice_entry(p, orig)
+                            return True
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return False
+
+
+def _restore_process_priorities(saved: dict, log=None) -> int:
+    """
+    Restore `game_nice`, `bg_nice`, and `game_core_affinity` when game ends or Boost turns off.
+    Verifies process identity (name + create_time) to avoid PID reuse, and preserves any
+    un-restored entries in `saved` when restoration fails.
+    """
+    if not saved:
+        return 0
+    if log is None:
+        log = lambda m, l="text": None
+    restored = 0
+    try:
+        if saved.get("game_core_affinity"):
+            from core.booster import _restore_game_core_affinity
+            norm_aff = {int(k): v for k, v in (saved.get("game_core_affinity") or {}).items()}
+            aff_holder = {"game_core_affinity": norm_aff}
+            ok_aff = _restore_game_core_affinity(aff_holder, log)
+            if ok_aff and not aff_holder.get("game_core_affinity"):
+                saved.pop("game_core_affinity", None)
+            else:
+                saved["game_core_affinity"] = {str(k): v for k, v in (aff_holder.get("game_core_affinity") or {}).items()}
+    except Exception as e:
+        log(f"  ~ affinity restore error: {e}", "warn")
+    if HAS_PSUTIL:
+        try:
+            import psutil
+            from core.booster import _same_process_identity
+            for key_name in ("game_nice", "bg_nice"):
+                bucket = saved.get(key_name)
+                if not isinstance(bucket, dict):
+                    saved.pop(key_name, None)
+                    continue
+                failed_pids = []
+                for pid_k, rec in list(bucket.items()):
+                    try:
+                        pid_int = int(pid_k)
+                        orig_val = int(rec["orig_nice"]) if isinstance(rec, dict) else int(rec)
+                    except (KeyError, ValueError, TypeError):
+                        bucket.pop(pid_k, None)
+                        continue
+                    try:
+                        proc = psutil.Process(pid_int)
+                        if isinstance(rec, dict) and not _same_process_identity(proc, rec):
+                            # PID was reused by a different process — drop stale record without touching new process
+                            bucket.pop(pid_k, None)
+                            continue
+                        proc.nice(orig_val)
+                        bucket.pop(pid_k, None)
+                        restored += 1
+                    except psutil.NoSuchProcess:
+                        bucket.pop(pid_k, None)
+                    except (psutil.AccessDenied, PermissionError, ValueError, OSError) as e:
+                        failed_pids.append(f"PID {pid_int}: {e}")
+                if not bucket:
+                    saved.pop(key_name, None)
+                elif failed_pids:
+                    log(
+                        f"  ⚠ Could not restore {key_name} for {len(failed_pids)} process(es): "
+                        f"{'; '.join(failed_pids[:3])}",
+                        "warn",
+                    )
+        except ImportError:
+            pass
+    return restored
+
+
+def _clear_boost_state_disk() -> None:
+    try:
+        _boost_state_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _hyprctl_get_bool(option_name: str, default: str = "true") -> str:
+    """Read current boolean option from Hyprland before modifying it."""
+    if not IS_LINUX or not shutil.which("hyprctl"):
+        return default
+    try:
+        r = subprocess.run(
+            ["hyprctl", "getoption", option_name, "-j"],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            data = json.loads(r.stdout)
+            if "int" in data:
+                return "true" if int(data["int"]) != 0 else "false"
+            if "set" in data:
+                return "true" if data["set"] else "false"
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["hyprctl", "getoption", option_name],
+            capture_output=True, text=True, timeout=3
+        )
+        out = (r.stdout or "").lower()
+        if "int: 0" in out or "false" in out:
+            return "false"
+        if "int: 1" in out or "true" in out:
+            return "true"
+    except Exception:
+        pass
+    return default
+
+
+def _restore_boost_state(saved: dict, log=None) -> bool:
+    """
+    Deterministic restoration of all system states modified by GameBoostPage.
+    Safe to call from worker thread, synchronous shutdown(), or startup crash recovery.
+    Each restoration step runs in its own isolated try/except so a failure in one step
+    never skips subsequent steps. Returns True only if all steps succeeded; if any step
+    fails, preserves the remaining un-restored state in `boost_state.json`.
+    """
+    if log is None:
+        log = lambda m, l="text": None
+    if not saved:
+        return True
+
+    had_error = False
+    from core.booster import (
+        _restore_kernel_performance, smart_boost_off,
+        _timer_resolution_restore, _restore_gamedvr,
+        _bypass_compositor_off, _restore_io_scheduler,
+        _restore_gpu_performance, _restore_screensaver,
+    )
+
+    from core.booster import (
+        _restore_nagle, _restore_windows_services, _restore_dns_windows,
+        _restore_thp, _restore_game_oom, _restore_realtime_scheduling,
+    )
+
+    if saved.get("power"):
+        try:
+            if _restore_kernel_performance(saved["power"], log) is not False:
+                saved.pop("power", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ power restore failed: {e}", "warn")
+
+    if saved.get("timer_set"):
+        try:
+            if _timer_resolution_restore(bool(saved.get("timer_set")), log) is not False:
+                saved.pop("timer_set", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ timer resolution restore failed: {e}", "warn")
+
+    if saved.get("gamedvr_orig") is not None:
+        try:
+            if _restore_gamedvr(saved.get("gamedvr_orig"), log) is not False:
+                saved.pop("gamedvr_orig", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ GameDVR restore failed: {e}", "warn")
+
+    if saved.get("services"):
+        try:
+            if _restore_windows_services(saved["services"], log) is not False and not saved.get("services"):
+                saved.pop("services", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ Windows services restore failed: {e}", "warn")
+
+    if saved.get("nagle_changed"):
+        try:
+            if _restore_nagle(saved["nagle_changed"], log) is not False and not saved.get("nagle_changed"):
+                saved.pop("nagle_changed", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ Nagle restore failed: {e}", "warn")
+
+    if saved.get("dns_changed"):
+        try:
+            if _restore_dns_windows(saved["dns_changed"], log) is not False:
+                saved.pop("dns_changed", None)
+            else:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ DNS restore failed: {e}", "warn")
+
+    if saved.get("compositor_bypassed") or saved.get("xprop_bypass_set"):
+        try:
+            if _bypass_compositor_off(saved, log) is False or saved.get("compositor_bypassed") or saved.get("xprop_bypass_set"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ compositor restore failed: {e}", "warn")
+
+    if saved.get("io_sched_orig"):
+        try:
+            if _restore_io_scheduler(saved, log) is False or saved.get("io_sched_orig"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ I/O scheduler restore failed: {e}", "warn")
+
+    if saved.get("gpu_perf_orig"):
+        try:
+            if _restore_gpu_performance(saved, log) is False or saved.get("gpu_perf_orig"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ GPU performance restore failed: {e}", "warn")
+
+    if saved.get("inhibit_proc"):
+        try:
+            if _restore_screensaver(saved, log) is False or saved.get("inhibit_proc"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ screensaver restore failed: {e}", "warn")
+
+    if saved.get("thp_orig"):
+        try:
+            if _restore_thp(saved, log) is False or saved.get("thp_orig"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ THP restore failed: {e}", "warn")
+
+    if saved.get("oom_protected"):
+        try:
+            if _restore_game_oom(saved, log) is False or saved.get("oom_protected"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ OOM score restore failed: {e}", "warn")
+
+    if saved.get("rt_sched"):
+        try:
+            if _restore_realtime_scheduling(saved, log) is False or saved.get("rt_sched"):
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ realtime scheduling restore failed: {e}", "warn")
+
+    if saved.get("game") or saved.get("eco") or saved.get("visuals_orig") is not None:
+        try:
+            if smart_boost_off(saved, log) is False or saved.get("game") or saved.get("eco") or saved.get("visuals_orig") is not None:
+                had_error = True
+        except Exception as e:
+            had_error = True
+            log(f"  ~ smart boost restore failed: {e}", "warn")
+
+    try:
+        legacy_env = Path.home() / ".config/environment.d/cyber-boost.conf"
+        legacy_env.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    env_orig = saved.get("env_orig")
+    if isinstance(env_orig, dict):
+        try:
+            for k, prev in env_orig.items():
+                if prev is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = str(prev)
+            saved.pop("env_orig", None)
+        except Exception as e:
+            had_error = True
+            log(f"  ~ env restore failed: {e}", "warn")
+
+    sw = saved.get("swappiness_orig")
+    if sw and IS_LINUX:
+        sw_ok = False
+        try:
+            Path("/proc/sys/vm/swappiness").write_text(str(sw))
+            log(f"  + vm.swappiness → {sw} [RESTORED]", "ok")
+            sw_ok = True
+        except (PermissionError, OSError):
+            try:
+                from core import privileged as _PRIV
+                r_sw = _PRIV.run_helper("set-swappiness", str(sw), timeout=5, use_pkexec=False)
+                if getattr(r_sw, "ok", False):
+                    log(f"  + vm.swappiness → {sw} [RESTORED]", "ok")
+                    sw_ok = True
+            except Exception:
+                pass
+        if sw_ok:
+            saved.pop("swappiness_orig", None)
+        else:
+            had_error = True
+            log(f"  ⚠ Could not restore vm.swappiness to {sw}", "warn")
+
+    if saved.get("hyprland_vfr") and IS_LINUX:
+        if not shutil.which("hyprctl"):
+            had_error = True
+            log("  ⚠ hyprctl not found to restore Hyprland VFR/scanout settings", "warn")
+        else:
+            vfr_orig = str(saved.get("hyprland_vfr_orig", "true"))
+            scan_orig = str(saved.get("hyprland_scanout_orig", "true"))
+            try:
+                r1 = subprocess.run(
+                    ["hyprctl", "keyword", "misc:vfr", vfr_orig],
+                    capture_output=True, timeout=3
+                )
+                r2 = subprocess.run(
+                    ["hyprctl", "keyword", "misc:no_direct_scanout", scan_orig],
+                    capture_output=True, timeout=3
+                )
+                if getattr(r1, "returncode", 1) == 0 and getattr(r2, "returncode", 1) == 0:
+                    saved.pop("hyprland_vfr", None)
+                    saved.pop("hyprland_vfr_orig", None)
+                    saved.pop("hyprland_scanout_orig", None)
+                    log(f"  + Hyprland: misc:vfr={vfr_orig}, misc:no_direct_scanout={scan_orig} [RESTORED]", "ok")
+                else:
+                    had_error = True
+                    log("  ⚠ Hyprland settings restore returned non-zero status", "warn")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                had_error = True
+                log(f"  ~ Hyprland restore failed: {e}", "warn")
+
+    try:
+        _restore_process_priorities(saved, log)
+        if saved.get("game_nice") or saved.get("bg_nice") or saved.get("game_core_affinity"):
+            had_error = True
+    except Exception as e:
+        had_error = True
+        log(f"  ~ process priority restore failed: {e}", "warn")
+
+    if had_error:
+        _save_boost_state_disk(saved)
+        log("  ⚠ Some boost settings could not be restored — state kept for retry", "warn")
+        return False
+
+    _clear_boost_state_disk()
+    return True
+
+
+def _recover_stale_boost_on_startup() -> bool:
+    """If CyberClean crashed or was killed while Boost was active, restore state on next launch."""
+    try:
+        legacy_env = Path.home() / ".config/environment.d/cyber-boost.conf"
+        legacy_env.unlink(missing_ok=True)
+    except OSError:
+        pass
+    st_file = _boost_state_file()
+    if not st_file.exists():
+        return True
+    try:
+        data = json.loads(st_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        _clear_boost_state_disk()
+        return False
+    if not isinstance(data, dict) or not data:
+        _clear_boost_state_disk()
+        return True
+    return _restore_boost_state(data)
+
 
 # ══════════════════════════════════════════════════════════════
-# OrbitButton — nút tròn pulsing khi active
+# OrbitButton — Collision-Free 3D Orbital Gyroscope Reactor Button
 # ══════════════════════════════════════════════════════════════
 class OrbitButton(QPushButton):
+    """
+    3D Orbital Gyroscope Reactor Button:
+      • 4 corner telemetry badges (GPU, CPU, RAM, NET) sit cleanly in the 4 outer
+        corners completely outside the 3D gyroscope rings (zero overlap!).
+      • Central 3D sphere houses a crisp lightning bolt in the upper half and
+        auto-fitted status text (BOOST / ĐANG BẬT) in the lower half with
+        generous clearance from the sphere border.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active   = False
         self._phase    = 0.0
         self._dir      = 1
+        self._rot_y    = 0.0
+        self._rot_x    = 22.0
+        self._target_x = 22.0
+        self._target_y = 0.0
+        self._hover    = False
+        self._intro_ticks = 0
+        self.setMouseTracking(True)
         self._timer    = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self.setMinimumSize(128, 128)
-        self.setMaximumSize(200, 200)
+        self.setMinimumSize(148, 148)
+        self.setMaximumSize(196, 196)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlat(True)
         self.setAccessibleName("Toggle system boost")
         self.setStyleSheet("background:transparent;border:none;")
         self._set_side(168)
+        self._timer.start(33)
 
     def _set_side(self, side: int):
-        side = max(128, min(200, int(side)))
+        side = max(148, min(196, int(side)))
         self.setFixedSize(side, side)
 
     def sizeHint(self):
         return QSize(168, 168)
 
+    def showEvent(self, ev):
+        self._intro_ticks = 0
+        self._timer.start(33)
+        super().showEvent(ev)
+
+    def hideEvent(self, ev):
+        self._timer.stop()
+        super().hideEvent(ev)
+
+    def enterEvent(self, ev):
+        self._hover = True
+        if self.isVisible():
+            self._timer.setInterval(33)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self._target_x = 22.0
+        self._target_y = 0.0
+        if self._timer.isActive() and not self._active:
+            self._timer.setInterval(120)
+        super().leaveEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        w, h = max(1.0, float(self.width())), max(1.0, float(self.height()))
+        rx = (ev.position().x() - w / 2.0) / (w / 2.0)
+        ry = (ev.position().y() - h / 2.0) / (h / 2.0)
+        self._target_y = rx * 28.0
+        self._target_x = 22.0 - ry * 22.0
+        super().mouseMoveEvent(ev)
+
     def set_active(self, v: bool):
         self._active = v
-        if v:
-            self._timer.start(25)
-        else:
-            self._timer.stop()
-            self._phase = 0.0
-            self.update()
+        if self.isVisible():
+            self._timer.start(33 if v else 120)
+        self.update()
 
     def _tick(self):
-        self._phase += self._dir * 0.025
-        if self._phase >= 1.0:   self._dir = -1
-        elif self._phase <= 0.0: self._dir =  1
+        if not self.isVisible():
+            self._timer.stop()
+            return
+        win = self.window()
+        if win is not None and win.isMinimized():
+            self._timer.stop()
+            return
+        self._intro_ticks += 1
+        if self._intro_ticks > 60 and not self._hover and not self._active and self._timer.interval() != 120:
+            self._timer.setInterval(120)
+        speed = 3.0 if self._active else (1.4 if self._hover else 1.8)
+        self._rot_y = (self._rot_y + speed) % 360.0
+        self._rot_x += (self._target_x - self._rot_x) * 0.14
+        self._phase += self._dir * (0.04 if self._active else 0.025)
+        if self._phase >= 1.0:
+            self._dir = -1
+        elif self._phase <= 0.0:
+            self._dir = 1
         self.update()
 
     def paintEvent(self, _):
+        import math as _m
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
+        w, h = float(self.width()), float(self.height())
         cx, cy = w / 2.0, h / 2.0
-        r = min(w, h) / 2.0 - 4
+        r = min(w, h) / 2.0 - 8.0
+        dark = is_dark_theme()
         cyan    = QColor(C['cyan'])
-        border2 = QColor(C['border2'])
+        purple  = QColor(C.get('purple', '#A855F7'))
+        green   = QColor(C['green'])
 
-        def ring(radius, pen, brush=Qt.BrushStyle.NoBrush):
-            d = radius * 2
-            p.setPen(pen)
-            p.setBrush(brush)
-            p.drawEllipse(QRectF(cx - radius, cy - radius, d, d))
+        # Ambient 3D radial aura
+        glow = QRadialGradient(cx, cy, r * 0.96)
+        g_col = green if self._active else cyan
+        g1 = QColor(g_col)
+        g1.setAlpha(int(52 + self._phase * 38) if self._active else (30 if self._hover else 16))
+        g0 = QColor(g_col); g0.setAlpha(0)
+        glow.setColorAt(0.0, g1)
+        glow.setColorAt(1.0, g0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(QPointF(cx, cy), r * 0.96, r * 0.96)
 
-        if self._active:
-            a_outer = int(18 + self._phase * 28)
-            rc = QColor(C['cyan']); rc.setAlpha(a_outer)
-            ring(r * 0.96, QPen(rc, 1.2))
+        # Helper to project & draw a 3D gyroscope ring
+        def draw_gyro_ring(rad_3d: float, tilt_z: float, rot_mult: float, col: QColor):
+            n = 42
+            pts = []
+            ry = _m.radians(self._rot_y * rot_mult)
+            rx = _m.radians(self._rot_x)
+            rz = _m.radians(tilt_z)
+            cy_r, sy_r = _m.cos(ry), _m.sin(ry)
+            cx_r, sx_r = _m.cos(rx), _m.sin(rx)
+            cz_r, sz_r = _m.cos(rz), _m.sin(rz)
+            for i in range(n):
+                a = (i / n) * _m.pi * 2.0
+                x0, y0, z0 = rad_3d * _m.cos(a), 0.0, rad_3d * _m.sin(a)
+                x1, y1, z1 = x0 * cz_r - y0 * sz_r, x0 * sz_r + y0 * cz_r, z0
+                x2, y2, z2 = x1 * cy_r + z1 * sy_r, y1, -x1 * sy_r + z1 * cy_r
+                x3, y3, z3 = x2, y2 * cx_r - z2 * sx_r, y2 * sx_r + z2 * cx_r
+                fov, dist = 215.0, 245.0
+                f = fov / max(1.0, dist + z3)
+                pts.append((cx + x3 * f, cy + y3 * f, z3))
+            for i in range(n):
+                p1, p2 = pts[i], pts[(i + 1) % n]
+                avg_z = (p1[2] + p2[2]) * 0.5
+                alpha = int(max(40, min(245, (195 if self._active else 145) - avg_z * 1.6)))
+                thick = max(1.1, min(3.2, (2.4 if self._active else 1.8) - avg_z * 0.018))
+                sc = QColor(col.red(), col.green(), col.blue(), alpha)
+                p.setPen(QPen(sc, thick, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(p1[0], p1[1]), QPointF(p2[0], p2[1]))
 
-            a_mid = int(60 + self._phase * 90)
-            mc = QColor(C['cyan']); mc.setAlpha(a_mid)
-            ring(r * 0.76, QPen(mc, 1.8))
+        c_ring1 = green if self._active else cyan
+        c_ring2 = cyan if self._active else purple
+        draw_gyro_ring(r * 0.74, 26.0, 1.0, c_ring1)
+        draw_gyro_ring(r * 0.62, -32.0, -1.3, c_ring2)
 
-            fill = QColor(C['cyan']); fill.setAlpha(18)
-            ring(r * 0.50, QPen(cyan, 2.0), QBrush(fill))
-            self._bolt(p, cx, cy, r * 0.20, cyan)
-
-            p.setFont(QFont("JetBrains Mono", max(8, int(r * 0.10)), QFont.Weight.Bold))
-            p.setPen(cyan)
-            p.drawText(QRectF(cx - r * 0.45, cy + r * 0.28, r * 0.90, r * 0.22),
-                       Qt.AlignmentFlag.AlignCenter, "ACTIVE")
+        # Central 3D core sphere — sized so both bolt and label fit comfortably inside
+        core_r = r * (0.47 + 0.018 * self._phase)
+        core_col = green if self._active else (cyan if self._hover else QColor(C['cyan']))
+        fill = QRadialGradient(cx - core_r * 0.22, cy - core_r * 0.22, core_r * 1.18)
+        if dark:
+            f0 = QColor(20, 32, 54, 246)
+            f1 = QColor(8, 13, 24, 250)
+            rim = QColor(core_col); rim.setAlpha(155 if self._active else 110)
         else:
-            ring(r * 0.88, QPen(border2, 1))
-            c2 = QColor(C['border']); c2.setAlpha(90)
-            ring(r * 0.74, QPen(c2, 1))
-            ring(r * 0.48, QPen(QColor(C['border3']), 1.6))
-            self._bolt(p, cx, cy, r * 0.20, QColor(C['text3']))
-            p.setFont(QFont("JetBrains Mono", max(8, int(r * 0.10)), QFont.Weight.Bold))
-            p.setPen(QColor(C['text3']))
-            p.drawText(QRectF(cx - r * 0.45, cy + r * 0.28, r * 0.90, r * 0.22),
-                       Qt.AlignmentFlag.AlignCenter, "BOOST")
+            f0 = QColor(255, 255, 255, 252)
+            f1 = QColor(238, 244, 252, 250)
+            rim = QColor(core_col); rim.setAlpha(125 if self._active else 90)
+        fill.setColorAt(0.0, f0)
+        fill.setColorAt(0.75, f1)
+        fill.setColorAt(1.0, rim)
+        p.setBrush(QBrush(fill))
+        p.setPen(QPen(core_col, 2.0 if self._active else 1.6))
+        p.drawEllipse(QPointF(cx, cy), core_r, core_r)
 
-        tag_col = cyan if self._active else QColor(C['text3'])
-        p.setFont(QFont("JetBrains Mono", max(7, int(r * 0.09))))
-        p.setPen(tag_col)
-        tag_h = r * 0.18
-        p.drawText(QRectF(cx - 18, cy - r * 0.94, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "GPU")
-        p.drawText(QRectF(cx + r * 0.62, cy - tag_h / 2, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "CPU")
-        p.drawText(QRectF(cx - 18, cy + r * 0.76, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "RAM")
-        p.drawText(QRectF(cx - r * 0.94, cy - tag_h / 2, 36, tag_h), Qt.AlignmentFlag.AlignCenter, "NET")
+        # Lightning Bolt cleanly in upper half of sphere
+        bolt_cy = cy - core_r * 0.24
+        bolt_sz = core_r * 0.34
+        self._bolt(p, cx, bolt_cy, bolt_sz, core_col)
+
+        # Status text cleanly in lower half of sphere (auto-sized so "ĐANG BẬT" never touches border)
+        btn_txt = _t("boost_btn_active", "ACTIVE") if self._active else _t("boost_btn_idle", "BOOST")
+        f_btn = QFont("JetBrains Mono" if not IS_WINDOWS else "Cascadia Code")
+        f_btn.setPixelSize(9 if len(btn_txt) > 6 else 10)
+        f_btn.setBold(True)
+        p.setFont(f_btn)
+        p.setPen(core_col if dark else QColor(C['text']))
+        p.drawText(
+            QRectF(cx - core_r * 0.84, cy + core_r * 0.14, core_r * 1.68, core_r * 0.44),
+            Qt.AlignmentFlag.AlignCenter,
+            btn_txt
+        )
+
+        # 4 Outer Corner Telemetry Pills (GPU, CPU, RAM, NET) — completely outside the 3D rings!
+        f_tag = QFont("JetBrains Mono" if not IS_WINDOWS else "Cascadia Code")
+        f_tag.setPixelSize(9)
+        f_tag.setBold(True)
+        p.setFont(f_tag)
+        pill_w, pill_h = 32.0, 15.0
+        corners = [
+            (4.0, 4.0, "GPU"),
+            (w - pill_w - 4.0, 4.0, "CPU"),
+            (4.0, h - pill_h - 4.0, "NET"),
+            (w - pill_w - 4.0, h - pill_h - 4.0, "RAM"),
+        ]
+        pill_bg = QColor(C['grn_dim'] if self._active else C['bg3'])
+        pill_bg.setAlpha(210 if dark else 235)
+        pill_border = QColor(green if self._active else C['border3'])
+        pill_border.setAlpha(130)
+        tag_fg = green if self._active else QColor(C['text3'])
+
+        for px_c, py_c, tag_str in corners:
+            crect = QRectF(px_c, py_c, pill_w, pill_h)
+            p.setBrush(QBrush(pill_bg))
+            p.setPen(QPen(pill_border, 1.0))
+            p.drawRoundedRect(crect, 4.0, 4.0)
+            p.setPen(tag_fg)
+            p.drawText(crect, Qt.AlignmentFlag.AlignCenter, tag_str)
+
+        p.end()
 
     def _bolt(self, p, cx, cy, s, color):
         path = QPainterPath()
-        path.moveTo(cx+4,  cy-s)
-        path.lineTo(cx-2,  cy-2)
-        path.lineTo(cx+6,  cy-2)
-        path.lineTo(cx-4,  cy+s)
-        path.lineTo(cx+2,  cy+2)
-        path.lineTo(cx-6,  cy+2)
+        path.moveTo(cx + 3.5, cy - s)
+        path.lineTo(cx - 2.0, cy - 1.5)
+        path.lineTo(cx + 5.0, cy - 1.5)
+        path.lineTo(cx - 3.5, cy + s)
+        path.lineTo(cx + 2.0, cy + 1.5)
+        path.lineTo(cx - 5.0, cy + 1.5)
         path.closeSubpath()
         p.fillPath(path, QBrush(color))
 
 
 # ══════════════════════════════════════════════════════════════
-# MetricCard
+# MetricCard — Elevated Telemetry Tile
 # ══════════════════════════════════════════════════════════════
-class MetricCard(QFrame):
+class MetricCard(ElevatedCard):
     def __init__(self, label: str, parent=None):
-        super().__init__(parent)
+        super().__init__(top_accent=C['border3'], shadow=False, parent=parent)
+        self.setObjectName("metricCard")
         self._bar_max = 200
-        self._apply_style(False)
-        self.setMinimumHeight(72)
+        self.setMinimumHeight(74)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12)
-        lay.setSpacing(6)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(4)
 
         self._lbl = QLabel(label.upper())
         self._lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:11px;letter-spacing:1.4px;"
+            f"color:{C['text3']};font-size:10px;letter-spacing:1.3px;"
             f"font-family:{UI};font-weight:700;border:none;background:transparent;"
         )
-        self._val   = QLabel("—")
+        self._val = QLabel("—")
         self._val.setStyleSheet(
             f"color:{C['text']};font-size:20px;font-weight:700;"
             f"font-family:{MONO};border:none;background:transparent;"
         )
         self._delta = QLabel("")
         self._delta.setStyleSheet(
-            f"color:{C['cyan']};font-size:12px;font-family:{MONO};"
+            f"color:{C['cyan']};font-size:11px;font-family:{MONO};font-weight:700;"
             "border:none;background:transparent;"
         )
-        row = QHBoxLayout(); row.setSpacing(8); row.setContentsMargins(0,0,0,0)
-        row.addWidget(self._val); row.addWidget(self._delta); row.addStretch()
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._val)
+        row.addWidget(self._delta)
+        row.addStretch()
 
-        self._bar_bg   = QFrame(self)
-        self._bar_bg.setFixedHeight(4)
+        self._bar_bg = QFrame(self)
+        self._bar_bg.setFixedHeight(5)
         self._bar_bg.setStyleSheet(
-            f"background:{C['border2']};border:none;border-radius:2px;"
+            f"background:{C['bg3']};border:none;border-radius:2.5px;"
         )
         self._bar_fill = QFrame(self._bar_bg)
-        self._bar_fill.setFixedHeight(4)
+        self._bar_fill.setFixedHeight(5)
         self._bar_fill.setStyleSheet(
-            f"background:{C['cyan']};border:none;border-radius:2px;"
+            f"background:{C['cyan']};border:none;border-radius:2.5px;"
         )
         self._bar_fill.setFixedWidth(0)
 
@@ -210,86 +936,96 @@ class MetricCard(QFrame):
         lay.addStretch()
         lay.addWidget(self._bar_bg)
 
+    def set_label(self, text: str):
+        self._lbl.setText(text.upper())
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._bar_bg.setFixedWidth(self.width() - 24)
-        self._bar_max = max(1, self.width() - 24)
-
-    def _apply_style(self, lit: bool):
-        border = C['border3'] if lit else C['border2']
-        self.setStyleSheet(
-            f"QFrame{{background:{C['bg2']};border:1px solid {border};"
-            f"border-radius:8px;}}"
-        )
+        self._bar_bg.setFixedWidth(max(1, self.width() - 28))
+        self._bar_max = max(1, self.width() - 28)
 
     def set_value(self, val: str, delta: str = "",
                   pct: float = 0, delta_color: str = None):
         self._val.setText(val)
         self._delta.setText(delta)
         col = delta_color or C['cyan']
+        self._top_accent = col
         self._delta.setStyleSheet(
-            f"color:{col};font-size:12px;font-family:{MONO};"
+            f"color:{col};font-size:11px;font-family:{MONO};font-weight:700;"
             "border:none;background:transparent;"
         )
         w = int(self._bar_max * min(1.0, max(0.0, pct / 100)))
         self._bar_fill.setFixedWidth(w)
         self._bar_fill.setStyleSheet(
-            f"background:{col};border:none;border-radius:2px;"
+            f"background:{col};border:none;border-radius:2.5px;"
         )
+        self.update()
 
     def set_lit(self, lit: bool):
-        self._apply_style(lit)
+        self._border_color = C['border3'] if lit else C['border2']
+        if not lit:
+            self._top_accent = C['border3']
+        self.update()
 
 
 # ══════════════════════════════════════════════════════════════
 # PhaseBar
 # ══════════════════════════════════════════════════════════════
 class PhaseBar(QWidget):
-    LABELS = ["SCAN", "APPLY", "MONITOR"]
+    KEYS = [
+        ("boost_phase_scan", "1 · SCAN"),
+        ("boost_phase_apply", "2 · APPLY"),
+        ("boost_phase_monitor", "3 · MONITOR"),
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._cur_phase = -1
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
         self._pills = []
-        for i, name in enumerate(self.LABELS):
-            pill = QLabel(name)
+        for i, (k, default_txt) in enumerate(self.KEYS):
+            pill = QLabel(_t(k, default_txt))
             pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pill.setMinimumHeight(32)
             pill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             pill.setStyleSheet(self._style(False, False))
             self._pills.append(pill)
             lay.addWidget(pill, 1)
-            if i < len(self.LABELS) - 1:
+            if i < len(self.KEYS) - 1:
                 sep = QLabel("›")
                 sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 sep.setFixedWidth(14)
                 sep.setStyleSheet(
-                    f"color:{C['border3']};font-size:14px;border:none;font-family:{UI};"
+                    f"color:{C['border3']};font-size:14px;border:none;background:transparent;font-family:{UI};"
                 )
                 lay.addWidget(sep, 0)
 
     def _style(self, active: bool, done: bool) -> str:
+        r = C.get('radius', '8px')
         if active:
-            return (f"color:{C['yellow']};font-size:11px;letter-spacing:1.4px;"
-                    f"font-family:{UI};font-weight:700;border:1px solid {C['yellow']}55;"
-                    f"border-radius:8px;padding:6px 12px;"
-                    f"background:{C['yel_dim']};")
+            return (f"color:{C['yellow']};font-size:11px;letter-spacing:1.2px;"
+                    f"font-family:{UI};font-weight:700;border:1px solid {_rgba(C['yellow'], 0.50)};"
+                    f"border-radius:{r};padding:5px 10px;background:{C['yel_dim']};")
         if done:
-            return (f"color:{C['green']};font-size:11px;letter-spacing:1.4px;"
-                    f"font-family:{UI};font-weight:600;border:1px solid {C['green']}40;"
-                    f"border-radius:8px;padding:6px 12px;background:{C['grn_dim']};")
-        return (f"color:{C['text3']};font-size:11px;letter-spacing:1.4px;"
+            return (f"color:{C['green']};font-size:11px;letter-spacing:1.2px;"
+                    f"font-family:{UI};font-weight:700;border:1px solid {_rgba(C['green'], 0.40)};"
+                    f"border-radius:{r};padding:5px 10px;background:{C['grn_dim']};")
+        return (f"color:{C['text3']};font-size:11px;letter-spacing:1.2px;"
                 f"font-family:{UI};font-weight:600;border:1px solid {C['border2']};"
-                f"border-radius:8px;padding:6px 12px;background:{C['bg2']};")
+                f"border-radius:{r};padding:5px 10px;background:{C['bg2']};")
 
     def set_phase(self, n: int):
+        self._cur_phase = n
         for i, pill in enumerate(self._pills):
-            pill.setStyleSheet(
-                self._style(i == n, i < n)
-            )
+            pill.setStyleSheet(self._style(i == n, i < n))
+
+    def retranslate(self):
+        for pill, (k, default_txt) in zip(self._pills, self.KEYS):
+            pill.setText(_t(k, default_txt))
+        self.set_phase(self._cur_phase)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -305,27 +1041,29 @@ class CyberLog(QTextEdit):
         "text": C['text'],
         "mute": C['text3'],
     }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setMinimumHeight(140)
+        self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setPlaceholderText("Press BOOST to scan GPU / RAM / background load…")
+        self.setPlaceholderText(_t("boost_log_placeholder", "Press BOOST to scan GPU / RAM / background load…"))
+        well_bg = C.get('well_bg', C['bg2'])
         self.setStyleSheet(f"""
             QTextEdit {{
-                background:{C['bg2']};
+                background:{well_bg};
                 border:1px solid {C['border2']};
-                border-radius:{C.get('radius', '8px')};
+                border-radius:{C.get('radius', '10px')};
                 color:{C['text']};
                 font-family:{MONO};
                 font-size:12px;
-                padding:12px 14px;
+                padding:12px 16px;
             }}
             QTextEdit:focus {{
-                border:1px solid {C['cyan']}70;
+                border:1px solid {_rgba(C['cyan'], 0.45)};
             }}
             QScrollBar:vertical {{
-                background:{C['bg']};width:8px;border-radius:4px;
+                background:{well_bg};width:8px;border-radius:4px;
             }}
             QScrollBar::handle:vertical {{
                 background:{C['border3']};border-radius:4px;
@@ -339,12 +1077,22 @@ class CyberLog(QTextEdit):
             for _ in range(50):
                 cur.select(QTextCursor.SelectionType.BlockUnderCursor)
                 cur.removeSelectedText()
-                try: cur.deleteChar()
-                except Exception: break
+                try:
+                    cur.deleteChar()
+                except Exception:
+                    break
         cur = self.textCursor()
         cur.movePosition(QTextCursor.MoveOperation.End)
         fmt = QTextCharFormat()
-        fmt.setForeground(QColor(self.COLORS.get(level, C['text'])))
+        col_map = {
+            "ok":   C['green'],
+            "warn": C['yellow'],
+            "head": C['cyan'],
+            "err":  C['red'],
+            "text": C['text'],
+            "mute": C['text3'],
+        }
+        fmt.setForeground(QColor(col_map.get(level, C['text'])))
         cur.setCharFormat(fmt)
         cur.insertText(msg + "\n")
         self.setTextCursor(cur)
@@ -354,79 +1102,100 @@ class CyberLog(QTextEdit):
 # ══════════════════════════════════════════════════════════════
 # GPU Monitor Thread
 # ══════════════════════════════════════════════════════════════
+def _linux_dgpu_is_sleeping() -> bool:
+    """Avoid waking a suspended NVIDIA dGPU (D3cold) on hybrid Optimus laptops."""
+    if not IS_LINUX:
+        return False
+    try:
+        for p in Path("/sys/class/drm").glob("card*/device/power/runtime_status"):
+            if p.read_text().strip() in ("suspended", "suspending"):
+                vendor = p.parent.parent / "vendor"
+                if vendor.exists() and "0x10de" in vendor.read_text().strip().lower():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 class GpuMonitorThread(QThread):
     update = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
         self._stop = threading.Event()
+        self.using_cpu_proxy = False
 
-    def stop(self): self._stop.set()
+    def stop(self):
+        self._stop.set()
 
     def run(self):
         while not self._stop.wait(4.0):
+            if self._stop.is_set():
+                break
             self.update.emit(self._read())
 
     def _read(self) -> int:
         if IS_LINUX:
-            # Method 1: sysfs gpu_busy_percent (Intel Gen9+, AMD)
-            for p in sorted(Path("/sys/class/drm").glob(
-                    "card*/device/gpu_busy_percent")):
-                try: return int(p.read_text().strip())
-                except (OSError, ValueError): pass
-
-            # Method 2: Intel RC6 residency (Skylake/Broadwell iGPU)
-            # RC6 = render C6 sleep state — khi GPU bận thì RC6 giảm
-            # Đọc rc6_residency_ms delta để tính % busy
-            for p in sorted(Path("/sys/class/drm").glob(
-                    "card*/gt/gt0/rc6_residency_ms")):
+            for p in sorted(Path("/sys/class/drm").glob("card*/device/gpu_busy_percent")):
                 try:
-                    import time as _t
-                    v1 = int(p.read_text().strip())
-                    _t.sleep(0.5)
-                    v2 = int(p.read_text().strip())
-                    # RC6 tăng ít = GPU bận nhiều
-                    delta_rc6 = v2 - v1  # ms trong 500ms
-                    busy_pct  = max(0, min(100, 100 - int(delta_rc6 / 5)))
-                    return busy_pct
-                except (OSError, ValueError): pass
+                    val = int(p.read_text().strip())
+                    self.using_cpu_proxy = False
+                    return val
+                except (OSError, ValueError):
+                    pass
 
-            # Method 3: CPU iowait + user% làm proxy khi không có GPU metric
-            # Khi game chạy, CPU user% tăng = game đang dùng CPU nhiều hơn
+            for p in sorted(Path("/sys/class/drm").glob("card*/gt/gt0/rc6_residency_ms")):
+                try:
+                    v1 = int(p.read_text().strip())
+                    if self._stop.wait(0.5):
+                        return -1
+                    v2 = int(p.read_text().strip())
+                    delta_rc6 = v2 - v1
+                    self.using_cpu_proxy = False
+                    return max(0, min(100, 100 - int(delta_rc6 / 5)))
+                except (OSError, ValueError):
+                    pass
+
+            if shutil.which("nvidia-smi") and not _linux_dgpu_is_sleeping():
+                try:
+                    r = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=2
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        self.using_cpu_proxy = False
+                        return int(float(r.stdout.strip().splitlines()[0].strip()))
+                except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                    pass
+
             try:
                 import psutil as _psu
-                cpu = _psu.cpu_percent(interval=0.3)
+                cpu = _psu.cpu_percent(interval=0.2)
+                self.using_cpu_proxy = True
                 return int(min(100, cpu))
-            except ImportError: pass
+            except ImportError:
+                pass
 
         if IS_WINDOWS:
-            # Method 1: nvidia-smi — không phụ thuộc WMI performance counter class,
-            # đáng tin cậy hơn nhiều trên Windows 10 (class GPUEngine hay thiếu/rỗng)
-            try:
-                r = subprocess.run(
-                    ["nvidia-smi",
-                     "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=3,
-                    creationflags=0x08000000)  # CREATE_NO_WINDOW
-                if r.returncode == 0 and r.stdout.strip():
-                    return int(float(r.stdout.strip().splitlines()[0].strip()))
-            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError): pass
+            if shutil.which("nvidia-smi"):
+                try:
+                    r = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=2,
+                        creationflags=0x08000000
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        self.using_cpu_proxy = False
+                        return int(float(r.stdout.strip().splitlines()[0].strip()))
+                except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                    pass
 
-            # Method 2: WMI Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine
-            # (thường chỉ hoạt động khi driver expose đúng performance counter;
-            # phổ biến hơn trên Win11, có thể thiếu/rỗng trên nhiều máy Win10)
             try:
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine"
-                     " -ErrorAction SilentlyContinue"
-                     " | Measure-Object -Property UtilizationPercentage -Sum).Sum"],
-                    capture_output=True, text=True, timeout=3,
-                    creationflags=0x08000000)  # CREATE_NO_WINDOW — tránh nháy cửa sổ PowerShell mỗi 4s
-                out = r.stdout.strip()
-                if r.returncode == 0 and out:
-                    return int(float(out))
-            except (OSError, subprocess.TimeoutExpired, ValueError): pass
+                import psutil as _psu
+                self.using_cpu_proxy = True
+                return int(min(100, _psu.cpu_percent(interval=0.15)))
+            except ImportError:
+                pass
         return -1
 
 
@@ -434,32 +1203,11 @@ class GpuMonitorThread(QThread):
 # Game Watcher Thread — detect game AFTER boost is active
 # ══════════════════════════════════════════════════════════════
 class GameWatcherThread(QThread):
-    """
-    Poll mỗi 4s sau khi boost active.
-    Khi game thật (kể cả Roblox/Sober qua bwrap, hoặc bất kỳ game không
-    có tên trong danh sách cứng) spawn → apply nice(-10) ngay lập tức.
-    Giải quyết vấn đề: boost bật trước game → game_pids rỗng lúc SCAN.
-
-    Từ v3.0: _detect_running_games() không còn báo "game" mỗi khi có
-    process bwrap/wine/proton mới xuất hiện (trước đây mọi Flatpak app
-    khác cũng bị tính nhầm thành "game detected" dù không liên quan).
-    Watcher giờ chỉ emit khi có process NẶNG THẬT (CPU > threshold)
-    được tìm thấy bên trong sandbox/wrapper, hoặc khi một game có tên
-    đã biết khởi chạy.
-
-    Từ v3.2: watcher trước đây chỉ theo dõi một chiều — phát hiện PID
-    MỚI xuất hiện, nhưng không bao giờ kiểm tra PID CŨ đã chết hay
-    chưa. Hậu quả thật (phát hiện qua test thủ công): khi tắt game
-    (Ctrl+C một tiến trình test, hoặc đóng game thật), self._known vẫn
-    giữ PID cũ mãi mãi, và không có cách nào để UI biết "game đã dừng"
-    để chuyển trạng thái về tăng tốc máy tính thông thường. Giờ mỗi
-    vòng poll còn kiểm tra xem các PID đang theo dõi có còn sống không
-    (psutil.pid_exists) — nếu toàn bộ PID của một lượt detect đã chết,
-    phát signal game_lost để UI cập nhật lại đúng trạng thái.
-    """
     game_found = pyqtSignal(list, str, list)   # (new_pids, game_name, all_known_pids)
-    game_lost  = pyqtSignal()            # tất cả PID đã theo dõi đều đã chết
+    game_lost  = pyqtSignal()
     log_sig    = pyqtSignal(str, str)
+
+    _FULL_RESCAN_EVERY = 10
 
     def __init__(self, saved: dict):
         super().__init__()
@@ -467,19 +1215,10 @@ class GameWatcherThread(QThread):
         self._stop   = threading.Event()
         self._known  = set(saved.get("game_pids") or [])
         self._had_game = bool(self._known)
-        # FIX: without this counter, once ANY game was tracked and alive,
-        # the watcher would skip the expensive scan forever (see run()) —
-        # meaning a SECOND game launched afterward (playing two games at
-        # once, or opening another game while the first stays open) would
-        # never be detected or get its own priority boost, until the
-        # first game fully closed. Every _FULL_RESCAN_EVERY ticks we pay
-        # the full scan cost once, purely to catch a newly-launched
-        # second/third game — still far cheaper than scanning every tick.
         self._ticks_since_scan = 0
 
-    _FULL_RESCAN_EVERY = 10   # ~40s at the 4s poll interval
-
-    def stop(self): self._stop.set()
+    def stop(self):
+        self._stop.set()
 
     def run(self):
         if not HAS_PSUTIL:
@@ -487,67 +1226,44 @@ class GameWatcherThread(QThread):
             return
         import psutil as _psu
         while not self._stop.wait(4.0):
+            if self._stop.is_set():
+                break
             try:
-                # ── Cheap liveness check first ──
-                # If we already have a tracked game and it's still alive,
-                # skip the expensive full-system scan entirely this cycle.
-                # FIX (critical): the old code always called
-                # _detect_running_games() here, which — with no cached
-                # cpu_samples — does a FULL process_iter() pass, warms up
-                # cpu_percent() on every process on the system, then
-                # blocks for time.sleep(0.5), then does a SECOND full
-                # process_iter() pass. Repeating that every 4 seconds for
-                # the entire play session created a recurring CPU burst
-                # that directly competed with the game for CPU time —
-                # this is what produced the periodic stutter/lag reported
-                # by users ("giật kinh khủng"), plus a 0.5s main-loop
-                # stall each cycle. pid_exists() is a single, near-free
-                # /proc lookup — more than enough to confirm the game(s)
-                # we already found are still running.
                 if self._known:
                     alive = {pid for pid in self._known if _psu.pid_exists(pid)}
                     if not alive and self._had_game:
-                        # Mọi PID đã theo dõi đều đã chết — game đã dừng
                         self._known = set()
                         self._had_game = False
                         self._ticks_since_scan = 0
                         self.game_lost.emit()
-                        # fall through to do a full scan below, in case
-                        # a different game started at the same moment
                     else:
                         self._known = alive
                         self._ticks_since_scan += 1
-                        # Multi-game support: periodically rescan even
-                        # while a game is alive, so a second/third game
-                        # launched later still gets detected and boosted.
                         if self._ticks_since_scan < self._FULL_RESCAN_EVERY:
                             continue
                         self._ticks_since_scan = 0
 
                 from core.booster import _detect_running_games
                 running, _ = _detect_running_games()
-
                 if not running:
                     continue
-                # Build full tree
                 seen, pids = set(), []
                 for pid, name in running:
-                    if pid in seen: continue
-                    seen.add(pid); pids.append(pid)
+                    if pid in seen:
+                        continue
+                    seen.add(pid)
+                    pids.append(pid)
                     try:
                         for c in _psu.Process(pid).children(recursive=True):
                             if c.pid not in seen:
-                                seen.add(c.pid); pids.append(c.pid)
-                    except (_psu.NoSuchProcess, _psu.AccessDenied): pass
-                # Only emit if new PIDs appeared (covers both "first game
-                # found" and "another game found while one is running")
+                                seen.add(c.pid)
+                                pids.append(c.pid)
+                    except (_psu.NoSuchProcess, _psu.AccessDenied):
+                        pass
                 new = set(pids) - self._known
                 if new:
                     self._known |= set(pids)
                     self._had_game = True
-                    # Report the newly-found game's name specifically,
-                    # not always running[0] — matters once a second game
-                    # is what actually triggered this emit.
                     new_names = [nm for pid, nm in running if pid in new]
                     name = new_names[0] if new_names else (running[0][1] if running else "game")
                     self.game_found.emit(list(new), name, list(self._known))
@@ -581,6 +1297,7 @@ class BoostWorker(QThread):
 # GameBoostPage
 # ══════════════════════════════════════════════════════════════
 class GameBoostPage(QWidget):
+    boost_toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -588,61 +1305,71 @@ class GameBoostPage(QWidget):
         self._transitioning  = False
         self._saved_state    = None
         self._worker         = None
+        self._tool_worker    = None
         self._gpu_thread     = None
         self._gpu_baseline   = -1
         self._watcher        = None
+        self._status_key     = "standby"
+        self._status_col     = C['dim']
+
+        _recover_stale_boost_on_startup()
+        atexit.register(self._atexit_cleanup)
         self._setup_ui()
 
     def _setup_ui(self):
         self.setStyleSheet(f"background:{C['bg']};")
         self._compact = None
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        root.setContentsMargins(24, 18, 24, 18)
+        root.setSpacing(10)
 
         hdr = QHBoxLayout()
-        titles = QVBoxLayout(); titles.setSpacing(2); titles.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("SYS BOOSTER")
-        title.setStyleSheet(
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.setContentsMargins(0, 0, 0, 0)
+        self._title_lbl = QLabel(_t("booster_title", "SYSTEM BOOSTER"))
+        self._title_lbl.setStyleSheet(
             f"color:{C['text']};font-size:18px;letter-spacing:1.2px;"
-            f"font-family:{UI};font-weight:700;border:none;"
+            f"font-family:{UI};font-weight:700;border:none;background:transparent;"
         )
-        sub = QLabel("One control · scan → apply → monitor  ·  scales with the window")
-        sub.setStyleSheet(
-            f"color:{C['text3']};font-size:12px;font-family:{UI};border:none;"
+        self._sub_lbl = QLabel(_t("boost_hud_sub", "Tactical resource optimizer · automatic state snapshot & restore on exit"))
+        self._sub_lbl.setStyleSheet(
+            f"color:{C['text3']};font-size:12px;font-family:{UI};border:none;background:transparent;"
         )
-        sub.setWordWrap(True)
-        titles.addWidget(title); titles.addWidget(sub)
+        self._sub_lbl.setWordWrap(True)
+        titles.addWidget(self._title_lbl)
+        titles.addWidget(self._sub_lbl)
 
         self._sdot = QLabel("●")
-        self._stxt = QLabel("standby")
+        self._stxt = QLabel(_t("boost_state_standby", "STANDBY"))
         status = QFrame()
+        status.setObjectName("boostStatusPill")
         status.setStyleSheet(
-            f"QFrame{{background:{C['bg2']};border:1px solid {C['border2']};"
+            f"QFrame#boostStatusPill{{background:{C['bg2']};border:1px solid {C['border2']};"
             f"border-radius:8px;}}"
+            f"QFrame#boostStatusPill QLabel{{border:none;background:transparent;}}"
         )
         st_lay = QHBoxLayout(status)
-        st_lay.setContentsMargins(10, 6, 12, 6); st_lay.setSpacing(6)
+        st_lay.setContentsMargins(10, 6, 12, 6)
+        st_lay.setSpacing(6)
         for w in (self._sdot, self._stxt):
             w.setStyleSheet(
-                f"color:{C['text3']};font-size:12px;letter-spacing:0.8px;"
-                f"font-family:{UI};font-weight:600;border:none;background:transparent;"
+                f"color:{C['text3']};font-size:11px;letter-spacing:1px;"
+                f"font-family:{MONO};font-weight:700;border:none;background:transparent;"
             )
-        st_lay.addWidget(self._sdot); st_lay.addWidget(self._stxt)
+        st_lay.addWidget(self._sdot)
+        st_lay.addWidget(self._stxt)
         hdr.addLayout(titles, 1)
         hdr.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(hdr)
 
-        self._cmd = QFrame()
+        # ── Main HUD Card (OrbitButton + 4 MetricCards) ────────
+        self._cmd = ElevatedCard(accent_color=C['cyan'], shadow=True)
         self._cmd.setObjectName("boostHud")
-        self._cmd.setStyleSheet(
-            f"QFrame#boostHud{{background:{C['bg2']};border:1px solid {C['border2']};"
-            f"border-radius:{C.get('radius','8px')};}}"
-        )
         self._cmd.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._cmd_lay = QHBoxLayout(self._cmd)
-        self._cmd_lay.setContentsMargins(16, 16, 16, 16)
-        self._cmd_lay.setSpacing(16)
+        self._cmd_lay.setContentsMargins(18, 14, 18, 14)
+        self._cmd_lay.setSpacing(18)
 
         self._btn = OrbitButton()
         self._btn.clicked.connect(self._toggle)
@@ -657,10 +1384,10 @@ class GameBoostPage(QWidget):
         grid.setColumnStretch(1, 1)
         grid.setRowStretch(0, 1)
         grid.setRowStretch(1, 1)
-        self._mc_gpu  = MetricCard("GPU busy")
-        self._mc_ram  = MetricCard("RAM freed")
-        self._mc_bg   = MetricCard("Background")
-        self._mc_game = MetricCard("Game detect")
+        self._mc_gpu  = MetricCard(_t("boost_mc_gpu", "GPU BUSY"))
+        self._mc_ram  = MetricCard(_t("boost_mc_ram", "RAM FREED"))
+        self._mc_bg   = MetricCard(_t("boost_mc_bg", "BACKGROUND"))
+        self._mc_game = MetricCard(_t("boost_mc_game", "GAME DETECT"))
         grid.addWidget(self._mc_gpu,  0, 0)
         grid.addWidget(self._mc_ram,  0, 1)
         grid.addWidget(self._mc_bg,   1, 0)
@@ -668,24 +1395,113 @@ class GameBoostPage(QWidget):
         self._cmd_lay.addWidget(self._metrics_wrap, 1)
         root.addWidget(self._cmd, 0)
 
+        # ── Tactical Module Toggles & Standalone One-Shot Tools ─
+        self._mods_frame = ElevatedCard(shadow=True)
+        self._mods_frame.setObjectName("boostModsFrame")
+        mods_lay = QVBoxLayout(self._mods_frame)
+        mods_lay.setContentsMargins(14, 10, 14, 10)
+        mods_lay.setSpacing(8)
+
+        top_mods = QHBoxLayout()
+        top_mods.setSpacing(8)
+        self._lbl_profile = QLabel(_t("boost_profile_lbl", "ACTIVE MODULES:"))
+        self._lbl_profile.setStyleSheet(
+            f"color:{C['text3']};font-size:10px;letter-spacing:1.2px;font-weight:700;"
+            f"font-family:{UI};border:none;background:transparent;"
+        )
+        top_mods.addWidget(self._lbl_profile)
+
+        self._chk_ram = QCheckBox(_t("boost_mod_ram", "Compact / Free RAM"))
+        self._chk_ram.setChecked(True)
+        self._chk_gov = QCheckBox(_t("boost_mod_gov", "CPU Performance Mode"))
+        self._chk_gov.setChecked(True)
+        self._chk_prio = QCheckBox(_t("boost_mod_prio", "Process Priority (Nice)"))
+        self._chk_prio.setChecked(True)
+        self._chk_swap = QCheckBox(_t("boost_mod_swap", "Low Swappiness"))
+        self._chk_swap.setChecked(True)
+        self._chk_hypr = QCheckBox(_t("boost_mod_hypr", "Hyprland VFR / Scanout"))
+        self._chk_hypr.setChecked(True)
+        if not IS_LINUX:
+            self._chk_swap.setVisible(False)
+            self._chk_hypr.setVisible(False)
+        elif not shutil.which("hyprctl"):
+            self._chk_hypr.setVisible(False)
+
+        chk_img = _global_check_icon_path()
+        chk_img_rule = f'image:url("{chk_img}");' if chk_img else ''
+        for chk in (self._chk_ram, self._chk_gov, self._chk_prio, self._chk_swap, self._chk_hypr):
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.setStyleSheet(f"""
+                QCheckBox {{
+                    color:{C['text2']}; font-size:12px; font-family:{UI}; font-weight:600;
+                    spacing:6px; background:{C['bg3']}; border:1px solid {C['border2']};
+                    border-radius:6px; padding:5px 10px;
+                }}
+                QCheckBox:hover {{
+                    border-color:{_rgba(C['cyan'], 0.55)}; color:{C['text']};
+                }}
+                QCheckBox::indicator {{
+                    width:15px; height:15px; border:1.5px solid {C['border3']};
+                    border-radius:4px; background:transparent;
+                }}
+                QCheckBox::indicator:checked {{
+                    background:{C['cyan']}; border-color:{C['cyan']};
+                    {chk_img_rule}
+                }}
+            """)
+            top_mods.addWidget(chk)
+        top_mods.addStretch()
+
+        self._btn_shader = _btn(f"◈ {_t('btn_clear_cache', 'CLEAR SHADER CACHE')}", "cyan", small=True)
+        self._btn_shader.clicked.connect(self._run_clear_shader_cache)
+        self._btn_bloat = _btn(f"✕ {_t('btn_kill_bloat', 'SUSPEND BLOAT')}", "yellow", small=True)
+        self._btn_bloat.clicked.connect(self._run_kill_bloat)
+        top_mods.addWidget(self._btn_shader)
+        top_mods.addWidget(self._btn_bloat)
+        mods_lay.addLayout(top_mods)
+        root.addWidget(self._mods_frame, 0)
+
         self._phases = PhaseBar()
         root.addWidget(self._phases, 0)
 
         self._log = CyberLog()
-        self._log.append_line("[ ready — press BOOST ]", "mute")
+        self._log.append_line(_t("boost_log_ready", "[ ready — press BOOST to optimize ]"), "mute")
         root.addWidget(self._log, 1)
+
+    def retranslate(self):
+        self._title_lbl.setText(_t("booster_title", "SYSTEM BOOSTER"))
+        self._sub_lbl.setText(_t("boost_hud_sub", "Tactical resource optimizer · automatic state snapshot & restore on exit"))
+        if not getattr(self, "_using_cpu_proxy", False):
+            self._mc_gpu.set_label(_t("boost_mc_gpu", "GPU BUSY"))
+        else:
+            self._mc_gpu.set_label(_t("boost_mc_cpu_proxy", "CPU LOAD"))
+        self._mc_ram.set_label(_t("boost_mc_ram", "RAM FREED"))
+        self._mc_bg.set_label(_t("boost_mc_bg", "BACKGROUND"))
+        self._mc_game.set_label(_t("boost_mc_game", "GAME DETECT"))
+        self._lbl_profile.setText(_t("boost_profile_lbl", "ACTIVE MODULES:"))
+        self._chk_ram.setText(_t("boost_mod_ram", "Compact / Free RAM"))
+        self._chk_gov.setText(_t("boost_mod_gov", "CPU Performance Mode"))
+        self._chk_prio.setText(_t("boost_mod_prio", "Process Priority (Nice)"))
+        self._chk_swap.setText(_t("boost_mod_swap", "Low Swappiness"))
+        self._chk_hypr.setText(_t("boost_mod_hypr", "Hyprland VFR / Scanout"))
+        self._btn_shader.setText(f"◈ {_t('btn_clear_cache', 'CLEAR SHADER CACHE')}")
+        self._btn_bloat.setText(f"✕ {_t('btn_kill_bloat', 'SUSPEND BLOAT')}")
+        self._phases.retranslate()
+        self._log.setPlaceholderText(_t("boost_log_placeholder", "Press BOOST to scan GPU / RAM / background load…"))
+        self._set_status(self._status_key, self._status_col)
+        self._btn.update()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        compact = self.width() < 760
-        side = 148 if compact else min(188, max(148, int(self.height() * 0.20)))
+        compact = self.width() < 740
+        side = 152 if compact else min(184, max(152, int(self.height() * 0.21)))
         self._btn._set_side(side)
         if compact:
             self._cmd.setMaximumHeight(440)
-            self._metrics_wrap.setMinimumHeight(160)
+            self._metrics_wrap.setMinimumHeight(156)
             self._metrics_wrap.setMaximumHeight(220)
         else:
-            self._cmd.setMaximumHeight(220)
+            self._cmd.setMaximumHeight(216)
             self._metrics_wrap.setMinimumHeight(0)
             self._metrics_wrap.setMaximumHeight(188)
         if compact == self._compact:
@@ -695,34 +1511,84 @@ class GameBoostPage(QWidget):
         self._cmd_lay.setDirection(direction)
         align = Qt.AlignmentFlag.AlignHCenter if compact else Qt.AlignmentFlag.AlignVCenter
         self._cmd_lay.setAlignment(self._btn, align)
-        self._metrics_wrap.setMinimumHeight(168 if compact else 148)
+        self._metrics_wrap.setMinimumHeight(160 if compact else 148)
 
-    def _set_status(self, txt: str, color: str):
-        s = (f"color:{color};font-size:12px;letter-spacing:0.8px;"
-             f"font-family:{UI};font-weight:600;border:none;background:transparent;")
-        self._sdot.setStyleSheet(s); self._stxt.setStyleSheet(s)
-        self._stxt.setText(txt)
+    def _set_status(self, key: str, color: str):
+        self._status_key = key
+        self._status_col = color
+        label_map = {
+            "standby":    _t("boost_state_standby", "STANDBY"),
+            "scanning":   _t("boost_state_scanning", "SCANNING"),
+            "monitoring": _t("boost_state_monitoring", "MONITORING"),
+            "restoring":  _t("boost_state_restoring", "RESTORING"),
+        }
+        s = (f"color:{color};font-size:11px;letter-spacing:1px;"
+             f"font-family:{MONO};font-weight:700;border:none;background:transparent;")
+        self._sdot.setStyleSheet(s)
+        self._stxt.setStyleSheet(s)
+        self._stxt.setText(label_map.get(key, key.upper()))
 
+    # ── Standalone One-Shot Tools ─────────────────────────────
+    def _run_one_shot(self, fn):
+        if self._transitioning or (self._tool_worker is not None and self._tool_worker.isRunning()):
+            return
+        self._btn_shader.setEnabled(False)
+        self._btn_bloat.setEnabled(False)
+
+        def _wrap(log, _p, _m):
+            try:
+                fn(log)
+            except Exception as exc:
+                log(f"  ✗ {exc}", "err")
+            return None
+
+        def _done(_):
+            self._btn_shader.setEnabled(True)
+            self._btn_bloat.setEnabled(True)
+
+        self._tool_worker = BoostWorker(_wrap)
+        self._tool_worker.log_sig.connect(lambda m, l: self._log.append_line(m, l))
+        self._tool_worker.done_sig.connect(_done)
+        self._tool_worker.start()
+
+    def _run_clear_shader_cache(self):
+        from core.booster import clear_disk_cache
+        self._run_one_shot(clear_disk_cache)
+
+    def _run_kill_bloat(self):
+        from core.booster import kill_bloat
+        self._run_one_shot(kill_bloat)
+
+    # ── Toggle Boost ──────────────────────────────────────────
     def _toggle(self):
-        if self._transitioning: return
+        if self._transitioning:
+            return
         self._transitioning = True
         self._btn.setEnabled(False)
-        if not self._active: self._start()
-        else:                self._stop()
+        if not self._active:
+            self._start()
+        else:
+            self._stop()
 
-    # ── START ──────────────────────────────────────────────────
     def _start(self):
         self._active = True
         self._btn.set_active(True)
         self._phases.set_phase(0)
         self._set_status("scanning", C['yellow'])
-        # Xoá log của phiên boost trước — tránh dòng "Game detected" cũ
-        # còn sót lại trên màn hình, gây hiểu lầm là watcher vẫn đang
-        # nhận diện một game đã dừng từ lâu.
+        for chk in (self._chk_ram, self._chk_gov, self._chk_prio, self._chk_swap, self._chk_hypr):
+            chk.setEnabled(False)
         self._log.clear()
-        self._log.append_line("┌─ GAME BOOST ─────────────────────────────", "head")
+        self._log.append_line("┌─ SYSTEM BOOST ───────────────────────────", "head")
+        self.boost_toggled.emit(True)
 
-        self._worker = BoostWorker(self._boost_logic)
+        opts = {
+            "ram":  self._chk_ram.isChecked(),
+            "gov":  self._chk_gov.isChecked(),
+            "prio": self._chk_prio.isChecked(),
+            "swap": self._chk_swap.isChecked(),
+            "hypr": self._chk_hypr.isChecked(),
+        }
+        self._worker = BoostWorker(lambda log, p, m: self._boost_logic(log, p, m, opts))
         self._worker.log_sig.connect(lambda m, l: self._log.append_line(m, l))
         self._worker.phase_sig.connect(self._phases.set_phase)
         self._worker.metric_sig.connect(self._on_metric)
@@ -730,291 +1596,286 @@ class GameBoostPage(QWidget):
         self._worker.start()
 
     def _on_done(self, saved):
-        self._saved_state   = saved
+        prior = _merge_unrestored_state(_load_boost_state_disk(), self._saved_state)
+        self._saved_state   = _merge_unrestored_state(prior, saved or {})
+        _save_boost_state_disk(self._saved_state)
         self._transitioning = False
         self._btn.setEnabled(True)
         self._set_status("monitoring", C['cyan'])
-        # Start GPU monitor
         self._gpu_baseline = -1
         self._gpu_thread   = GpuMonitorThread()
         self._gpu_thread.update.connect(self._on_gpu)
         self._gpu_thread.start()
 
-        # Start game watcher — detect game launched AFTER boost
-        saved = self._saved_state or {}
-        self._watcher = GameWatcherThread(saved)
+        self._watcher = GameWatcherThread(self._saved_state)
         self._watcher.game_found.connect(self._on_game_found)
         self._watcher.game_lost.connect(self._on_game_lost)
         self._watcher.log_sig.connect(lambda m, l: self._log.append_line(m, l))
         self._watcher.start()
 
-    # ── STOP ───────────────────────────────────────────────────
+    # ── STOP & SHUTDOWN ───────────────────────────────────────
     def _stop(self):
         self._set_status("restoring", C['yellow'])
         self._log.append_line("├─ RESTORE ────────────────────────────────", "warn")
         if self._gpu_thread:
-            self._gpu_thread.stop(); self._gpu_thread = None
+            self._gpu_thread.stop()
+            self._gpu_thread.wait(1500)
+            self._gpu_thread = None
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher.wait(1500)
+            self._watcher = None
         saved = self._saved_state
 
         def _restore(log, *_):
+            ok = False
             try:
-                from core.booster import smart_boost_off
-                if saved:
-                    smart_boost_off(saved, log)
-                # Remove mesa env file
-                env_file = Path.home() / ".config/environment.d/cyber-boost.conf"
-                try: env_file.unlink(missing_ok=True)
-                except OSError: pass
-                # Restore swappiness
-                sw = saved.get("swappiness_orig") if saved else None
-                if sw and IS_LINUX:
-                    try:
-                        Path("/proc/sys/vm/swappiness").write_text(sw)
-                    except (PermissionError, OSError):
-                        # FIX: if swappiness was originally set via the
-                        # privileged helper (no direct write permission),
-                        # restoring must also go through the helper —
-                        # otherwise it silently fails here and swappiness
-                        # is left at 1 permanently, even after the user
-                        # thinks they've turned Boost off.
-                        try:
-                            from core import privileged as _PRIV
-                            _PRIV.run_helper("set-swappiness", sw, timeout=5, use_pkexec=False)
-                        except Exception:
-                            pass
-                # Restore VFR
-                if saved and saved.get("hyprland_vfr") and shutil.which("hyprctl"):
-                    try:
-                        subprocess.run(
-                            ["hyprctl", "keyword", "misc:vfr", "true"],
-                            capture_output=True, timeout=3)
-                    except (OSError, subprocess.TimeoutExpired): pass
-                # Restore nice
-                try:
-                    import psutil
-                    for pid, orig in (saved or {}).get("game_nice", {}).items():
-                        try: psutil.Process(pid).nice(orig)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied): pass
-                    for pid, orig in (saved or {}).get("bg_nice", {}).items():
-                        try: psutil.Process(pid).nice(orig)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied): pass
-                except ImportError:
-                    pass
-                log("└─ DONE ───────────────────────────────────", "head")
+                ok = _restore_boost_state(saved, log)
+                if ok:
+                    log("└─ DONE ───────────────────────────────────", "head")
+                else:
+                    log("└─ PARTIAL RESTORE (SOME STEPS FAILED) ────", "warn")
             except Exception as e:
                 log(f"  ~ restore: {e}", "warn")
-            return None
+            return ok
 
         self._worker = BoostWorker(_restore)
         self._worker.log_sig.connect(lambda m, l: self._log.append_line(m, l))
         self._worker.done_sig.connect(self._on_restore_done)
         self._worker.start()
 
-    def _on_restore_done(self, _):
+    def _on_restore_done(self, ok):
         self._active        = False
-        self._saved_state   = None
+        if ok:
+            self._saved_state = None
         self._transitioning = False
         self._btn.set_active(False)
         self._btn.setEnabled(True)
+        for chk in (self._chk_ram, self._chk_gov, self._chk_prio, self._chk_swap, self._chk_hypr):
+            chk.setEnabled(True)
         self._phases.set_phase(-1)
         self._set_status("standby", C['dim'])
         for mc in (self._mc_gpu, self._mc_ram, self._mc_bg, self._mc_game):
-            mc.set_value("—"); mc.set_lit(False)
-        # Stop watcher
-        if self._watcher:
-            self._watcher.stop(); self._watcher = None
+            mc.set_value("—")
+            mc.set_lit(False)
+        self.boost_toggled.emit(False)
 
-    # ── Game found handler ────────────────────────────────────
+    def _atexit_cleanup(self):
+        try:
+            pending = _merge_unrestored_state(_load_boost_state_disk(), self._saved_state)
+            if pending:
+                if _restore_boost_state(pending):
+                    self._saved_state = None
+                else:
+                    self._saved_state = pending
+                self._active = False
+        except Exception:
+            pass
+
+    def shutdown(self):
+        """Synchronous teardown called by MainWindow._shutdown() on application exit."""
+        if self._gpu_thread:
+            self._gpu_thread.stop()
+            self._gpu_thread.wait(1500)
+            self._gpu_thread = None
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher.wait(1500)
+            self._watcher = None
+        if self._worker and self._worker.isRunning():
+            self._worker.wait(3000)
+        if self._tool_worker and self._tool_worker.isRunning():
+            self._tool_worker.wait(2000)
+        pending = _merge_unrestored_state(_load_boost_state_disk(), self._saved_state)
+        if pending:
+            if _restore_boost_state(pending):
+                self._saved_state = None
+            else:
+                self._saved_state = pending
+            self._active = False
+
+    # ── Game found / lost handlers ────────────────────────────
     def _on_game_found(self, pids: list, name: str, all_known_pids: list = None):
-        """Gọi khi watcher detect game sau khi boost đã bật.
-        pids = chỉ những PID MỚI vừa phát hiện (có thể là game thứ 2, thứ 3...).
-        all_known_pids = TOÀN BỘ PID game đang theo dõi (kể cả game cũ đã
-        chạy từ trước) — dùng để loại trừ khỏi vòng nice(+5) nền bên dưới,
-        tránh hạ ưu tiên nhầm game đang chạy khi một game khác vừa mở.
-        """
         all_game_pids = set(all_known_pids) if all_known_pids else set(pids)
-        # Update metric card
         self._mc_game.set_value(f"{len(pids)} PIDs", name[:12], 80, C['purple'])
         self._mc_game.set_lit(True)
-        # Apply nice(-10) cho game processes ngay lập tức (best-effort —
-        # không cần quyền root, chỉ cố gắng và bỏ qua nếu hệ thống không
-        # cho phép; CyberClean không nâng quyền chỉ để renice).
+        if not self._chk_prio.isChecked():
+            self._log.append_line(f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok")
+            return
+
         boosted = 0
         bg_count = 0
+        saved = self._saved_state if isinstance(self._saved_state, dict) else {}
         try:
             import psutil as _psu
             for pid in pids[:8]:
                 try:
                     p = _psu.Process(pid)
-                    if p.nice() > -10:
-                        p.nice(-10)
+                    if _apply_game_nice(p, pid, saved):
                         boosted += 1
-                except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied):
+                except (_psu.NoSuchProcess, _psu.AccessDenied, ValueError, OSError):
                     pass
 
-            # FIX: also deprioritize background processes now that a real
-            # game exists — this used to only happen at Boost-on time (when
-            # a game was already running), so a game launched AFTER Boost
-            # was turned on never got this benefit. Same SKIP list/logic as
-            # the Boost-on path in _boost_logic.
-            # Excludes ALL known game PIDs (all_game_pids), not just the
-            # newly-found ones — otherwise an already-running first game
-            # would get wrongly nice(+5)'d the moment a second game shows up.
             if IS_LINUX:
-                uid = os.getuid()
-                SKIP = {"kwin_wayland","kwin","hyprland","sway","pipewire","wireplumber",
-                        "dbus-daemon","systemd","fcitx","fcitx5","ibus","discord",
-                        "firefox","chrome","cyberclean","python","python3"}
-                for p in _psu.process_iter(["pid", "name"]):
-                    try:
-                        nm = (p.info["name"] or "").lower().replace(".exe", "")
-                        if nm in SKIP or p.pid in all_game_pids:
-                            continue
+                try:
+                    from core.booster import _pin_game_to_perf_cores
+                    _pin_game_to_perf_cores(pids[:8], lambda m, l="text": self._log.append_line(m, l), saved)
+                except Exception:
+                    pass
+
+            uid = os.getuid() if IS_LINUX else -1
+            skip_set = _get_boost_skip_set()
+            for p in _psu.process_iter(["pid", "name"]):
+                try:
+                    if IS_LINUX and uid >= 0:
                         try:
                             if p.uids().real != uid:
                                 continue
                         except (_psu.NoSuchProcess, _psu.AccessDenied):
                             continue
-                        o = p.nice()
-                        if o < 5:
-                            p.nice(5)
+                    if _should_skip_bg_proc(p, skip_set, all_game_pids):
+                        continue
+                    o = p.nice()
+                    if IS_WINDOWS:
+                        if o == _psu.NORMAL_PRIORITY_CLASS:
+                            p.nice(_psu.BELOW_NORMAL_PRIORITY_CLASS)
+                            saved.setdefault("bg_nice", {})[p.pid] = _record_proc_nice_entry(p, o)
                             bg_count += 1
-                    except Exception:
-                        pass
+                    else:
+                        if o < 5:
+                            from core.booster import _can_restore_linux_nice
+                            if not _can_restore_linux_nice(o):
+                                continue
+                            p.nice(5)
+                            saved.setdefault("bg_nice", {})[p.pid] = _record_proc_nice_entry(p, o)
+                            bg_count += 1
+                except Exception:
+                    pass
+            _save_boost_state_disk(saved)
         except ImportError:
             pass
 
-        if boosted:
+        if boosted or bg_count:
             self._log.append_line(
                 f"  ★ Game detected: {name} ({len(pids)} PIDs) — applying priority boost",
                 "head"
             )
-            self._log.append_line(f"  + {boosted} game threads → nice(-10)", "ok")
+            if boosted:
+                prio_lbl = "HIGH_PRIORITY" if IS_WINDOWS else "nice(-10)"
+                self._log.append_line(f"  + {boosted} game process(es) → {prio_lbl}", "ok")
             if bg_count:
-                self._log.append_line(f"  + {bg_count} background → nice(+5)", "ok")
+                bg_lbl = "BELOW_NORMAL" if IS_WINDOWS else "nice(+5)"
+                self._log.append_line(f"  + {bg_count} background → {bg_lbl}", "ok")
+                self._mc_bg.set_value(f"{bg_count} procs", bg_lbl, min(100, bg_count * 4), C['yellow'])
+                self._mc_bg.set_lit(True)
         else:
-            self._log.append_line(
-                f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok"
-            )
+            self._log.append_line(f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok")
 
-    # ── Game lost handler ─────────────────────────────────────
     def _on_game_lost(self):
-        """
-        Gọi khi watcher xác nhận toàn bộ PID game đã theo dõi đều đã
-        chết (process không còn tồn tại). Báo rõ cho người dùng biết
-        game đã dừng, và đưa UI/metric card về trạng thái "chỉ tăng
-        tốc máy tính" — không còn ưu tiên cho một process không còn
-        tồn tại nữa.
-        """
-        self._log.append_line(
-            "  ○ Game ended — switching back to system-only boost", "mute"
-        )
-        self._mc_game.set_value("0 PIDs", "no game", 0, C['text3'])
+        restored = 0
+        if isinstance(self._saved_state, dict):
+            restored = _restore_process_priorities(
+                self._saved_state,
+                lambda m, l="text": self._log.append_line(m, l),
+            )
+            _save_boost_state_disk(self._saved_state)
+        self._log.append_line("  ○ Game ended — switching back to system-only boost", "mute")
+        if restored:
+            self._log.append_line(f"  + Restored priority for {restored} processes", "ok")
+        self._mc_game.set_value("0 PIDs", _t("boost_no_game", "no game"), 0, C['text3'])
         self._mc_game.set_lit(False)
+        self._mc_bg.set_value("0 procs", "standby", 0, C['text3'])
+        self._mc_bg.set_lit(False)
 
     # ── Metrics / GPU ──────────────────────────────────────────
     def _on_metric(self, key, value):
         if key == "ram_freed_mb":
             mb = int(value)
             if mb > 0:
-                self._mc_ram.set_value(f"{mb} MB", f"+{mb} MB",
-                                       min(100, mb/5), C['cyan'])
+                self._mc_ram.set_value(f"{mb} MB", f"+{mb} MB", min(100, mb / 5), C['cyan'])
             else:
-                # -1 = compacted but no freed bytes
                 self._mc_ram.set_value("compact", "✓ done", 40, C['cyan'])
             self._mc_ram.set_lit(True)
         elif key == "bg_count":
             n = int(value)
-            self._mc_bg.set_value(f"{n} procs", "nice +5",
-                                  min(100, n*4), C['yellow'])
+            bg_lbl = "BELOW_NORMAL" if IS_WINDOWS else "nice +5"
+            self._mc_bg.set_value(f"{n} procs", bg_lbl, min(100, n * 4), C['yellow'])
             self._mc_bg.set_lit(True)
         elif key == "game_pids":
             pids = value
             if pids:
-                self._mc_game.set_value(f"{len(pids)} PIDs", "",
-                                        80, C['purple'])
+                self._mc_game.set_value(f"{len(pids)} PIDs", "", 80, C['purple'])
                 self._mc_game.set_lit(True)
 
     def _on_gpu(self, pct: int):
-        if pct < 0: return
+        if pct < 0:
+            return
         if self._gpu_baseline < 0:
             self._gpu_baseline = pct
-            # Detect nếu đang dùng CPU proxy (không có metric GPU thật nào)
-            import platform
-            from pathlib import Path as _P
-            has_gpu_busy_pct = any(
-                True for _ in _P("/sys/class/drm").glob(
-                    "card*/device/gpu_busy_percent")
-            ) if platform.system() == "Linux" else False
-            # FIX: Method 2 (RC6 residency) is ALSO a real GPU-derived
-            # metric (used on older Intel iGPUs that lack gpu_busy_percent,
-            # e.g. HD 520/530 on Skylake/Broadwell). Only Method 3 (raw
-            # system cpu_percent()) is a true proxy with no GPU signal at
-            # all. Previously any machine using Method 2 was wrongly
-            # relabeled "CPU LOAD" even though the number was genuinely
-            # GPU-derived — confusing for the exact hardware the tooltip
-            # was written for.
-            has_rc6 = any(
-                True for _ in _P("/sys/class/drm").glob(
-                    "card*/gt/gt0/rc6_residency_ms")
-            ) if platform.system() == "Linux" else False
-            self._using_cpu_proxy = not (has_gpu_busy_pct or has_rc6)
+            if self._gpu_thread is not None and hasattr(self._gpu_thread, "using_cpu_proxy"):
+                self._using_cpu_proxy = bool(self._gpu_thread.using_cpu_proxy)
+            else:
+                has_gpu_busy_pct = any(
+                    True for _ in Path("/sys/class/drm").glob("card*/device/gpu_busy_percent")
+                ) if IS_LINUX else False
+                has_rc6 = any(
+                    True for _ in Path("/sys/class/drm").glob("card*/gt/gt0/rc6_residency_ms")
+                ) if IS_LINUX else False
+                self._using_cpu_proxy = not (has_gpu_busy_pct or has_rc6 or shutil.which("nvidia-smi"))
 
         delta = pct - self._gpu_baseline
         col   = C['green'] if delta >= 0 else C['red']
         dstr  = f"+{delta}%" if delta >= 0 else f"{delta}%"
-        # Label khác nhau tùy source metric
-        lbl   = C['cyan']
         self._mc_gpu.set_value(f"{pct}%", dstr, pct, col)
-        # Đổi label card nếu dùng CPU proxy (không có metric GPU thật nào)
-        if getattr(self, '_using_cpu_proxy', False):
-            self._mc_gpu._lbl.setText("CPU LOAD")
-            gpu_label = getattr(self, '_gpu_name', None) or "This GPU"
-            self._mc_gpu._lbl.setToolTip(
-                f"{gpu_label}: no GPU busy-time metric available on this kernel.\n"
-                "Showing CPU load % as proxy — higher = game using more CPU."
-            )
+        if getattr(self, "_using_cpu_proxy", False):
+            self._mc_gpu.set_label(_t("boost_mc_cpu_proxy", "CPU LOAD"))
+        else:
+            self._mc_gpu.set_label(_t("boost_mc_gpu", "GPU BUSY"))
         self._mc_gpu.set_lit(True)
 
     # ══════════════════════════════════════════════════════════
     # BOOST LOGIC
     # ══════════════════════════════════════════════════════════
-    def _boost_logic(self, log, phase_sig, metric_sig) -> dict:
-        saved = {}
+    def _boost_logic(self, log, phase_sig, metric_sig, opts: dict = None) -> dict:
+        if opts is None:
+            opts = {"ram": True, "gov": True, "prio": True, "swap": True, "hypr": True}
+        prior_unrestored = _merge_unrestored_state(_load_boost_state_disk(), getattr(self, "_saved_state", None))
+        saved = dict(prior_unrestored)
 
         # ── PHASE 0: SCAN ──────────────────────────────────────
         phase_sig.emit(0)
         log("│", "mute")
         log("├─ [1/3] SCAN ─────────────────────────────", "head")
 
-        # Detect GPU name
         gpu_name = "unknown"
         if IS_LINUX:
             for pn in Path("/sys/class/drm").glob("card*/device/product_name"):
-                try: gpu_name = pn.read_text().strip()[:45]; break
-                except OSError: pass
+                try:
+                    gpu_name = pn.read_text().strip()[:45]
+                    break
+                except OSError:
+                    pass
             if gpu_name == "unknown":
                 try:
-                    r = subprocess.run(["lspci"], capture_output=True,
-                                       text=True, timeout=3)
+                    r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3)
                     for ln in r.stdout.splitlines():
                         if "VGA" in ln or "3D" in ln:
-                            gpu_name = ln.split(":")[-1].strip()[:45]; break
-                except (OSError, subprocess.TimeoutExpired): pass
+                            gpu_name = ln.split(":")[-1].strip()[:58]
+                            break
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         elif IS_WINDOWS:
-            # Method 1: nvidia-smi (nếu có card NVIDIA + driver) — nhanh, đáng tin cậy nhất
             try:
                 r = subprocess.run(
                     ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                     capture_output=True, text=True, timeout=3,
-                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                    creationflags=0x08000000
+                )
                 name = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
                 if r.returncode == 0 and name:
                     gpu_name = name[:45]
             except Exception:
                 pass
-            # Method 2: WMI qua PowerShell CIM (bắt mọi vendor: NVIDIA/AMD/Intel),
-            # ưu tiên adapter đang thực sự render màn hình
             if gpu_name == "unknown":
                 try:
                     r = subprocess.run(
@@ -1023,182 +1884,134 @@ class GameBoostPage(QWidget):
                          "Where-Object { $_.CurrentHorizontalResolution -ne $null } | "
                          "Select-Object -First 1 -ExpandProperty Name)"],
                         capture_output=True, text=True, timeout=3,
-                        creationflags=0x08000000)
+                        creationflags=0x08000000
+                    )
                     name = r.stdout.strip()
                     if r.returncode == 0 and name:
                         gpu_name = name[:45]
                 except Exception:
                     pass
-            # Method 3: fallback không lọc theo màn hình active (đề phòng driver
-            # không set CurrentHorizontalResolution trên vài máy)
-            if gpu_name == "unknown":
-                try:
-                    r = subprocess.run(
-                        ["powershell", "-NoProfile", "-Command",
-                         "(Get-CimInstance Win32_VideoController | "
-                         "Select-Object -First 1 -ExpandProperty Name)"],
-                        capture_output=True, text=True, timeout=3,
-                        creationflags=0x08000000)
-                    name = r.stdout.strip()
-                    if r.returncode == 0 and name:
-                        gpu_name = name[:45]
-                except Exception:
-                    pass
+        self._gpu_name = gpu_name
         log(f"│  ◈ GPU: {gpu_name}", "mute")
 
-        # Detect game PIDs — dùng _detect_running_games() từ booster.py (v3.0)
-        # KHÔNG tự detect bằng heuristic CPU/RAM (gây false positive với gcc/ffmpeg)
-        # _detect_running_games() v3.0 đã có:
-        #   Tier 1 — _KNOWN_GAME_PROCS (tên game cụ thể, tin theo tên)
-        #   Tier 2 — _WRAPPER_PROCS (bwrap/wine/proton/sober) KHÔNG tin theo tên
-        #            nữa — chỉ báo "game" nếu tìm được descendant nặng CPU thật
-        #            bên trong (dò cả theo session id, vượt qua PID-namespace
-        #            reparenting của bwrap --unshare-pid). Sửa lỗi:
-        #              - "Game detected: bwrap" dù không mở game gì (mọi
-        #                Flatpak app khác cũng spawn bwrap)
-        #              - Boost không tới được process game thật bên trong
-        #                sandbox (trước đây chỉ boost cái vỏ bwrap rảnh CPU)
-        #   Tier 3 — Child-of-launcher + CPU > threshold (Steam, Epic, Lutris...)
-        #   _KNOWN_HEAVY_NON_GAMES blacklist (gcc, ffmpeg, webpack...) vẫn giữ
-        # Detect game PIDs — gọi thẳng _detect_running_games() từ booster.py
-        game_pids   = []
-        _cpu_samples = {}
+        game_pids = []
         _running_games = []
         try:
             from core.booster import _detect_running_games
-            _running_games, _cpu_samples = _detect_running_games()
-
-            # Build full PID tree cho mỗi game. Lưu ý: với game qua sandbox
-            # (Tier 2), game_pid ở đây ĐÃ LÀ process nặng thật tìm được bên
-            # trong bwrap/wine, không phải cái vỏ — children() dưới đây chỉ
-            # mở rộng thêm nếu chính process đó có spawn thêm con riêng.
-            import psutil as _psu
-            _seen = set()
-            for game_pid, game_name in _running_games:
-                if game_pid in _seen:
-                    continue
-                _seen.add(game_pid)
-                game_pids.append(game_pid)
-                try:
-                    for child in _psu.Process(game_pid).children(recursive=True):
-                        if child.pid not in _seen:
-                            _seen.add(child.pid)
-                            game_pids.append(child.pid)
-                except (_psu.NoSuchProcess, _psu.AccessDenied):
-                    pass
-
+            _running_games, _ = _detect_running_games()
+            if HAS_PSUTIL:
+                import psutil as _psu
+                _seen = set()
+                for game_pid, _ in _running_games:
+                    if game_pid in _seen:
+                        continue
+                    _seen.add(game_pid)
+                    game_pids.append(game_pid)
+                    try:
+                        for child in _psu.Process(game_pid).children(recursive=True):
+                            if child.pid not in _seen:
+                                _seen.add(child.pid)
+                                game_pids.append(child.pid)
+                    except (_psu.NoSuchProcess, _psu.AccessDenied):
+                        pass
         except Exception as e:
             log(f"│  ~ detect: {e}", "warn")
 
         if game_pids:
             log(f"│  ◈ game: {len(game_pids)} PIDs detected", "ok")
             metric_sig.emit("game_pids", game_pids)
-            # Game đã chạy từ trước khi bấm Boost — apply nice(-10) ngay tại
-            # đây (best-effort, không nâng quyền). Watcher (khởi tạo sau, ở
-            # dưới) chỉ còn lo phần game mở SAU khi Boost đã bật.
-            boosted = 0
-            try:
-                import psutil as _psu
-                for pid in game_pids[:8]:
-                    try:
-                        p = _psu.Process(pid)
-                        if p.nice() > -10:
-                            p.nice(-10)
-                            boosted += 1
-                    except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied):
-                        pass
-            except ImportError:
-                pass
-
-            game_name_for_log = _running_games[0][1] if _running_games else "game"
-            if boosted:
-                log(
-                    f"│  ★ Game detected: {game_name_for_log} ({len(game_pids)} PIDs) — applying priority boost",
-                    "head"
-                )
-                log(f"│  + {boosted} game threads → nice(-10)", "ok")
-            else:
-                log(f"│  ◈ game: {game_name_for_log} detected", "mute")
         else:
-            log("│  ◈ no game — watcher applies boost on launch", "mute")
-
-        mesa_ok = os.environ.get("mesa_glthread") == "true"
-        log(f"│  ◈ mesa_glthread: {'SET' if mesa_ok else 'NOT SET → will apply'}", 
-            "ok" if mesa_ok else "warn")
-        time.sleep(0.4)
+            log("│  ◈ no active game — watcher will boost on launch", "mute")
 
         # ── PHASE 1: APPLY ─────────────────────────────────────
         phase_sig.emit(1)
         log("│", "mute")
         log("├─ [2/3] APPLY ────────────────────────────", "head")
 
-        # 1. Free RAM (TRƯỚC TIÊN)
-        try:
-            from core.booster import free_ram
-            res = free_ram(log)  # free_ram() already logs its own result line
-            mb  = getattr(res, "mb_freed", 0) or 0
-            # Emit cho UI card hiển thị, nhưng KHÔNG log lại — free_ram() đã
-            # log đầy đủ rồi (kèm cả "now X MB available"). Log thêm ở đây
-            # từng tạo ra 2 dòng trùng nhau cho cùng 1 sự kiện.
-            # Ngưỡng > 10 phải khớp với ngưỡng trong free_ram() (booster.py),
-            # nếu không terminal log và card UI sẽ disagree với nhau khi
-            # freed nằm trong khoảng 6-10 MB.
-            metric_sig.emit("ram_freed_mb", mb if mb > 10 else -1)
-        except Exception as e:
-            log(f"│  ~ free_ram: {e}", "warn")
+        def _tlog(msg: str, lvl: str = "text"):
+            if msg.startswith("│"):
+                log(msg, lvl)
+            elif msg.startswith("  "):
+                log("│" + msg, lvl)
+            else:
+                log("│  " + msg, lvl)
 
-        # 2. CPU governor
+        if opts.get("ram", True):
+            try:
+                from core.booster import free_ram
+                res = free_ram(_tlog)
+                mb  = getattr(res, "mb_freed", 0) or 0
+                metric_sig.emit("ram_freed_mb", mb if mb > 10 else -1)
+            except Exception as e:
+                log(f"│  ~ free_ram: {e}", "warn")
+
+        if opts.get("gov", True):
+            try:
+                from core.booster import (
+                    _enable_kernel_performance, _set_io_scheduler,
+                    _inhibit_screensaver, _set_gpu_performance,
+                    _kill_runaway_widgets, _timer_resolution_set,
+                    _disable_gamedvr, _bypass_compositor_on,
+                )
+                new_pwr = _enable_kernel_performance(_tlog)
+                if not saved.get("power"):
+                    saved["power"] = new_pwr
+                if IS_LINUX:
+                    _set_io_scheduler(_tlog, saved)
+                    _inhibit_screensaver(_tlog, saved)
+                    _kill_runaway_widgets(_tlog)
+                    if not game_pids:
+                        _set_gpu_performance(_tlog, saved)
+                    if not os.environ.get("WAYLAND_DISPLAY"):
+                        _bypass_compositor_on(_tlog, saved)
+                elif IS_WINDOWS:
+                    t_set = _timer_resolution_set(_tlog)
+                    saved["timer_set"] = bool(saved.get("timer_set") or t_set)
+                    dvr_orig = _disable_gamedvr(_tlog)
+                    if saved.get("gamedvr_orig") is None:
+                        saved["gamedvr_orig"] = dvr_orig
+                    _bypass_compositor_on(_tlog, saved)
+            except Exception as e:
+                log(f"│  ~ governor/system tune: {e}", "warn")
+
         if IS_LINUX:
             try:
-                from core.booster import _enable_kernel_performance
-                saved["power"] = _enable_kernel_performance(log)
-            except Exception: pass
-
-        # 3. Mesa GL threading (tác động lớn nhất với iGPU)
-        if IS_LINUX:
+                legacy_env = Path.home() / ".config/environment.d/cyber-boost.conf"
+                legacy_env.unlink(missing_ok=True)
+            except OSError:
+                pass
             env_vars = {
                 "mesa_glthread":               "true",
-                "MESA_NO_ERROR":               "1",
-                "RADV_PERFTEST":               "nosam,rt",
                 "__GL_THREADED_OPTIMIZATIONS": "1",
-                "MESA_DEBUG":                  "0",
             }
+            env_orig = {}
             for k, v in env_vars.items():
+                env_orig[k] = os.environ.get(k)
                 os.environ[k] = v
-            env_f = Path.home() / ".config/environment.d/cyber-boost.conf"
-            try:
-                env_f.parent.mkdir(parents=True, exist_ok=True)
-                env_f.write_text(
-                    "# CyberClean gaming env\n" +
-                    "\n".join(f"{k}={v}" for k, v in env_vars.items()) + "\n"
-                )
-                saved["mesa_env_file"] = str(env_f)
-            except OSError: pass
-            log("│  + mesa_glthread=true MESA_NO_ERROR=1", "ok")
-            log("│  i relaunch Sober for GL threading to take effect", "mute")
+            saved["env_orig"] = env_orig
+            log("│  + GL threaded optimizations enabled (session-scoped)", "ok")
 
-        # 4. Compositor VFR unlock
-        if IS_LINUX and shutil.which("hyprctl"):
+        if IS_LINUX and opts.get("hypr", True) and shutil.which("hyprctl"):
             try:
-                subprocess.run(["hyprctl","keyword","misc:vfr","false"],
+                if "hyprland_vfr_orig" not in saved:
+                    saved["hyprland_vfr_orig"] = _hyprctl_get_bool("misc:vfr", "true")
+                if "hyprland_scanout_orig" not in saved:
+                    saved["hyprland_scanout_orig"] = _hyprctl_get_bool("misc:no_direct_scanout", "true")
+                subprocess.run(["hyprctl", "keyword", "misc:vfr", "false"],
                                capture_output=True, timeout=3)
-                subprocess.run(["hyprctl","keyword","misc:no_direct_scanout","false"],
+                subprocess.run(["hyprctl", "keyword", "misc:no_direct_scanout", "false"],
                                capture_output=True, timeout=3)
                 saved["hyprland_vfr"] = True
-                log("│  + Hyprland: VFR disabled, direct scanout on", "ok")
-            except (OSError, subprocess.TimeoutExpired): pass
+                log(
+                    f"│  + Hyprland: VFR=false, no_direct_scanout=false "
+                    f"(saved orig: vfr={saved['hyprland_vfr_orig']}, scanout={saved['hyprland_scanout_orig']})",
+                    "ok"
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
-        # 5. vm.swappiness = 1
-        if IS_LINUX:
+        if IS_LINUX and opts.get("swap", True):
             sw = Path("/proc/sys/vm/swappiness")
-            # FIX: always read the REAL current value first — this is a
-            # read-only operation that needs no elevated privilege, so it
-            # never fails for the reason the write below might. Without
-            # this, the helper fallback path used to hardcode "60" as a
-            # guessed "original" value, permanently overwriting whatever
-            # the user's real swappiness was (often 1, 10, or 100
-            # depending on distro/tuning) the next time Boost was turned
-            # off.
             real_orig = None
             try:
                 real_orig = sw.read_text().strip()
@@ -1207,75 +2020,82 @@ class GameBoostPage(QWidget):
 
             try:
                 sw.write_text("1")
-                saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
+                if not saved.get("swappiness_orig"):
+                    saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
                 log("│  + vm.swappiness → 1 (game pages stay in RAM)", "ok")
             except (PermissionError, OSError):
                 try:
                     from core import privileged as _PRIV
                     r = _PRIV.run_helper("swappiness", timeout=5, use_pkexec=False)
                     if r.ok:
-                        saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
+                        if not saved.get("swappiness_orig"):
+                            saved["swappiness_orig"] = real_orig if real_orig is not None else "60"
                         log("│  + vm.swappiness → 10 (via helper)", "ok")
                 except Exception:
                     pass
 
-        # 6. nice(-10) game, nice(+5) background
-        # FIX: only deprioritize background processes if we actually have
-        # a game to prioritize over them. Previously this ran unconditionally
-        # even when game_pids was empty (game not launched yet — watcher
-        # will catch it later), which meant every other app on the desktop
-        # (browser, editor, everything) got nice(+5)'d for no benefit at
-        # all during the "waiting for game" period. The watcher thread's
-        # _on_game_found already re-applies game-priority boost once a
-        # real game PID shows up, so nothing is lost by waiting.
         bg_count = 0
-        if game_pids:
+        if opts.get("prio", True) and game_pids and HAS_PSUTIL:
             try:
                 import psutil as _psu
                 uid = os.getuid() if IS_LINUX else -1
-                SKIP = {"kwin_wayland","kwin","hyprland","sway","pipewire","wireplumber",
-                        "dbus-daemon","systemd","fcitx","fcitx5","ibus","discord",
-                        "firefox","chrome","cyberclean","python","python3"}
+                skip_set = _get_boost_skip_set()
+                game_pid_set = set(game_pids)
 
                 for pid in game_pids[:8]:
                     try:
                         p = _psu.Process(pid)
-                        o = p.nice()
-                        if o > -10:
-                            p.nice(-10)
-                            saved.setdefault("game_nice", {})[pid] = o
-                    except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied): pass
+                        _apply_game_nice(p, pid, saved)
+                    except (_psu.NoSuchProcess, _psu.AccessDenied, ValueError, OSError):
+                        pass
 
-                for p in _psu.process_iter(["pid","name"]):
+                if IS_LINUX:
                     try:
-                        nm = (p.info["name"] or "").lower().replace(".exe","")
-                        if nm in SKIP or p.pid in game_pids:
-                            continue
-                        # uid check — bỏ qua nếu không lấy được uid
+                        from core.booster import _pin_game_to_perf_cores
+                        _pin_game_to_perf_cores(game_pids[:8], log, saved)
+                    except Exception:
+                        pass
+
+                for p in _psu.process_iter(["pid", "name"]):
+                    try:
                         if IS_LINUX and uid >= 0:
                             try:
-                                if p.uids().real != uid: continue
+                                if p.uids().real != uid:
+                                    continue
                             except (_psu.NoSuchProcess, _psu.AccessDenied):
                                 continue
+                        if _should_skip_bg_proc(p, skip_set, game_pid_set):
+                            continue
                         o = p.nice()
-                        if o < 5:
-                            p.nice(5)
-                            saved.setdefault("bg_nice", {})[p.pid] = o
-                            bg_count += 1
-                    except (_psu.NoSuchProcess, _psu.AccessDenied): pass
+                        if IS_WINDOWS:
+                            if o == _psu.NORMAL_PRIORITY_CLASS:
+                                p.nice(_psu.BELOW_NORMAL_PRIORITY_CLASS)
+                                saved.setdefault("bg_nice", {})[p.pid] = _record_proc_nice_entry(p, o)
+                                bg_count += 1
+                        else:
+                            if o < 5:
+                                from core.booster import _can_restore_linux_nice
+                                if not _can_restore_linux_nice(o):
+                                    continue
+                                p.nice(5)
+                                saved.setdefault("bg_nice", {})[p.pid] = _record_proc_nice_entry(p, o)
+                                bg_count += 1
+                    except (PermissionError, _psu.NoSuchProcess, _psu.AccessDenied, ValueError, OSError):
+                        pass
 
-                log(f"│  + {bg_count} background → nice(+5)", "ok")
+                bg_lbl = "BELOW_NORMAL" if IS_WINDOWS else "nice(+5)"
+                log(f"│  + {bg_count} background → {bg_lbl}", "ok")
                 metric_sig.emit("bg_count", bg_count)
-
-            except ImportError: pass
-        else:
-            log("│  i no game yet — background priority left untouched", "mute")
-            log("│    → watcher will apply nice(+5) once a game actually launches", "mute")
+            except ImportError:
+                pass
+        elif opts.get("prio", True):
+            log("│  i no game yet — background priority left untouched until launch", "mute")
 
         saved["game_pids"] = game_pids
+        _save_boost_state_disk(saved)
         log("│", "mute")
         log("└─ BOOST ACTIVE ───────────────────────────", "head")
 
-        # ── PHASE 2: MONITOR (GpuMonitorThread handles this) ──
+        # ── PHASE 2: MONITOR ───────────────────────────────────
         phase_sig.emit(2)
         return saved

@@ -45,7 +45,7 @@ fi
 if [[ "$1" == "--uninstall" ]]; then
     section "Uninstalling CyberClean"
     rm -f "$BIN"           && ok "Removed $BIN"
-    rm -rf /opt/CyberClean && ok "Removed /opt/CyberClean"
+    rm -rf --one-file-system -- "$INSTALL_DIR" && ok "Removed $INSTALL_DIR"
     rm -f "$ICON_DEST"     2>/dev/null || true
     rm -f "$DESKTOP_DEST"  && ok "Removed desktop entry"
     rm -f "$HELPER"        2>/dev/null || true
@@ -174,8 +174,16 @@ ok "Installed → $INSTALL_DIR"
 section "Creating command"
 cat > "$BIN" << LAUNCHER
 #!/bin/bash
+set -e
 if [[ "\$1" == "--uninstall" ]]; then
-    curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo bash -s -- --uninstall
+    if [[ \$EUID -ne 0 ]]; then
+        exec sudo "\$0" --uninstall
+    fi
+    rm -f -- "$BIN" "$ICON_DEST" "$DESKTOP_DEST" "$HELPER" "$SUDOERS_FILE" /usr/share/polkit-1/actions/com.nc2077.cyberclean.policy 2>/dev/null || true
+    rm -rf --one-file-system -- "$INSTALL_DIR" 2>/dev/null || true
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+    echo "  ✅ CyberClean uninstalled successfully."
+    exit 0
 else
     exec "$INSTALL_DIR/CyberClean/CyberClean" "\$@"
 fi

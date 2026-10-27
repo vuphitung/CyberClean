@@ -28,7 +28,10 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ui_widgets import C, MONO, UI, _btn, _t
+from ui_widgets import (
+    C, MONO, UI, _btn, _t, is_dark_theme,
+    EmptyStateBinder, ElevatedCard, apply_elevation_shadow, _global_check_icon_path,
+)
 from utils.sysinfo import fmt_size
 from core.engine import fmt_age
 
@@ -36,9 +39,9 @@ RISK_COLOR = {'low': 'green', 'medium': 'yellow', 'high': 'red'}
 
 # Màu theo danh mục của Advisor (đủ khác nhau để thanh tỷ lệ đọc được)
 CAT_COLORS = {
-    'vm': C['purple'], 'games': '#34D399', 'containers': C['cyan'], 'wsl': C['cyan2'],
-    'windows': C['yellow'], 'projects': '#FF9F43', 'packages': '#5DA9FF', 'opt': '#F472B6',
-    'downloads': '#A3E635', 'large': '#FB7185', 'info': C['dim'],
+    'vm': C['purple'], 'games': '#10B981', 'containers': C['cyan'], 'wsl': C['cyan2'],
+    'windows': C['yellow'], 'projects': '#F59E0B', 'packages': '#3B82F6', 'opt': '#EC4899',
+    'downloads': '#84CC16', 'large': '#F43F5E', 'info': C['dim'],
 }
 
 
@@ -78,7 +81,7 @@ def _risk_text(risk: str) -> str:
 
 
 def _rgba(hexcolor: str, alpha: float) -> str:
-    """'#RRGGBB' + độ trong suốt → 'rgba(r,g,b,a)'. (Qt hiểu '#RRGGBBAA' là ARGB nên '{màu}40' KHÔNG phải 25% trong suốt.)"""
+    """'#RRGGBB' + độ trong suốt → 'rgba(r,g,b,a)'."""
     h = hexcolor.lstrip('#')
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f'rgba({r},{g},{b},{alpha:.2f})'
@@ -93,30 +96,9 @@ _CHECK_ICON = None
 
 
 def _check_icon() -> str:
-    """
-    PNG dấu tick (màu nền tối) cho ô chọn trong bảng. QSS chỉ nhận ảnh cho `::indicator:checked`, không tự vẽ
-    được dấu tick — nên ô chưa chọn là ô viền cyan, ô đã chọn là ô đặc có dấu tick: nhìn là biết.
-    """
+    """PNG dấu tick theo theme hiện tại cho ô chọn trong bảng."""
     global _CHECK_ICON
-    if _CHECK_ICON and os.path.exists(_CHECK_ICON):
-        return _CHECK_ICON
-    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation) or tempfile.gettempdir()
-    d = os.path.join(base, 'cyberclean-ui')
-    try:
-        os.makedirs(d, exist_ok=True)
-    except OSError:
-        d = tempfile.gettempdir()
-    path = os.path.join(d, 'check-v1.png')
-    if not os.path.exists(path):
-        pm = QPixmap(32, 32)
-        pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(C['bg']), 4.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.drawPolyline(QPolygonF([QPointF(8, 17), QPointF(14, 23), QPointF(24, 10)]))
-        p.end()
-        pm.save(path, 'PNG')
-    _CHECK_ICON = path.replace('\\', '/')
+    _CHECK_ICON = _global_check_icon_path()
     return _CHECK_ICON
 
 
@@ -157,7 +139,6 @@ class TwoLineDelegate(QStyledItemDelegate):
         p.setPen(tcol)
         p.drawText(left, y + fm1.ascent(), fm1.elidedText(title, Qt.TextElideMode.ElideMiddle, width))
         if note and index.data(self.ROLE_WRAP):
-            # lời cảnh báo quan trọng phải đọc được TRỌN VẸN trước khi người dùng tick
             p.setClipRect(r)
             p.setFont(f2)
             p.setPen(ncol)
@@ -203,13 +184,16 @@ class Callout(QFrame):
         super().__init__(parent)
         self.setObjectName('callout')
         col = C[color]
+        bg_fill = C.get(color + '_dim', _rgba(col, 0.08))
+        if is_dark_theme():
+            bg_fill = _rgba(col, 0.09)
         self.setStyleSheet(
-            f'QFrame#callout{{background:{_rgba(col, 0.07)};border:1px solid {_rgba(col, 0.30)};border-radius:{C["radius"]};}}')
+            f'QFrame#callout{{background:{bg_fill};border:1px solid {_rgba(col, 0.35)};border-radius:{C["radius"]};}}')
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 9, 14, 9)
+        lay.setContentsMargins(14, 9, 14, 9)
         lay.setSpacing(10)
         self._glyph = QLabel(glyph)
-        self._glyph.setStyleSheet(_plain(f'color:{col};font-size:15px;'))
+        self._glyph.setStyleSheet(_plain(f'color:{col};font-size:15px;font-weight:700;'))
         self.label = QLabel(text)
         self.label.setWordWrap(True)
         self.label.setStyleSheet(_plain(f'color:{C["text2"]};font-size:12px;font-family:{UI};'))
@@ -320,15 +304,16 @@ class TargetCard(QFrame):
         self.setProperty('selected', False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         accent = C['red'] if target.safety == 'danger' else C['yellow']
+        sel_bg = _rgba(C['cyan'], 0.10) if is_dark_theme() else C['cyan_dim']
         self.setStyleSheet(
             f'QFrame#tcard{{background:{C["bg2"]};border:1px solid {C["border2"]};'
-            f'border-left:3px solid {_rgba(accent, 0.70)};border-radius:{C["radius"]};}}'
+            f'border-left:3.5px solid {_rgba(accent, 0.78)};border-radius:{C["radius"]};}}'
             f'QFrame#tcard:hover{{background:{C["bg3"]};border-color:{C["border3"]};'
-            f'border-left:3px solid {accent};}}'
-            f'QFrame#tcard[selected="true"]{{background:{_rgba(C["cyan"], 0.08)};border:1px solid {_rgba(C["cyan"], 0.55)};'
-            f'border-left:3px solid {C["cyan"]};}}')
+            f'border-left:3.5px solid {accent};}}'
+            f'QFrame#tcard[selected="true"]{{background:{sel_bg};border:1px solid {_rgba(C["cyan"], 0.65)};'
+            f'border-left:3.5px solid {C["cyan"]};}}')
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setContentsMargins(13, 10, 13, 10)
         lay.setSpacing(10)
         txt = QVBoxLayout()
         txt.setSpacing(2)
@@ -380,7 +365,7 @@ class TargetCard(QFrame):
         self._size.setText(txt)
         self._size.setStyleSheet(_plain(f'color:{col};' + size_css))
         self._state.setText(st)
-        self._state.setStyleSheet(_plain(f'color:{C["dim"]};font-size:9px;letter-spacing:1px;font-weight:700;'
+        self._state.setStyleSheet(_plain(f'color:{C["dim"]};font-size:9px;letter-spacing:0.8px;font-weight:700;'
                                          f'font-family:{UI};'))
 
     def mousePressEvent(self, ev):
@@ -393,13 +378,13 @@ class TargetCard(QFrame):
 # DEEP CLEAN — panel chi tiết bên phải
 # ══════════════════════════════════════════════════════════════
 
-class ReviewPanel(QFrame):
+class ReviewPanel(ElevatedCard):
     scanned = pyqtSignal(str, object, str)       # tid, ReviewScan | None, lỗi
     cleaned = pyqtSignal(object, object)         # target, CleanResult
     busyChanged = pyqtSignal(bool)
 
     def __init__(self, cleaner, parent=None):
-        super().__init__(parent)
+        super().__init__(shadow=True, parent=parent)
         self._cl = cleaner
         self._t = None
         self._scan = None
@@ -408,21 +393,20 @@ class ReviewPanel(QFrame):
         self._deleting = False
         self._updating = False
         self.setObjectName('panel')
-        self.setStyleSheet(
-            f'QFrame#panel{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:10px;}}')
         outer = QStackedLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
         # ── trang 0: chưa chọn danh mục ──
         empty = QWidget()
+        empty.setStyleSheet('background:transparent;')
         el = QVBoxLayout(empty)
         el.addStretch()
-        self._empty_icon = QLabel('☰')
+        self._empty_icon = QLabel('◈')
         self._empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_icon.setStyleSheet(_plain(f'color:{C["dim"]};font-size:40px;'))
+        self._empty_icon.setStyleSheet(_plain(f'color:{C["cyan"]};font-size:38px;'))
         self._empty_title = QLabel(_t('deep_pick', 'Pick a category on the left'))
         self._empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_title.setStyleSheet(_plain(f'color:{C["text2"]};font-size:16px;font-weight:700;font-family:{UI};'))
+        self._empty_title.setStyleSheet(_plain(f'color:{C["text"]};font-size:16px;font-weight:700;font-family:{UI};'))
         self._empty_hint = QLabel(_t('deep_pick_hint', 'CyberClean lists every item inside it — you tick exactly what should go.'))
         self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_hint.setWordWrap(True)
@@ -434,6 +418,7 @@ class ReviewPanel(QFrame):
 
         # ── trang 1: nội dung ──
         body = QWidget()
+        body.setStyleSheet('background:transparent;')
         vl = QVBoxLayout(body)
         vl.setContentsMargins(18, 16, 18, 14)
         vl.setSpacing(8)
@@ -465,13 +450,14 @@ class ReviewPanel(QFrame):
         self._sel_safe_btn.clicked.connect(self._select_safe)
         self._sel_none_btn.clicked.connect(self._select_none)
         self._summary = QLabel('')
-        self._summary.setStyleSheet(_plain(f'color:{C["green"]};font-size:12px;font-family:{MONO};'))
+        self._summary.setStyleSheet(_plain(f'color:{C["green"]};font-size:12px;font-family:{MONO};font-weight:700;'))
         tools.addWidget(self._sel_safe_btn)
         tools.addWidget(self._sel_none_btn)
         tools.addStretch()
         tools.addWidget(self._summary)
         vl.addLayout(tools)
 
+        well_bg = C.get('well_bg', C['bg'])
         self._table = QTableWidget(0, 5)
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(46)
@@ -481,14 +467,14 @@ class ReviewPanel(QFrame):
         self._table.setShowGrid(False)
         self._table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._table.setStyleSheet(
-            f'QTableWidget{{background:{C["bg"]};color:{C["text"]};border:1px solid {C["border2"]};'
+            f'QTableWidget{{background:{well_bg};color:{C["text"]};border:1px solid {C["border2"]};'
             f'border-radius:{C["radius"]};font-family:{UI};font-size:12px;}}'
             f'QTableWidget::item{{padding:4px 8px;border-bottom:1px solid {C["border"]};}}'
             f'QHeaderView::section{{background:{C["bg3"]};color:{C["text3"]};border:none;'
-            f'border-bottom:1px solid {C["border2"]};padding:7px 8px;font-family:{MONO};'
+            f'border-bottom:1px solid {C["border2"]};padding:8px 10px;font-family:{MONO};'
             f'font-size:10px;letter-spacing:1px;font-weight:700;}}'
             f'QTableCornerButton::section{{background:{C["bg3"]};border:none;}}'
-            f'QTableWidget::indicator{{width:16px;height:16px;border:2px solid {_rgba(C["cyan"], 0.55)};'
+            f'QTableWidget::indicator{{width:16px;height:16px;border:2px solid {_rgba(C["cyan"], 0.60)};'
             f'border-radius:4px;background:transparent;}}'
             f'QTableWidget::indicator:hover{{border-color:{C["cyan"]};}}'
             f'QTableWidget::indicator:checked{{background:{C["cyan"]};border-color:{C["cyan"]};'
@@ -499,6 +485,13 @@ class ReviewPanel(QFrame):
                                     QHeaderView.ResizeMode.ResizeToContents)):
             hh.setSectionResizeMode(col, mode)
         self._table.itemChanged.connect(self._on_item_changed)
+        # Centered Empty State Overlay so 0-item categories (like empty Trash) never show a giant empty black box!
+        self._table_empty = EmptyStateBinder(
+            self._table,
+            _t('state_clean', 'Danh mục này đã sạch'),
+            _t('review_nothing', 'Không có mục nào cần xem lại ở đây.'),
+            icon_char='✓',
+        )
         vl.addWidget(self._table, 1)
         self._retitle_columns()
 
@@ -507,7 +500,7 @@ class ReviewPanel(QFrame):
         self._result.setMaximumHeight(92)
         self._result.setVisible(False)
         self._result.setStyleSheet(
-            f'QTextEdit{{background:{C["bg"]};color:{C["text2"]};border:1px solid {C["border2"]};'
+            f'QTextEdit{{background:{well_bg};color:{C["text2"]};border:1px solid {C["border2"]};'
             f'border-radius:{C["radius"]};font-family:{MONO};font-size:11px;padding:6px;}}')
         vl.addWidget(self._result)
 
@@ -549,9 +542,23 @@ class ReviewPanel(QFrame):
         self._rescan_btn.setText(_t('btn_rescan', 'RESCAN'))
         self._del_btn.setText(f"✕  {_t('btn_delete_selected', 'DELETE SELECTED')}")
         self._retitle_columns()
+        if hasattr(self, '_table_empty'):
+            self._table_empty.set_copy(
+                _t('state_clean', 'Danh mục này đã sạch'),
+                _t('review_nothing', 'Không có mục nào cần xem lại ở đây.'),
+            )
         if self._t is not None:
             self._title.setText(_t(f'tgt_{self._t.id}_name', self._t.name) + (' [ROOT]' if self._t.needs_root else ''))
             self._desc.setText(_t(f'tgt_{self._t.id}_desc', self._t.desc))
+            if self._scan is not None and not self._busy:
+                if self._scan.target_id in ('empty_trash', 'win_recycle') and self._scan.warning:
+                    self._warn.setText(_t('warn_trash', self._scan.warning))
+                checked_ids = {i.id for i in self._checked()}
+                notes = '  ·  '.join(self._scan.notes)
+                self._status.setText(notes if notes else ('' if self._scan.items else _t('review_nothing', 'Nothing to review here.')))
+                self._fill(self._scan)
+                if checked_ids:
+                    self._set_all(lambda it: it.id in checked_ids)
             self._update_summary()
 
     def _retitle_columns(self):
@@ -584,7 +591,6 @@ class ReviewPanel(QFrame):
         self._worker.start()
 
     def shutdown(self):
-        """Đóng app: chờ quét xong; nếu đang XÓA thì chờ lâu hơn — cắt ngang giữa chừng tệ hơn là chờ."""
         w = self._worker
         if w is not None and w.isRunning():
             w.wait(20000 if self._deleting else 5000)
@@ -614,7 +620,7 @@ class ReviewPanel(QFrame):
 
     def _on_scan(self, tid: str, scan):
         if self._t is None or tid != self._t.id:
-            return                                         # đã chuyển sang danh mục khác
+            return
         self._show_scan(scan)
 
     def _show_scan(self, scan):
@@ -622,7 +628,8 @@ class ReviewPanel(QFrame):
         self._deleting = False
         self._set_busy(False)
         if scan.warning:
-            self._warn.setText(scan.warning)
+            warn_txt = _t('warn_trash', scan.warning) if scan.target_id in ('empty_trash', 'win_recycle') else scan.warning
+            self._warn.setText(warn_txt)
             self._warn.setVisible(True)
         else:
             self._warn.setVisible(False)
@@ -644,11 +651,12 @@ class ReviewPanel(QFrame):
                     chk.setFlags(Qt.ItemFlag.NoItemFlags)
                 else:
                     chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-                    chk.setCheckState(Qt.CheckState.Unchecked)           # KHÔNG BAO GIỜ tick sẵn
+                    chk.setCheckState(Qt.CheckState.Unchecked)
                 chk.setData(Qt.ItemDataRole.UserRole, it.id)
                 self._table.setItem(r, 0, chk)
                 shown = it.blocked or (_t('rn_' + it.payload['rule'], it.detail) if it.payload.get('rule') else it.detail)
-                name = QTableWidgetItem(('🔒 ' if it.blocked else '') + it.label)
+                prefix = '🔒 ' if it.blocked else ('🗑 ' if scan.target_id == 'empty_trash' else '')
+                name = QTableWidgetItem(prefix + it.label)
                 name.setToolTip((it.payload.get('path') or it.label) + (f'\n{shown}' if shown else ''))
                 name.setData(TwoLineDelegate.ROLE_NOTE, shown)
                 name.setData(TwoLineDelegate.ROLE_TCOL, C['dim'] if it.blocked else C['text'])
@@ -657,7 +665,8 @@ class ReviewPanel(QFrame):
                 wrap = bool(it.blocked or it.risk == 'high')
                 name.setData(TwoLineDelegate.ROLE_WRAP, wrap)
                 self._table.setRowHeight(r, 64 if wrap else 46)
-                size = QTableWidgetItem(fmt_size(it.size) if it.size else '—')
+                size_txt = fmt_size(it.size) if (it.size or scan.target_id == 'empty_trash') else '—'
+                size = QTableWidgetItem(size_txt)
                 size.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 age = QTableWidgetItem(fmt_age(it.newest, now) if it.newest else '—')
                 risk = QTableWidgetItem(_risk_text(it.risk))
@@ -672,6 +681,8 @@ class ReviewPanel(QFrame):
                     self._table.setItem(r, col, cell)
         finally:
             self._updating = False
+        if hasattr(self, '_table_empty'):
+            self._table_empty.sync()
         self._update_summary()
 
     # ── lựa chọn ────────────────────────────────────────────
@@ -732,7 +743,7 @@ class ReviewPanel(QFrame):
         box.setText('\n'.join(lines))
         box.setIcon(QMessageBox.Icon.Warning)
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)            # Enter mặc định = HỦY
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         box.button(QMessageBox.StandardButton.Yes).setText(f"✕ {_t('btn_delete_selected', 'DELETE SELECTED')}")
         box.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};font-family:{MONO};')
         return box.exec() == QMessageBox.StandardButton.Yes
@@ -819,7 +830,7 @@ class DeepCleanPage(QWidget):
         left.addLayout(head)
         self._total = QLabel('')
         self._total.setWordWrap(True)
-        self._total.setStyleSheet(f'color:{C["yellow"]};font-size:12px;font-family:{MONO};')
+        self._total.setStyleSheet(f'color:{C["yellow"]};font-size:12px;font-family:{MONO};font-weight:700;')
         left.addWidget(self._total)
 
         scroll = QScrollArea()
@@ -840,10 +851,12 @@ class DeepCleanPage(QWidget):
         il.addStretch()
         scroll.setWidget(inner)
         left.addWidget(scroll, 1)
-        leftw = QWidget()
-        leftw.setLayout(left)
-        leftw.setFixedWidth(340)
-        body.addWidget(leftw)
+        self._left_col = QWidget()
+        self._left_col.setLayout(left)
+        self._left_col.setMinimumWidth(240)
+        self._left_col.setMaximumWidth(340)
+        self._left_col.setFixedWidth(320)
+        body.addWidget(self._left_col)
 
         # ── phải: chi tiết ──
         self._panel = ReviewPanel(cleaner)
@@ -931,7 +944,6 @@ class DeepCleanPage(QWidget):
         for tid, card in self._cards.items():
             if tid not in self._scans and card._kind == 'scanning':
                 card.set_state('idle')
-        # danh mục đang mở: đồng bộ lại với kết quả quét mới nhất
         if self._current and self._current in self._scans and not self._panel.busy:
             self._panel.set_target(self._cards[self._current].target, self._scans[self._current][1])
 
@@ -949,6 +961,12 @@ class DeepCleanPage(QWidget):
             c.retranslate()
         self._panel.retranslate()
         self._refresh_total()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if hasattr(self, '_left_col'):
+            w = self.width()
+            self._left_col.setFixedWidth(250 if w < 860 else (290 if w < 1020 else 330))
 
     def shutdown(self):
         if self._all_worker is not None and self._all_worker.isRunning():
@@ -993,11 +1011,10 @@ class ShareBar(QWidget):
             x += seg + gap
 
 
-class _Tile(QFrame):
+class _Tile(ElevatedCard):
     def __init__(self, label: str, color: str = 'cyan', parent=None):
-        super().__init__(parent)
+        super().__init__(top_accent=C[color], shadow=True, parent=parent)
         self.setObjectName('tile')
-        self.setStyleSheet(f'QFrame#tile{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:{C["radius"]};}}')
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12)
         lay.setSpacing(2)
@@ -1049,7 +1066,7 @@ class _FindingRow(QFrame):
         self.open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_btn.setToolTip(_t('btn_open_folder', 'OPEN FOLDER'))
         self.open_btn.setStyleSheet(
-            f'QPushButton{{color:{C["cyan"]};border:1px solid {_rgba(C["cyan"], 0.30)};border-radius:6px;background:transparent;}}'
+            f'QPushButton{{color:{C["cyan"]};border:1px solid {_rgba(C["cyan"], 0.35)};border-radius:6px;background:transparent;}}'
             f'QPushButton:hover{{background:{_rgba(C["cyan"], 0.14)};}}'
             f'QPushButton:disabled{{color:{C["dim"]};border-color:{C["border2"]};}}')
         self._folder = f.open_path or (os.path.dirname(f.path) if f.path else '')
@@ -1134,10 +1151,9 @@ class AdvisorPage(QWidget):
         intro = QWidget()
         il = QVBoxLayout(intro)
         il.addStretch()
-        box = QFrame()
+        box = ElevatedCard(accent_color=C['purple'], shadow=True)
         box.setObjectName('intro')
         box.setMaximumWidth(620)
-        box.setStyleSheet(f'QFrame#intro{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:12px;}}')
         bl = QVBoxLayout(box)
         bl.setContentsMargins(30, 26, 30, 26)
         bl.setSpacing(8)
@@ -1280,9 +1296,8 @@ class AdvisorPage(QWidget):
 
         # ── thanh tỷ lệ + chú thích ──
         if cats:
-            share_card = QFrame()
+            share_card = ElevatedCard(shadow=True)
             share_card.setObjectName('share')
-            share_card.setStyleSheet(f'QFrame#share{{background:{C["bg2"]};border:1px solid {C["border2"]};border-radius:{C["radius"]};}}')
             sl = QVBoxLayout(share_card)
             sl.setContentsMargins(16, 14, 16, 14)
             sl.setSpacing(10)
@@ -1304,10 +1319,8 @@ class AdvisorPage(QWidget):
         # ── thẻ danh mục ──
         for cat, total, findings in [(c, sum(f.size for f in fs), fs) for c, fs in groups.items()]:
             color = CAT_COLORS.get(cat, C['text3'])
-            card = QFrame()
+            card = ElevatedCard(accent_color=color, shadow=False)
             card.setObjectName('cat')
-            card.setStyleSheet(f'QFrame#cat{{background:{C["bg2"]};border:1px solid {C["border2"]};'
-                               f'border-left:3px solid {color};border-radius:{C["radius"]};}}')
             cl = QVBoxLayout(card)
             cl.setContentsMargins(0, 0, 0, 4)
             cl.setSpacing(0)

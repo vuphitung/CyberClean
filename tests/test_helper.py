@@ -55,10 +55,28 @@ class Box:
 
     def _fake_cmds(self):
         rec = f'echo "$(basename "$0") $*" >> {self.calls}'
-        for name in ("apt-get", "dnf", "zypper", "snap", "journalctl", "fstrim"):
+        for name in ("snap", "journalctl", "fstrim"):
             self._script(name, rec)
+        self._script("apt-get", textwrap.dedent(f'''
+            if [[ "$1" == "-s" ]]; then echo "Remv ${{!#}} [1.0]"; exit 0; fi
+            {rec}
+        '''))
+        self._script("dnf", textwrap.dedent(f'''
+            if [[ "$1" == "--assumeno" ]]; then printf "Removing:\n %s x86_64 1.0-1 @repo 1M\n" "${{!#}}"; exit 1; fi
+            {rec}
+        '''))
+        self._script("zypper", textwrap.dedent(f'''
+            if [[ "$*" == *"--dry-run"* ]]; then printf "The following package is going to be removed:\n  %s\n" "${{!#}}"; exit 0; fi
+            {rec}
+        '''))
         self._script("pacman", textwrap.dedent(f'''
             if [[ "$1" == "-Qdtq" ]]; then cat {self.orphans}; exit 0; fi
+            if [[ "$1" == "-Rsp" ]]; then
+                shift
+                [[ "${{1:-}}" == "--" ]] && shift
+                for p in "$@"; do echo "${{p}}-1.0-1"; done
+                exit 0
+            fi
             {rec}
         '''))
         self._script("paccache", rec)

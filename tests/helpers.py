@@ -45,3 +45,6 @@ class FakeGuards(Guards):
                     break
                 q = nq
         self._open_anc = anc
+
+    def psutil_available(self) -> bool:
+        return True

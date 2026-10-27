@@ -51,7 +51,7 @@ discover = [
 subpaths = [
   "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
   "GraphiteDawnCache", "GrShaderCache", "ShaderCache",
-  "Service Worker/CacheStorage", "Service Worker/ScriptCache",
+  "Service Worker/ScriptCache",
 ]
 # KHÔNG BAO GIỜ động tới (test tự kiểm tra không có subpath nào trùng danh sách này).
 never = [
@@ -203,7 +203,7 @@ os     = ["linux"]
 mode   = "tree"
 paths  = ["~/core", "/tmp/core.*"]
 min_age_days = 1
-note   = "raw core dump"
+note   = "raw core dump (verified ELF ET_CORE regular file only)"
 
 # ═══════════════════════════════ REVIEW ═════════════════════════════════════
 
@@ -317,6 +317,39 @@ mode = "contents"
 paths = ["~/.cache/ccache", "~/.ccache", "~/.cache/sccache"]
 risk = "medium"
 note = "ccache/sccache — the next build will be slower"
+
+[[rule]]
+id     = "chromium-service-worker-cache"
+target = "dev_cache"
+kind   = "chromium"
+os     = ["linux"]
+risk   = "medium"
+note   = "CAUTION: Service Worker CacheStorage may hold offline PWA/web-app data — never touches Cookies, IndexedDB, Local Storage or logins"
+user_data = [
+  "~/.config/google-chrome", "~/.config/google-chrome-beta", "~/.config/google-chrome-unstable",
+  "~/.config/chromium", "~/.config/microsoft-edge", "~/.config/microsoft-edge-beta",
+  "~/.config/microsoft-edge-dev", "~/.config/BraveSoftware/Brave-Browser", "~/.config/vivaldi",
+  "~/.config/opera", "~/.config/yandex-browser",
+  "~/.cache/google-chrome", "~/.cache/google-chrome-beta", "~/.cache/chromium",
+  "~/.cache/microsoft-edge", "~/.cache/BraveSoftware/Brave-Browser", "~/.cache/vivaldi", "~/.cache/opera",
+  "~/snap/chromium/common/chromium", "~/snap/chromium/common/.cache/chromium",
+  "~/.var/app/com.google.Chrome/config/google-chrome", "~/.var/app/com.google.Chrome/cache/google-chrome",
+  "~/.var/app/org.chromium.Chromium/config/chromium", "~/.var/app/org.chromium.Chromium/cache/chromium",
+  "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+  "~/.var/app/com.brave.Browser/cache/BraveSoftware/Brave-Browser",
+  "~/.var/app/com.microsoft.Edge/config/microsoft-edge", "~/.var/app/com.microsoft.Edge/cache/microsoft-edge",
+]
+discover = [
+  "~/.config/*", "~/.var/app/*/config/*", "~/.var/app/*/cache/*",
+  "~/snap/*/common/.config/*", "~/snap/*/common/.cache/*",
+]
+subpaths = ["Service Worker/CacheStorage"]
+never = [
+  "Cookies", "Local Storage", "IndexedDB", "Session Storage", "Login Data", "Web Data", "History",
+  "Preferences", "Secure Preferences", "Local State", "Extensions", "Extension State", "databases",
+  "leveldb", "Network", "Bookmarks", "Favicons", "Sync Data", "Storage", "File System",
+]
+min_age_days = 0
 
 [[target]]
 id    = "app_cache"

@@ -22,6 +22,7 @@ import os, time
 from . import engine as E
 
 TIERS = ('auto', 'review', 'advisor')
+NEVER_UNATTENDED_TARGETS = frozenset({'empty_trash', 'win_recycle', 'trash', 'recycle_bin'})
 
 
 @dataclass
@@ -42,6 +43,9 @@ class CleanTarget:
             raise ValueError(f'bad tier {self.tier!r}')
         if self.scheduled is None:
             self.scheduled = self.tier == 'auto'
+        if self.id in NEVER_UNATTENDED_TARGETS:
+            self.tier = 'review'
+            self.scheduled = False        # Trash / Recycle Bin NEVER run in auto or background
         if self.tier != 'auto':
             self.scheduled = False        # review / advisor NEVER run unattended
 
@@ -99,7 +103,9 @@ class BaseCleaner(ABC):
     # component-store analysis can take 10-40s on its own) and barely change
     # minute to minute, so they get a longer TTL via TTL_OVERRIDES.
     _estimate_cache: dict = {}   # {target_id: (timestamp, CleanResult)}
+    _approved_plans: dict = {}   # {target_id: E.Plan} — bound from preview/dry-run until executed or invalidated
     _CACHE_TTL = 60              # seconds — default
+    PLAN_TTL   = 3600            # seconds — max age of a previewed plan before requiring re-preview
 
     # Subclasses may override this to give specific targets a longer TTL.
     # e.g. {'win_winsxs': 900}  (15 min — DISM analyze is expensive & stable)
@@ -117,10 +123,40 @@ class BaseCleaner(ABC):
 
     def _cache_set(self, target_id: str, result) -> None:
         self._estimate_cache[target_id] = (time.monotonic(), result)
+        plan = getattr(result, "plan", None)
+        if plan is not None:
+            self.bind_approved_plan(target_id, plan)
+
+    def bind_approved_plan(self, target_id: str, plan: Optional["E.Plan"]) -> None:
+        """Bind a previewed/dry-run Plan so CLEAN NOW executes only the approved plan."""
+        if not hasattr(self, "_approved_plans") or self._approved_plans is BaseCleaner._approved_plans:
+            self._approved_plans = dict(getattr(self, "_approved_plans", {}))
+        if plan is not None:
+            self._approved_plans[target_id] = plan
+
+    def get_approved_plan(self, target_id: str) -> Tuple[Optional["E.Plan"], bool]:
+        """
+        Return (plan, is_expired).
+        - If an approved plan exists and is within PLAN_TTL: (plan, False)
+        - If an approved plan exists but is older than PLAN_TTL: (plan, True)
+        - Otherwise falls back to fresh _estimate_cache if available, or (None, False).
+        """
+        plans = getattr(self, "_approved_plans", {})
+        plan = plans.get(target_id)
+        if plan is None:
+            cached = self._cache_get(target_id)
+            plan = getattr(cached, "plan", None) if cached is not None else None
+        if plan is None:
+            return None, False
+        if (time.time() - getattr(plan, "created", 0)) > self.PLAN_TTL:
+            return plan, True
+        return plan, False
 
     def _cache_invalidate(self, target_id: str) -> None:
         """Call this after a real clean so next dry-run rescans fresh."""
         self._estimate_cache.pop(target_id, None)
+        if hasattr(self, "_approved_plans") and isinstance(self._approved_plans, dict):
+            self._approved_plans.pop(target_id, None)
 
     @abstractmethod
     def get_targets(self) -> List[CleanTarget]:
@@ -331,12 +367,40 @@ class PlanCleanerMixin:
     def has_rules(self, target_id: str) -> bool:
         return bool(self.ruleset and self.ruleset.rules_for(target_id, self.ctx))
 
-    def _execute(self, items: List["E.PlanItem"]) -> "E.ExecResult":
+    def _ensure_review_cache_dict(self) -> dict:
+        if not hasattr(self, '_review_cache') or self._review_cache is PlanCleanerMixin._review_cache:
+            self._review_cache = dict(getattr(self, '_review_cache', {}))
+        return self._review_cache
+
+    def _get_fresh_review_cache(self, target_id: str):
+        rc = self._ensure_review_cache_dict()
+        cached = rc.get(target_id)
+        if not cached:
+            return None
+        ts, payload = cached
+        if (time.monotonic() - ts) >= self.REVIEW_TTL:
+            rc.pop(target_id, None)
+            return None
+        return payload
+
+    def _expired_review_result(self, target_id: str, dry: bool) -> CleanResult:
+        r = CleanResult(target_id, dry=dry)
+        try:
+            from utils.i18n import _t as _tr
+        except Exception:
+            _tr = lambda k, d='': d
+        r.error = _tr(
+            'review_plan_expired',
+            'Review scan expired or is missing — please click Rescan and review the items again before deleting.',
+        )
+        return r
+
+    def _execute(self, items: List["E.PlanItem"], stop=None) -> "E.ExecResult":
         """Hook: cleaner con ghi đè để chạy thêm loại mục đặc biệt (vd. mục dùng helper root)."""
-        return E.execute_plan(items, guards=E.Guards(max_age=0))
+        return E.execute_plan(items, guards=E.Guards(max_age=0), stop=stop)
 
     # ── plan → CleanResult ──
-    def result_from_plan(self, target_id: str, plan: "E.Plan", *, dry: bool, label: str = '') -> CleanResult:
+    def result_from_plan(self, target_id: str, plan: "E.Plan", *, dry: bool, label: str = '', stop=None) -> CleanResult:
         r = CleanResult(target_id, dry=dry)
         items = plan.deletable
         r.notes = list(plan.notes)
@@ -352,7 +416,10 @@ class PlanCleanerMixin:
             return r
         meter = E.FreeSpaceMeter([i.path for i in items])
         meter.begin()
-        res = self._execute(items)
+        try:
+            res = self._execute(items, stop=stop)
+        except TypeError:
+            res = self._execute(items)
         measured = meter.end()
         if measured is not None:
             res.measured = measured
@@ -376,19 +443,37 @@ class PlanCleanerMixin:
         return {'time': stamp, 'type': label, 'path': it.display, 'size': size, 'note': note}
 
     def clean_rule_target(self, target_id: str, dry: bool, unattended: bool,
-                          plan: Optional["E.Plan"] = None, label: str = '') -> CleanResult:
-        if plan is None or (time.time() - plan.created) > 3600:
+                          plan: Optional["E.Plan"] = None, label: str = '', stop=None) -> CleanResult:
+        if not dry and not unattended and plan is None and hasattr(self, "get_approved_plan"):
+            bound_plan, expired = self.get_approved_plan(target_id)
+            if expired:
+                r = CleanResult(target_id, dry=False)
+                r.error = "Previewed plan expired — please run DRY-RUN or PREVIEW FILES again before cleaning"
+                return r
+            if bound_plan is not None:
+                plan = bound_plan
+        if plan is not None:
+            if (time.time() - getattr(plan, "created", 0)) > getattr(self, "PLAN_TTL", 3600):
+                if not dry:
+                    r = CleanResult(target_id, dry=False)
+                    r.error = "Previewed plan expired — please run DRY-RUN or PREVIEW FILES again before cleaning"
+                    return r
+                plan = self.build_plan(target_id, unattended=unattended)
+        else:
             plan = self.build_plan(target_id, unattended=unattended)
-        res = self.result_from_plan(target_id, plan, dry=dry, label=label)
+        res = self.result_from_plan(target_id, plan, dry=dry, label=label, stop=stop)
+        if dry and res.plan is not None and hasattr(self, "bind_approved_plan"):
+            self.bind_approved_plan(target_id, res.plan)
         if not dry:
             self._cache_invalidate(target_id)
-            self._review_cache.pop(target_id, None)
+            self._ensure_review_cache_dict().pop(target_id, None)
         return res
 
     # ── Review tier on top of plans ──
     def review_scan(self, target_id: str, progress_cb=None) -> ReviewScan:
+        rc = self._ensure_review_cache_dict()
         plan = self.build_plan(target_id, unattended=False)
-        self._review_cache[target_id] = (time.monotonic(), plan)
+        rc[target_id] = (time.monotonic(), plan)
         scan = ReviewScan(target_id, notes=list(plan.notes))
         for it in sorted(plan.items, key=lambda i: -i.size):
             scan.items.append(ReviewItem(
@@ -397,11 +482,11 @@ class PlanCleanerMixin:
         return scan
 
     def review_clean(self, target_id: str, item_ids: List[str], dry: bool = False) -> CleanResult:
-        cached = self._review_cache.get(target_id)
-        if cached and (time.monotonic() - cached[0]) < self.REVIEW_TTL:
-            plan = cached[1]
-        else:
-            plan = self.build_plan(target_id, unattended=False)       # rescan; ids are stable (hash of path)
+        if not item_ids:
+            return CleanResult(target_id, dry=dry)
+        plan = self._get_fresh_review_cache(target_id)
+        if plan is None or not isinstance(plan, E.Plan):
+            return self._expired_review_result(target_id, dry)
         wanted = set(item_ids)
         sel = E.Plan(target_id, [i for i in plan.items if i.id in wanted], list(plan.skipped), list(plan.notes))
         return self.result_from_plan(target_id, sel, dry=dry, label=target_id)

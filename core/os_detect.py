@@ -194,21 +194,24 @@ except Exception:
 
 def safe_delete(path: Path, use_trash: bool = True) -> bool:
     """
-    Chuyển vào Thùng rác (khôi phục được) nếu có send2trash, ngược lại xóa hẳn.
-    Trả về True CHỈ KHI path thật sự không còn tồn tại. Symlink chỉ bị gỡ chính
-    nó, không bao giờ xóa thứ nó trỏ tới.
+    Khi use_trash=True: CHỈ chuyển vào Thùng rác (khôi phục được). Nếu thiếu
+    backend Trash hoặc thao tác chuyển vào Thùng rác lỗi/thất bại → trả về False
+    và GIỮ NGUYÊN dữ liệu, tuyệt đối không tự chuyển sang xóa vĩnh viễn.
+    Chỉ xóa vĩnh viễn khi caller truyền rõ use_trash=False.
     """
     p = Path(path)
     try:
         if not os.path.lexists(p):
             return True
-        if HAS_SEND2TRASH and use_trash:
+        if use_trash:
+            if not HAS_SEND2TRASH:
+                return False
             try:
                 import send2trash
                 send2trash.send2trash(str(p))
                 return not os.path.lexists(p)
             except Exception:
-                pass            # backend Trash lỗi → rơi xuống xóa hẳn
+                return False
         from core.engine import remove_path
         remove_path(str(p))
         return not os.path.lexists(p)

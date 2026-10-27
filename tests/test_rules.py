@@ -144,19 +144,24 @@ def test_chromium_cleans_all_profiles_but_never_user_data(builtin, tmp_path):
     chrome = make_chrome(tmp_path)
     ctx = lctx(tmp_path)
     pl = plan_for(builtin, ctx, "chromium_cache")
-    assert len(pl.deletable) == 8                      # 4 subpath × 2 profile
+    # A9: Service Worker/CacheStorage is moved to Review (dev_cache), so AUTO chromium_cache has 3 subpaths × 2 profiles = 6
+    assert len(pl.deletable) == 6
     res = E.execute_plan(pl.deletable, guards=FakeGuards())
-    assert res.freed == 2 * (5000 + 300 + 100 + 70)
+    assert res.freed == 2 * (5000 + 300 + 100)
     for prof in ("Default", "Profile 1"):
         assert not (chrome / prof / "Cache").exists()
         assert not (chrome / prof / "Code Cache").exists()
         assert not (chrome / prof / "GPUCache").exists()
-        assert not (chrome / prof / "Service Worker" / "CacheStorage").exists()
+        assert (chrome / prof / "Service Worker" / "CacheStorage" / "x" / "y").exists()
         for keep in ("Cookies", "Login Data", "History", "Preferences",
                      "Local Storage/leveldb/000003.log", "IndexedDB/https_x/1.blob",
                      "Service Worker/Database/CURRENT"):
             assert (chrome / prof / keep).exists(), keep
     assert (chrome / "Local State").exists()
+    # Service Worker/CacheStorage is available under Review target (dev_cache) with medium risk
+    rev_pl = plan_for(builtin, ctx, "dev_cache")
+    sw_items = [i for i in rev_pl.deletable if "CacheStorage" in i.path]
+    assert len(sw_items) == 2 and all(i.risk == "medium" for i in sw_items)
 
 
 def test_chromium_electron_apps_discovered_by_fingerprint(builtin, tmp_path):

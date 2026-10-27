@@ -108,10 +108,9 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     parts = [
         f'{_pyinstaller_bin()} {mode} --noconsole',
         f'--name {APP}',
-        f'--add-data "version.py{sep}."',        # bundle version.py
-        f'--add-data "core/*.py{sep}core"',
-        f'--add-data "utils/*.py{sep}utils"',
+        f'--add-data "VERSION{sep}."',           # bundle VERSION file (matches CyberClean.spec)
         f'--add-data "rules/*.toml{sep}rules"',   # luật dọn rác khai báo (core/rules.py)
+        f'--add-data "packaging/cyber-clean-helper{sep}packaging"',
         f'--add-data "assets{sep}assets"',
     ]
 
@@ -132,7 +131,9 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         '--hidden-import tarfile',
         '--hidden-import tempfile',
         '--hidden-import tomllib',
+        '--hidden-import ui_widgets',
         '--hidden-import ui_pages',
+        '--hidden-import core.game_boost_widget',
         '--hidden-import clr',
         '--hidden-import clr._extra',
         # send2trash is only ever imported inside a try/except inside a function
@@ -276,7 +277,13 @@ def build_linux_appimage():
         shutil.rmtree(appdir)
     appdir.mkdir(parents=True)
 
-    shutil.copytree(DIST / APP, appdir / 'usr/bin' / APP)
+    bundle_dir = appdir / 'usr/bin' / APP
+    shutil.copytree(DIST / APP, bundle_dir)
+    helper_src = ROOT / 'packaging' / 'cyber-clean-helper'
+    if helper_src.exists():
+        shutil.copy2(helper_src, bundle_dir / 'cyber-clean-helper')
+        (bundle_dir / 'cyber-clean-helper').chmod(0o755)
+    (bundle_dir / 'VERSION').write_text(VERSION + '\n', encoding='utf-8')
 
     apprun = appdir / 'AppRun'
     apprun.write_text(
@@ -346,7 +353,13 @@ def build_linux_deb():
 
     install_dir = deb_root / f'opt/{APP}'
     install_dir.mkdir(parents=True)
-    shutil.copytree(DIST / APP, install_dir / APP)
+    bundle_dir = install_dir / APP
+    shutil.copytree(DIST / APP, bundle_dir)
+    helper_src = ROOT / 'packaging' / 'cyber-clean-helper'
+    if helper_src.exists():
+        shutil.copy2(helper_src, bundle_dir / 'cyber-clean-helper')
+        (bundle_dir / 'cyber-clean-helper').chmod(0o755)
+    (bundle_dir / 'VERSION').write_text(VERSION + '\n', encoding='utf-8')
 
     apps_dir = deb_root / 'usr/share/applications'
     apps_dir.mkdir(parents=True)
@@ -384,7 +397,14 @@ def build_linux_deb():
     postinst = debian_dir / 'postinst'
     postinst.write_text(
         '#!/bin/bash\n'
+        'set -e\n'
+        f'chown -R root:root /opt/{APP}\n'
         f'chmod +x /opt/{APP}/{APP}/{APP}\n'
+        f'if [[ -f /opt/{APP}/{APP}/cyber-clean-helper ]]; then\n'
+        f'    chmod 0755 /opt/{APP}/{APP}/cyber-clean-helper\n'
+        f'    /opt/{APP}/{APP}/cyber-clean-helper install-helper || true\n'
+        'fi\n'
+        f'ln -sf /opt/{APP}/{APP}/{APP} /usr/local/bin/cyberclean 2>/dev/null || true\n'
         'update-desktop-database /usr/share/applications 2>/dev/null || true\n',
         encoding='utf-8')
     postinst.chmod(0o755)
@@ -393,6 +413,7 @@ def build_linux_deb():
     postrm.write_text(
         '#!/bin/bash\n'
         f'rm -rf /opt/{APP}\n'
+        'rm -f /usr/local/bin/cyberclean /usr/local/bin/cyber-clean-helper /etc/sudoers.d/cyberclean 2>/dev/null || true\n'
         'update-desktop-database /usr/share/applications 2>/dev/null || true\n',
         encoding='utf-8')
     postrm.chmod(0o755)
@@ -449,7 +470,7 @@ def build_linux_zip():
     head(f'Building source zip fallback  [v{VERSION}]')
     DIST.mkdir(exist_ok=True)
     out = DIST / f'{APP}-{VERSION}-linux-source.zip'
-    run(f'zip -r {out} main.py version.py core/ utils/ requirements.txt install.sh README.md 2>/dev/null')
+    run(f'zip -r {out} main.py ui_widgets.py ui_pages.py version.py core/ utils/ rules/ packaging/ assets/ requirements.txt install.sh README.md README_vi.md CHANGELOG.md LICENSE 2>/dev/null')
     if out.exists():
         ok(f'Built: {out}')
         return True

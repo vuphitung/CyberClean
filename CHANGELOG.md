@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.1.0 (Post-Audit Verified Fixes — Stages 1–4)
+
+### Stage 1 — Critical Safety, Compatibility & Restoration Fixes
+- **Python 3.10 & 3.11 Startup Crash Fixed (`core/rules.py`)**: Removed PEP 701 backslash inside f-string expression in `_chromium_running()` that caused immediate `SyntaxError` on Python < 3.12.
+- **Auto-Clean Default OFF & Hard Trash Exclusion (`main.py`, `core/base_cleaner.py`)**: Background Auto-Clean now defaults to **OFF** (`False`), includes an explicit toggle on the Dashboard header and System Tray menu, and enforces `NEVER_UNATTENDED_TARGETS` so `empty_trash` and `win_recycle` can never be scheduled or run unattended.
+- **System Booster Deterministic State Capture & Crash-Safe Restore (`core/game_boost_widget.py`, `core/booster.py`, `main.py`)**:
+  - Captures exact original Linux CPU governor/profile (`powerprofilesctl get`, `tuned-adm active`, or sysfs governor including `powersave` on `intel_pstate`) and restores it via `_restore_kernel_performance()` and `smart_boost_off()`.
+  - Captures original Hyprland `misc:vfr` and `misc:no_direct_scanout` values via `hyprctl getoption` before modifying them, and restores both on stop/exit.
+  - Stopped writing persistent `~/.config/environment.d/cyber-boost.conf` (and cleans up any legacy file), preventing session-wide Mesa/RADV side effects across reboots.
+  - Persists active boost state to `boost_state.json` for automatic crash recovery on next launch, and hooks `GameBoostPage.shutdown()` into `MainWindow._shutdown()` and `atexit`.
+- **Safe Local Uninstaller (`install.sh`)**: Replaced `curl -sSL .../main/install.sh | sudo bash -s -- --uninstall` in `/usr/local/bin/cyberclean` with a self-contained local uninstall routine.
+- **Packaging Completeness (`build.py`, `CyberClean.spec`, `CyberClean.iss`, `VERSION`)**: Bundled `packaging/cyber-clean-helper`, `VERSION`, `ui_widgets.py`, `ui_pages.py`, `core.game_boost_widget`, and `rules/*.toml` across `.deb`, `.AppImage`, `.tar.gz`, source `.zip`, and PyInstaller `.spec`; removed hardcoded `/home/tung/...` icon path; synchronized `CyberClean.iss` to `3.1.0`.
+
+### Stage 2 — Reliability & Performance Improvements
+- **Non-Blocking Dashboard Refresh (`main.py`, `ui_widgets.py`)**: Clicking `REFRESH` wakes `SysInfoWorker` immediately via `threading.Event` (`force_refresh()`) instead of blocking the Qt GUI thread with synchronous `get_snapshot()`.
+- **Bounded Animation Timer in `DiskDeltaWidget` (`ui_widgets.py`)**: Stopped the 16ms (~60 FPS) timer from running indefinitely in the background; it now runs only during the 1.4s reveal animation after a scan/clean and stops when hidden.
+- **Clean Tab Locked-App Badge (`ui_widgets.py`, `main.py`)**: Emits `target_status` when a target's application is running and displays a `🔒 LOCKED` badge with tooltip on the Clean tab.
+- **Granular Windows Review & Dynamic Uninstaller Source Filters (`core/windows_cleaner.py`, `main.py`)**: `WindowsCleaner.review_scan()` and `review_clean()` now expose individual items for Prefetch, Shader Cache, and Crash Dumps; the Uninstaller tab dynamically builds source filter buttons (`ALL`, `PACMAN`/`APT`/`FLATPAK`/`WINGET`/`REGISTRY`) matching the current OS.
+- **Regression Test Suite (`tests/test_stage1_stage2_regressions.py`)**: Added 14 regression tests verifying all Stage 1–3 fixes.
+
+### Stage 3 — UI/UX & Wayland / Hyprland Refinements
+- **Cyber Utility Design Tokens & QFrame Selector Scoping (`ui_widgets.py`, `main.py`, `core/game_boost_widget.py`)**: Scoped all card and container stylesheets (`QFrame#cyberCard`, `QFrame#statCard`, `QFrame#topHeader`, `QFrame#leftSidebar`, `QFrame#diskPanel`) with `QLabel{border:none;background:transparent;}` to eliminate unwanted inner label borders.
+- **Configurable Boost Profile & Full EN/VI Translation (`core/game_boost_widget.py`, `utils/i18n.py`)**: Added interactive module checkboxes (`Compact/Free RAM`, `CPU Performance Mode`, `Process Priority`, `Low Swappiness`, `Hyprland VFR/Scanout`) and one-shot tools (`Clear Shader Cache`, `Suspend Bloat`), with 100% English and Vietnamese translation support (`retranslate()`).
+- **Wayland & Hyprland Tiling Support (`main.py`, `ui_widgets.py`, `ui_pages.py`)**: Added `app.setDesktopFileName('cyberclean')`, single-click (`Trigger`) System Tray activation for Waybar/SNI trays, lowered minimum window size to `880x620`, and added automatic Compact Rail sidebar collapse (`60px`) when window width is `< 980px`.
+
 ## 3.1.0
 
 Security hardening of the root helper and updater, a rewrite of the cleaning pipeline (plan → preview →

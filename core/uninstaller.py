@@ -111,9 +111,40 @@ PROTECTED_PKG_GLOBS = (
 _PM_SOURCES = ('pacman', 'apt', 'dnf', 'zypper', 'xbps')
 
 
+_ARCH_SUFFIXES = (
+    ".x86_64", ".i686", ".i586", ".i386", ".noarch",
+    ".aarch64", ".armv7hl", ".ppc64le", ".s390x", ".riscv64", ".src",
+)
+_PKG_VER_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9+._-]*?)-[0-9][A-Za-z0-9+._:~-]*$")
+
+
+def normalize_pkg_id(name: str) -> str:
+    n = (name or "").strip()
+    if "/" in n:
+        n = n.rsplit("/", 1)[-1]
+    if ":" in n:
+        n = n.split(":", 1)[0]
+    n_low = n.lower()
+    for suf in _ARCH_SUFFIXES:
+        if n_low.endswith(suf) and len(n) > len(suf):
+            n = n[:-len(suf)]
+            break
+    return n
+
+
 def is_protected_pkg(name: str) -> bool:
-    n = (name or '').strip()
-    return any(fnmatch.fnmatchcase(n, g) for g in PROTECTED_PKG_GLOBS)
+    raw = (name or "").strip()
+    if not raw:
+        return False
+    norm = normalize_pkg_id(raw)
+    m = _PKG_VER_RE.match(norm)
+    stripped = m.group(1) if m else norm
+    for cand in (raw, norm, stripped):
+        cand_low = cand.lower()
+        for g in PROTECTED_PKG_GLOBS:
+            if fnmatch.fnmatchcase(cand, g) or fnmatch.fnmatchcase(cand_low, g.lower()):
+                return True
+    return False
 
 
 def is_protected(app: 'InstalledApp') -> bool:
@@ -346,7 +377,115 @@ def _get_linux() -> List[InstalledApp]:
             apps.append(InstalledApp(name=name, version=ver,
                                      size_mb=sz, source='flatpak', pkg_id=app_id))
 
+    # Standalone user games & portable apps (~/Games, ~/game, Wine prefixes, Steam common, ~/.local/share/applications)
+    try:
+        apps.extend(_scan_linux_local_games())
+    except Exception:
+        pass
+
     return sorted(apps, key=lambda a: a.size_mb, reverse=True)
+
+
+def _dir_size_mb_fast(path: 'Path', max_files: int = 8000) -> float:
+    import os as _os
+    total = 0
+    seen = 0
+    stack = [str(path)]
+    while stack and seen < max_files:
+        cur = stack.pop()
+        try:
+            with _os.scandir(cur) as it:
+                for entry in it:
+                    seen += 1
+                    if seen > max_files:
+                        break
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return round(total / (1024 * 1024), 1)
+
+
+def _scan_linux_local_games() -> List[InstalledApp]:
+    from pathlib import Path as _P
+    try:
+        from .os_detect import real_home
+        home = _P(real_home())
+    except Exception:
+        home = _P.home()
+
+    found: List[InstalledApp] = []
+    seen_paths: set = set()
+
+    _WIN_BUILTIN_DIRS = {
+        'common files', 'internet explorer', 'windows media player',
+        'windows nt', 'windows photo viewer', 'windows mail',
+        'windows defender', 'windows portable devices', 'msbuild',
+        'reference assemblies', 'uninstall information',
+    }
+
+    search_roots = [
+        (home / 'Games', 'local-game'),
+        (home / 'games', 'local-game'),
+        (home / 'game', 'local-game'),
+        (home / 'Game', 'local-game'),
+        (home / '.local/share/Steam/steamapps/common', 'steam-local'),
+        (home / '.steam/steam/steamapps/common', 'steam-local'),
+        (home / '.wine/drive_c/Program Files', 'wine-app'),
+        (home / '.wine/drive_c/Program Files (x86)', 'wine-app'),
+    ]
+    # Also check Bottles prefixes if present
+    bottles_root = home / '.var/app/com.usebottles.bottles/data/bottles/bottles'
+    if bottles_root.is_dir():
+        for bdir in bottles_root.iterdir():
+            if bdir.is_dir():
+                search_roots.append((bdir / 'drive_c/Program Files', 'wine-app'))
+                search_roots.append((bdir / 'drive_c/Program Files (x86)', 'wine-app'))
+
+    for root_dir, src_tag in search_roots:
+        if not root_dir.is_dir():
+            continue
+        try:
+            for child in root_dir.iterdir():
+                if not child.is_dir() or child.is_symlink():
+                    continue
+                if child.name.startswith('.'):
+                    continue
+                _NON_GAME_DIRS = {
+                    'screenshots', 'screenshot', 'saves', 'savegames', 'save',
+                    'mods', 'mod', 'captures', 'recordings', 'videos',
+                    'backups', 'backup', 'configs', 'config', 'shader_cache',
+                    'shadercache', 'prefixes', 'logs', 'downloads', 'isos', 'roms',
+                }
+                if src_tag == 'local-game' and child.name.lower() in _NON_GAME_DIRS:
+                    continue
+                if src_tag == 'wine-app' and child.name.lower() in _WIN_BUILTIN_DIRS:
+                    continue
+                real_p = str(child.resolve())
+                if real_p in seen_paths:
+                    continue
+                sz = _dir_size_mb_fast(child)
+                if sz < 5.0:
+                    continue
+                seen_paths.add(real_p)
+                found.append(InstalledApp(
+                    name=child.name,
+                    version='portable' if src_tag == 'local-game' else src_tag.split('-')[0],
+                    size_mb=sz,
+                    source=src_tag,
+                    pkg_id=real_p,
+                ))
+        except OSError:
+            pass
+
+    return found
 
 
 # ── WINDOWS — Registry (fast, no wmic) ────────────────────────
@@ -711,6 +850,42 @@ def uninstall_app(app: InstalledApp, log_cb: Callable):
             return 'UI_OPENED'
 
         out, code = _run_win_uninstall(app.name, reg_key, uninstall_str, quiet_str, log_cb)
+
+    elif app.source in ('local-game', 'wine-app', 'steam-local'):
+        from pathlib import Path as _P
+        import shutil as _sh
+        try:
+            from .os_detect import real_home
+            home = _P(real_home()).resolve()
+        except Exception:
+            home = _P.home().resolve()
+        target_p = _P(app.pkg_id or '').resolve()
+        # Strict safety guard: must be a subdirectory at least 2 levels inside $HOME
+        if not target_p.exists() or not target_p.is_dir():
+            log_cb(f'  ✗ Folder not found: {target_p}', 'err')
+            return False
+        if home not in target_p.parents or target_p.parent == home:
+            log_cb(f'  ✗ Refusing to delete top-level folder: {target_p}', 'err')
+            return False
+        try:
+            if app.source == 'local-game':
+                from .os_detect import safe_delete
+                res_del = safe_delete(target_p, use_trash=True)
+                if isinstance(res_del, tuple):
+                    ok_del = bool(res_del[0])
+                    err_del = str(res_del[2]) if len(res_del) > 2 else ""
+                else:
+                    ok_del = bool(res_del)
+                    err_del = ""
+                if ok_del:
+                    out, code = f'Moved {target_p} to Trash', 0
+                else:
+                    out, code = err_del or f'Failed to move {target_p} to Trash (data kept intact)', 1
+            else:
+                _sh.rmtree(target_p)
+                out, code = f'Removed {target_p}', 0
+        except Exception as e:
+            out, code = str(e), 1
 
     else:
         log_cb(f'  ✗ Unknown source: {app.source}', 'err')

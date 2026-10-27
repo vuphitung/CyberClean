@@ -33,7 +33,7 @@ discover = ["%APPDATA%\\*"]
 subpaths = [
   "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache",
   "GraphiteDawnCache", "GrShaderCache", "ShaderCache",
-  "Service Worker\\CacheStorage", "Service Worker\\ScriptCache",
+  "Service Worker\\ScriptCache",
 ]
 never = [
   "Cookies", "Local Storage", "IndexedDB", "Session Storage", "Login Data", "Web Data", "History",
@@ -51,6 +51,15 @@ sched_min_age_days = 7
 "Vivaldi"           = ["vivaldi"]
 "CocCoc"            = ["browser"]
 "Opera Software"    = ["opera", "opera_gx", "launcher"]
+"discord"           = ["discord"]
+"Code"              = ["code"]
+"Cursor"            = ["cursor"]
+"Slack"             = ["slack"]
+"Zalo"              = ["zalo"]
+"ZaloPC"            = ["zalo"]
+"Spotify"           = ["spotify"]
+"Obsidian"          = ["obsidian"]
+"Teams"             = ["teams", "ms-teams"]
 
 [[target]]
 id    = "firefox_cache"
@@ -178,3 +187,45 @@ mode = "contents"
 paths = ["%LOCALAPPDATA%\\JetBrains\\*\\caches", "%LOCALAPPDATA%\\JetBrains\\*\\index"]
 risk = "medium"
 note = "IDE index cache — the IDE re-indexes projects (close the IDE first)"
+
+[[rule]]
+id     = "chromium-service-worker-cache-win"
+target = "dev_cache"
+kind   = "chromium"
+os     = ["windows"]
+risk   = "medium"
+note   = "CAUTION: Service Worker CacheStorage may hold offline PWA/web-app data — never touches Cookies, IndexedDB, Local Storage or logins"
+user_data = [
+  "%LOCALAPPDATA%\\Google\\Chrome\\User Data", "%LOCALAPPDATA%\\Google\\Chrome Beta\\User Data",
+  "%LOCALAPPDATA%\\Chromium\\User Data", "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data",
+  "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data", "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data",
+  "%LOCALAPPDATA%\\Vivaldi\\User Data", "%LOCALAPPDATA%\\CocCoc\\Browser\\User Data",
+  "%APPDATA%\\Opera Software\\Opera Stable", "%APPDATA%\\Opera Software\\Opera GX Stable",
+  "%LOCALAPPDATA%\\Opera Software\\Opera Stable", "%LOCALAPPDATA%\\Opera Software\\Opera GX Stable",
+]
+discover = ["%APPDATA%\\*"]
+subpaths = ["Service Worker\\CacheStorage"]
+never = [
+  "Cookies", "Local Storage", "IndexedDB", "Session Storage", "Login Data", "Web Data", "History",
+  "Preferences", "Secure Preferences", "Local State", "Extensions", "Extension State", "databases",
+  "leveldb", "Network", "Bookmarks", "Favicons", "Sync Data", "Storage", "File System",
+]
+min_age_days = 0
+
+[rule.closed_by_path]
+"Google/Chrome"     = ["chrome"]
+"Chromium"          = ["chromium"]
+"Microsoft/Edge"    = ["msedge"]
+"BraveSoftware"     = ["brave"]
+"Vivaldi"           = ["vivaldi"]
+"CocCoc"            = ["browser"]
+"Opera Software"    = ["opera", "opera_gx", "launcher"]
+"discord"           = ["discord"]
+"Code"              = ["code"]
+"Cursor"            = ["cursor"]
+"Slack"             = ["slack"]
+"Zalo"              = ["zalo"]
+"ZaloPC"            = ["zalo"]
+"Spotify"           = ["spotify"]
+"Obsidian"          = ["obsidian"]
+"Teams"             = ["teams", "ms-teams"]

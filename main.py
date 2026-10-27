@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.os_detect  import (IS_LINUX, IS_WINDOWS, IS_WSL, PKG_MANAGER, platform_info,
                                 HAS_POLKIT, HAS_POLKIT_AGENT, HAS_FLATPAK, HAS_DOCKER,
                                 HAS_SEND2TRASH, request_windows_admin, is_windows_admin)
-from utils.sysinfo   import get_snapshot, fmt_size, fmt_speed, fmt_uptime
+from utils.sysinfo   import get_snapshot, fmt_size, fmt_speed, fmt_uptime, _is_kernel_or_skipped_proc
 from core.uninstaller import get_installed_apps, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
 from utils.updater import UpdateDialog, UpdateBadge, UpdateCheckThread
@@ -85,7 +85,8 @@ from ui_pages import DeepCleanPage, AdvisorPage
 from core.booster import (free_ram, memory_tune, memory_tune_restore,
                           clear_disk_cache, kill_bloat,
                           game_mode_on, game_mode_off, eco_mode_on, eco_mode_off,
-                          smart_boost_on, smart_boost_off, detect_pc_tier)
+                          smart_boost_on, smart_boost_off, detect_pc_tier,
+                          _is_protected, get_de_protected)
 
 # ── GameBoostPage (new 1-button cyber UI) ───────────────────────
 try:
@@ -150,12 +151,14 @@ OS = platform.system()
 # ─────────────────────────────────────────────────────────────
 from ui_widgets import (
     C, MONO, DISPLAY, UI,
+    set_theme_mode, is_dark_theme, _rgba,
+    _global_check_icon_path, apply_elevation_shadow, ElevatedCard,
     # Icons
-    _make_icon, _nav_icon,
+    _make_icon, _nav_icon, _theme_icon,
     _icon_dashboard, _icon_clean,
     _icon_uninstall, _icon_history, _icon_rollback, _icon_booster,
     # Widgets
-    SparklineChart, DiskRing, HexLogoWidget, StatCard, NavButton, CyberTerminal,
+    SparklineChart, DiskRing, Cyber3DDiskCore, HexLogoWidget, StatCard, NavButton, CyberTerminal,
     DiskDeltaWidget, EmptyStateBinder,
     # UI helpers
     _btn, _lbl_section, _lbl_val, _card, _divider,
@@ -168,6 +171,29 @@ from ui_widgets import (
 def _real_home():
     from core.os_detect import real_home
     return real_home()
+
+
+def _is_protected_ui_proc(pid: int, name: str) -> bool:
+    """Return True if a process is a kernel thread, protected system/session daemon, or owned by another user."""
+    if pid <= 10 or pid == os.getpid():
+        return True
+    nm = (name or '').strip()
+    if _is_protected(nm) or nm.lower() in get_de_protected() or _is_kernel_or_skipped_proc(pid, nm):
+        return True
+    try:
+        p = psutil.Process(pid)
+        actual_name = (p.name() or '').strip()
+        if _is_protected(actual_name) or actual_name.lower() in get_de_protected() or _is_kernel_or_skipped_proc(pid, actual_name):
+            return True
+        if IS_LINUX and hasattr(os, 'geteuid') and os.geteuid() != 0:
+            uids = p.uids()
+            if uids and uids.real != os.getuid():
+                return True
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    except Exception:
+        pass
+    return False
 
 
 class _HelperProbe(QThread):
@@ -189,9 +215,7 @@ class _HelperUpgrade(QThread):
 
 
 class _KillWorker(QThread):
-    """psutil.terminate() nền. Kết quả về main thread bằng signal — QTimer.singleShot từ thread Python
-    thường KHÔNG BAO GIỜ chạy (thread không có event loop) nên dialog kết quả cũ không bao giờ hiện
-    và nút Kill bị khóa vĩnh viễn."""
+    """psutil.terminate() nền có kiểm tra tiến trình hệ thống và chờ xác nhận đã thoát."""
     finished_with = pyqtSignal(list, list)
 
     def __init__(self, to_kill):
@@ -202,7 +226,25 @@ class _KillWorker(QThread):
         killed, errors = [], []
         for pid_str, name in self._to_kill:
             try:
-                psutil.Process(int(pid_str)).terminate()
+                pid = int(pid_str)
+            except ValueError:
+                errors.append(f'{name}: invalid PID {pid_str}')
+                continue
+            if _is_protected_ui_proc(pid, name):
+                errors.append(_t('kill_protected_msg', 'Protected system/session process: {names}', names=f'{name} ({pid})'))
+                continue
+            try:
+                p = psutil.Process(pid)
+                p.terminate()
+                try:
+                    p.wait(timeout=1.5)
+                except psutil.TimeoutExpired:
+                    pass
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    errors.append(_t('kill_still_alive', '{name} (PID {pid}): process did not exit after SIGTERM', name=name, pid=pid))
+                else:
+                    killed.append(name)
+            except psutil.NoSuchProcess:
                 killed.append(name)
             except Exception as e:
                 errors.append(f'{name}: {e}')
@@ -241,17 +283,29 @@ class CyberCleanApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f'CyberClean v{__version__}')
-        self.setMinimumSize(1060, 680)
+        self.setMinimumSize(880, 620)
         self.resize(1200, 760)
         self.worker   = None
         self.selected = set()
+        self._approved_plans = {}
         self._charts  = {}
         self._snap    = None
         self._last_refresh_time = 0.0
         self._settings = QSettings()
+        _raw_ac = self._settings.value('auto_clean_enabled', False)
+        self._auto_clean_enabled = (
+            _raw_ac if isinstance(_raw_ac, bool)
+            else str(_raw_ac).strip().lower() in ('true', '1', 'yes')
+        )
+        self._sidebar_compact = False
+        self._uninst_source_filter = 'ALL'
         self._pending_update_ver = ""
         self._pending_update_body = ""
         self._startup_snapshot_logged = False   # log disk snapshot once per day
+        self._theme_mode = str(self._settings.value('theme_mode', 'dark') or 'dark').lower()
+        if self._theme_mode not in ('dark', 'light'):
+            self._theme_mode = 'dark'
+        set_theme_mode(self._theme_mode)
 
         self._init_palette()
         self._build_ui()
@@ -272,110 +326,113 @@ class CyberCleanApp(QMainWindow):
         pal.setColor(QPalette.ColorRole.AlternateBase, QColor(C['bg3']))
         pal.setColor(QPalette.ColorRole.Text,          QColor(C['text']))
         QApplication.setPalette(pal)
+        well_bg = C.get('well_bg', C['bg2'])
+        chk_icon = _global_check_icon_path()
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{
                 background:{C['bg']}; color:{C['text']};
                 font-family:{UI};
             }}
             QScrollBar:vertical {{
-                background:{C['bg']}; width:8px; border:none; margin:0;
+                background:transparent; width:8px; border:none; margin:0;
             }}
             QScrollBar::handle:vertical {{
                 background:{C['border3']}; border-radius:4px; min-height:28px;
             }}
-            QScrollBar::handle:vertical:hover {{ background:{C['cyan']}70; }}
+            QScrollBar::handle:vertical:hover {{ background:{_rgba(C['cyan'], 0.55)}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QScrollBar:horizontal {{
-                background:{C['bg']}; height:8px; border:none;
+                background:transparent; height:8px; border:none;
             }}
             QScrollBar::handle:horizontal {{
                 background:{C['border3']}; border-radius:4px;
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
             QTableWidget {{
-                background:{C['bg2']}; border:1px solid {C['border2']};
-                gridline-color:{C['border']}; font-size:13px; border-radius:{C['radius']};
+                background:{well_bg}; border:1px solid {C['border2']};
+                gridline-color:{C['border']}; font-size:13px; border-radius:8px;
                 selection-background-color:transparent;
                 font-family:{UI};
             }}
             QTableWidget::item {{
-                padding:8px 12px; border:none; background:transparent;
+                padding:6px 10px; border:none; background:transparent;
                 color:{C['text2']};
             }}
-            QTableWidget::item:alternate {{ background:{C['bg3']}; }}
+            QTableWidget::item:alternate {{ background:{_rgba(C['bg3'], 0.45) if is_dark_theme() else C['bg3']}; }}
             QTableWidget::item:hover {{
-                background:{C['cyan']}12; color:{C['text']};
+                background:{_rgba(C['cyan'], 0.09)}; color:{C['text']};
             }}
             QTableWidget::item:selected {{
-                background:{C['cyan']}1c; color:{C['text']};
+                background:{_rgba(C['cyan'], 0.14)}; color:{C['text']};
                 border-left:2px solid {C['cyan']};
             }}
             QTableWidget:focus {{
-                border:1px solid {C['ring']}80;
+                border:1px solid {_rgba(C['ring'], 0.50)};
             }}
             QHeaderView::section {{
                 background:{C['bg3']}; color:{C['text3']};
                 border:none;
                 border-bottom:1px solid {C['border2']};
                 border-right:1px solid {C['border']};
-                padding:10px 12px; font-size:11px; letter-spacing:1.2px;
+                padding:8px 10px; font-size:10px; letter-spacing:1.1px;
                 font-weight:700; font-family:{UI};
             }}
             QHeaderView::section:last {{ border-right:none; }}
-            QCheckBox {{ color:{C['text2']}; spacing:10px; font-size:13px; }}
+            QCheckBox {{ color:{C['text2']}; spacing:8px; font-size:13px; }}
             QCheckBox::indicator {{
-                width:16px; height:16px;
-                border:1px solid {C['border3']}; background:transparent;
-                border-radius:4px;
+                width:17px; height:17px;
+                border:1.5px solid {C['border3']}; background:{C['bg3']};
+                border-radius:5px;
             }}
-            QCheckBox::indicator:hover {{ border-color:{C['cyan']}80; }}
+            QCheckBox::indicator:hover {{ border-color:{C['cyan']}; }}
             QCheckBox::indicator:checked {{
-                background:{C['cyan']}30; border-color:{C['cyan']};
+                background:{C['cyan']}; border-color:{C['cyan']};
+                image:url("{chk_icon}");
             }}
             QCheckBox:focus {{ color:{C['text']}; }}
             QProgressBar {{
-                background:{C['bg3']}; border:none; height:4px; border-radius:2px;
+                background:{C['bg3']}; border:none; height:5px; border-radius:2.5px;
             }}
             QProgressBar::chunk {{
                 background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {C['cyan']}, stop:1 {C['green']});
-                border-radius:2px;
+                border-radius:2.5px;
             }}
             QTextEdit {{
-                background:{C['bg']}; color:{C['text2']};
-                border:1px solid {C['border2']}; border-radius:{C['radius']};
+                background:{well_bg}; color:{C['text2']};
+                border:1px solid {C['border2']}; border-radius:8px;
                 font-family:{MONO}; font-size:12px; padding:12px;
-                selection-background-color:{C['cyan']}30;
+                selection-background-color:{_rgba(C['cyan'], 0.20)};
             }}
             QLineEdit {{
-                background:{C['bg3']}; color:{C['text']};
-                border:1px solid {C['border2']}; border-radius:{C['radius']};
-                padding:8px 14px; font-size:13px; font-family:{UI};
+                background:{C['bg2']}; color:{C['text']};
+                border:1px solid {C['border2']}; border-radius:8px;
+                padding:7px 14px; font-size:13px; font-family:{UI};
                 min-height:20px;
             }}
             QLineEdit:hover {{ border-color:{C['border3']}; }}
-            QLineEdit:focus {{ border:2px solid {C['ring']}; background:{C['bg4']}; }}
+            QLineEdit:focus {{ border:1.5px solid {C['ring']}; background:{C['bg2']}; }}
             QComboBox {{
                 background:{C['bg3']}; color:{C['text2']};
-                border:1px solid {C['border2']}; border-radius:{C['radius']};
-                padding:6px 12px; font-size:13px; font-family:{UI};
-                min-height:28px;
+                border:1px solid {C['border2']}; border-radius:8px;
+                padding:5px 12px; font-size:12px; font-family:{UI}; font-weight:600;
+                min-height:26px;
             }}
             QComboBox:hover {{ border-color:{C['border3']}; }}
-            QComboBox:focus {{ border:2px solid {C['ring']}; }}
+            QComboBox:focus {{ border:1.5px solid {C['ring']}; }}
             QComboBox::drop-down {{ border:none; width:18px; }}
             QComboBox QAbstractItemView {{
                 background:{C['bg2']}; color:{C['text']};
-                selection-background-color:{C['cyan']}24;
+                selection-background-color:{_rgba(C['cyan'], 0.15)};
                 border:1px solid {C['border2']}; outline:none;
             }}
             QMenu {{
                 background:{C['bg2']}; color:{C['text']};
                 border:1px solid {C['border2']}; padding:6px;
-                border-radius:{C['radius']};
+                border-radius:8px;
             }}
             QMenu::item {{ padding:8px 18px; border-radius:6px; }}
-            QMenu::item:selected {{ background:{C['cyan']}18; color:{C['cyan']}; }}
+            QMenu::item:selected {{ background:{_rgba(C['cyan'], 0.12)}; color:{C["cyan"]}; }}
             QMenu::separator {{ background:{C['border2']}; height:1px; margin:4px 8px; }}
             QPushButton:focus {{ outline: none; }}
         """)
@@ -399,11 +456,17 @@ class CyberCleanApp(QMainWindow):
     # ── HEADER ───────────────────────────────────────────────
     def _build_header(self):
         h = QFrame()
+        h.setObjectName('topHeader')
         h.setFixedHeight(52)
+        hdr_bg = C.get('header_bg', C['bg2'])
         h.setStyleSheet(f"""
-            QFrame {{
-                background:{C['bg2']};
+            QFrame#topHeader {{
+                background:{hdr_bg};
                 border-bottom:1px solid {C['border2']};
+            }}
+            QFrame#topHeader QLabel {{
+                border:none;
+                background:transparent;
             }}
         """)
         lay = QHBoxLayout(h)
@@ -455,7 +518,7 @@ class CyberCleanApp(QMainWindow):
         self._upd_lbl = UpdateBadge()
         self._upd_lbl.setStyleSheet(
             f'color:{C["yellow"]};font-size:11px;letter-spacing:0.6px;'
-            f'font-family:{UI};border:1px solid {C["yellow"]}55;'
+            f'font-family:{UI};border:1px solid {_rgba(C["yellow"], 0.40)};'
             f'padding:5px 10px;border-radius:{C["radius"]};'
         )
         self._upd_lbl.setVisible(False)
@@ -483,6 +546,17 @@ class CyberCleanApp(QMainWindow):
             f'font-family:{MONO};padding-left:14px;font-weight:700;'
         )
 
+        self._theme_btn = _btn(
+            self._theme_btn_text(),
+            'yellow' if is_dark_theme() else 'cyan',
+            small=True
+        )
+        self._theme_btn.setIcon(_theme_icon(is_dark_theme(), size=16))
+        self._theme_btn.setToolTip(
+            _t('theme_toggle_tip', 'Switch between Cyber Dark Mode and Harmonious Light Mode')
+        )
+        self._theme_btn.clicked.connect(self._toggle_theme)
+
         self._lang_cb = QComboBox()
         for code, name in SUPPORTED_LANGS.items():
             self._lang_cb.addItem(name, code)
@@ -492,7 +566,9 @@ class CyberCleanApp(QMainWindow):
         self._lang_cb.currentIndexChanged.connect(self._change_language)
 
         lay.addWidget(self._upd_lbl)
-        lay.addSpacing(10)
+        lay.addSpacing(8)
+        lay.addWidget(self._theme_btn)
+        lay.addSpacing(8)
         lay.addWidget(self._lang_cb)
         lay.addSpacing(14)
         lay.addWidget(status_frame)
@@ -502,22 +578,29 @@ class CyberCleanApp(QMainWindow):
     # ── REDESIGNED SIDEBAR ───────────────────────────────────
     def _build_sidebar(self):
         side = QFrame()
-        side.setFixedWidth(216)
+        side.setObjectName('leftSidebar')
+        side.setFixedWidth(220)
+        s_bg = C.get('sidebar_bg', C['bg2'])
         side.setStyleSheet(f"""
-            QFrame {{
-                background:{C['bg2']};
+            QFrame#leftSidebar {{
+                background:{s_bg};
                 border-right:1px solid {C['border2']};
             }}
+            QFrame#leftSidebar QLabel {{
+                border:none;
+                background:transparent;
+            }}
         """)
+        self._sidebar_frame = side
         lay = QVBoxLayout(side)
-        lay.setContentsMargins(0, 16, 0, 16)
+        lay.setContentsMargins(0, 14, 0, 12)
         lay.setSpacing(2)
 
         # Navigation label
         nav_label = QLabel(_t('lbl_navigation', 'NAVIGATION'))
         nav_label.setStyleSheet(
             f'color:{C["dim"]};font-size:10px;letter-spacing:1.8px;'
-            f'font-family:{UI};padding:0 16px 10px 16px;font-weight:700;'
+            f'font-family:{UI};padding:0 16px 8px 16px;font-weight:700;'
         )
         self._lbl_navigation = nav_label  # kept for retranslation
         lay.addWidget(nav_label)
@@ -530,29 +613,38 @@ class CyberCleanApp(QMainWindow):
             self.nav_btns[pid] = btn
             lay.addWidget(btn)
 
-        lay.addSpacing(14)
+        lay.addSpacing(10)
         lay.addWidget(_divider())
-        lay.addSpacing(14)
+        lay.addSpacing(10)
 
-        # Disk ring panel
+        # Disk usage gauge panel (Precision 2.5D Arc Gauge complementing Dashboard 3D Core)
         disk_panel = QFrame()
+        disk_panel.setObjectName('diskPanel')
         disk_panel.setStyleSheet(f"""
-            QFrame {{
+            QFrame#diskPanel {{
                 background:{C['bg2']};
                 border:1px solid {C['border2']};
-                border-radius:{C['radius']};
-                margin:0 12px;
+                border-radius:10px;
+                margin:0 10px;
+            }}
+            QFrame#diskPanel QLabel {{
+                border:none;
+                background:transparent;
+                margin:0;
             }}
         """)
+        self._disk_panel = disk_panel
         dp_lay = QVBoxLayout(disk_panel)
-        dp_lay.setContentsMargins(12, 12, 12, 12)
-        dp_lay.setSpacing(6)
+        dp_lay.setContentsMargins(12, 10, 12, 10)
+        dp_lay.setSpacing(4)
 
-        disk_header = QLabel('DISK USAGE')
+        disk_header = QLabel(_t('lbl_disk', 'DISK USAGE'))
+        disk_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         disk_header.setStyleSheet(
-            f'color:{C["text3"]};font-size:10px;letter-spacing:1.6px;'
+            f'color:{C["text3"]};font-size:10px;letter-spacing:1.5px;'
             f'font-family:{UI};font-weight:700;'
         )
+        self._lbl_sidebar_disk = disk_header
         dp_lay.addWidget(disk_header)
 
         ring_row = QHBoxLayout()
@@ -564,68 +656,81 @@ class CyberCleanApp(QMainWindow):
 
         self.disk_detail_lbl = QLabel('— / —')
         self.disk_detail_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:12px;font-family:{UI};'
+            f'color:{C["text2"]};font-size:11px;font-weight:600;font-family:{MONO};'
         )
         self.disk_detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dp_lay.addWidget(self.disk_detail_lbl)
         lay.addWidget(disk_panel)
         lay.addStretch()
 
-        # Platform info
+        # Platform info + Status pills inside a neat footer block (zero pill truncation!)
         info = platform_info()
         if IS_WINDOWS:
             import platform as _pf
             pi_text = (
-                f'OS: Windows {_pf.release()}\n'
-                f'VER: {_pf.version()[:16]}\n'
-                f'PY: {info["python"]}'
+                f'OS: Windows {_pf.release()}  ·  PY {info["python"]}'
             )
         else:
             pi_text = (
-                f'OS: {info["os"]}\n'
-                f'DISTRO: {info["distro"] or "n/a"}\n'
-                f'PKG: {info["pkg_manager"] or "n/a"}\n'
-                f'PY: {info["python"]}'
+                f'OS: {info["os"]} ({info["distro"] or "linux"})\n'
+                f'PKG: {info["pkg_manager"] or "n/a"}  ·  PY: {info["python"]}'
             )
             if info.get('is_wsl'):
-                pi_text += (
-                    '\n\nWSL: Some features are limited (TRIM, drop_cache,'
-                    '\n     full booster) — use on bare metal for best results.'
-                )
+                pi_text += '\nWSL mode (limited kernel ops)'
         pi_lbl = QLabel(pi_text)
         pi_lbl.setStyleSheet(
-            f'color:{C["text3"]};font-size:11px;letter-spacing:0.2px;'
-            f'padding:0 14px;line-height:1.6;font-family:{MONO};'
+            f'color:{C["text3"]};font-size:10px;letter-spacing:0.2px;'
+            f'padding:0 12px;line-height:1.45;font-family:{MONO};'
         )
+        self._pi_lbl = pi_lbl
         lay.addWidget(pi_lbl)
-        lay.addSpacing(8)
+        lay.addSpacing(6)
 
-        # Status pills
+        # Status pills — compact fit so POLKIT, FLATPAK, DOCKER NEVER truncate!
         pills = []
         if IS_LINUX:
-            pills.append(('POLKIT', C['green'] if HAS_POLKIT else C['red']))
-            if HAS_FLATPAK: pills.append(('FLATPAK', C['cyan']))
-            if HAS_DOCKER:  pills.append(('DOCKER',  C['cyan']))
+            pills.append(('POLKIT', C['green'] if HAS_POLKIT else C['red'], C['grn_dim'] if HAS_POLKIT else C['red_dim']))
+            if HAS_FLATPAK: pills.append(('FLATPAK', C['cyan'], C['cyan_dim']))
+            if HAS_DOCKER:  pills.append(('DOCKER',  C['cyan'], C['cyan_dim']))
         elif IS_WINDOWS:
-            pills.append(('ADMIN', C['green'] if is_windows_admin() else C['yellow']))
+            ok_adm = is_windows_admin()
+            pills.append(('ADMIN', C['green'] if ok_adm else C['yellow'], C['grn_dim'] if ok_adm else C['yel_dim']))
 
         if pills:
             pill_row = QHBoxLayout()
-            pill_row.setContentsMargins(12, 0, 12, 0)
-            pill_row.setSpacing(5)
-            for label, col in pills:
+            pill_row.setContentsMargins(10, 0, 10, 0)
+            pill_row.setSpacing(4)
+            for label, col, bg_dim in pills:
                 pl = QLabel(label)
+                pl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 pl.setStyleSheet(
-                    f'color:{col};font-size:10px;letter-spacing:0.8px;'
-                    f'border:1px solid {col}55;padding:4px 8px;'
-                    f'font-family:{UI};font-weight:700;border-radius:6px;'
+                    f'color:{col};background:{bg_dim};font-size:9px;letter-spacing:0.5px;'
+                    f'border:1px solid {_rgba(col, 0.40)};padding:3px 6px;'
+                    f'font-family:{MONO};font-weight:700;border-radius:5px;'
                 )
                 pill_row.addWidget(pl)
             pill_row.addStretch()
             lay.addLayout(pill_row)
-            lay.addSpacing(6)
+            lay.addSpacing(4)
 
         return side
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < 980
+        if compact != getattr(self, '_sidebar_compact', False):
+            self._sidebar_compact = compact
+            if hasattr(self, '_sidebar_frame'):
+                self._sidebar_frame.setFixedWidth(60 if compact else 220)
+            if hasattr(self, '_lbl_navigation'):
+                self._lbl_navigation.setVisible(not compact)
+            if hasattr(self, '_disk_panel'):
+                self._disk_panel.setVisible(not compact)
+            if hasattr(self, '_pi_lbl'):
+                self._pi_lbl.setVisible(not compact)
+            for btn in getattr(self, 'nav_btns', {}).values():
+                if hasattr(btn, 'set_compact'):
+                    btn.set_compact(compact)
 
     # ── MAIN STACK ───────────────────────────────────────────
     def _build_main(self):
@@ -679,6 +784,11 @@ class CyberCleanApp(QMainWindow):
             btn.set_active(k == pid)
         if hasattr(self, '_si_worker'):
             self._si_worker.paused = (pid != 'dashboard')
+        if hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
+            if pid == 'dashboard' and self.isVisible():
+                self.dash_holo_core._timer.start(120)
+            else:
+                self.dash_holo_core._timer.stop()
         if pid == 'log':       self._load_log()
         if pid == 'rollback':  self._load_rollback()
         if pid == 'uninstall': self._load_uninstall()
@@ -705,61 +815,127 @@ class CyberCleanApp(QMainWindow):
             f'color:{C["text"]};font-size:18px;font-weight:700;'
             f'letter-spacing:1.2px;font-family:{UI};'
         )
+        self._autoclean_btn = _btn(self._autoclean_btn_text(), 'green' if self._auto_clean_enabled else 'cyan', small=True)
+        self._autoclean_btn.setToolTip(_t('autoclean_tip', 'Toggle background idle cleanup of safe cache targets (default: OFF; never touches Trash/Recycle Bin)'))
+        self._autoclean_btn.clicked.connect(self._toggle_auto_clean)
         self._ref_btn = _btn(f"↻  {_t('btn_refresh','REFRESH')}", 'cyan', small=True)
         self._ref_btn.clicked.connect(self._refresh_now)
         hdr.addWidget(self._lbl_sys_overview)
         hdr.addStretch()
+        hdr.addWidget(self._autoclean_btn)
         hdr.addWidget(self._ref_btn)
         lay.addLayout(hdr)
         lay.addWidget(_divider())
 
-        # ── Health + One-Click row ─────────────────────
-        top = QHBoxLayout(); top.setSpacing(12)
+        # ── 3D Holo Disk Core + Load Index + One-Click Hero Row ─────────
+        top = QHBoxLayout(); top.setSpacing(14)
 
-        # Health card
+        # 1. 3D Holographic Disk Core Card (Interactive 3D Gyroscope + Mouse Tilt)
+        holo_card = _card(accent_color=C['cyan'])
+        holo_card.setMinimumWidth(224)
+        holo_card.setMaximumWidth(264)
+        holo_lay = QVBoxLayout(holo_card)
+        holo_lay.setContentsMargins(14, 10, 14, 10)
+        holo_lay.setSpacing(2)
+        self._lbl_holo_sec = _lbl_section(_t('lbl_holo_3d', '3D HOLO DISK CORE'))
+        holo_lay.addWidget(self._lbl_holo_sec)
+        self.dash_holo_core = Cyber3DDiskCore(compact=False)
+        holo_lay.addWidget(self.dash_holo_core, 1)
+        top.addWidget(holo_card)
+
+        # 2. Load Index Card (Heuristic CPU/RAM/disk/temp/swap score — C3)
         hc = _card(accent_color=C['green'])
-        hc.setMinimumWidth(150)
-        hc.setMaximumWidth(200)
-        hcl = QVBoxLayout(hc); hcl.setContentsMargins(16, 14, 16, 14); hcl.setSpacing(4)
-        self._lbl_health_sec = _lbl_section(_t('lbl_health', 'HEALTH SCORE'))
+        hc.setMinimumWidth(180)
+        hc.setMaximumWidth(220)
+        self._health_card = hc
+        hcl = QVBoxLayout(hc); hcl.setContentsMargins(16, 12, 16, 12); hcl.setSpacing(6)
+        self._lbl_health_sec = _lbl_section(_t('lbl_health', 'LOAD INDEX'))
         hcl.addWidget(self._lbl_health_sec)
         self.health_lbl = QLabel('—')
         self.health_lbl.setStyleSheet(
-            f'color:{C["green"]};font-size:36px;font-weight:700;font-family:{MONO};'
+            f'color:{C["green"]};font-size:38px;font-weight:800;font-family:{MONO};'
         )
         self.health_sub = QLabel(_t('lbl_calculating', 'Calculating...'))
         self.health_sub.setStyleSheet(
-            f'color:{C["text3"]};font-size:12px;font-family:{UI};'
+            f'color:{C["green"]};background:{C["grn_dim"]};border:1px solid {_rgba(C["green"], 0.35)};'
+            f'font-size:11px;font-weight:700;font-family:{MONO};padding:4px 10px;border-radius:6px;'
         )
         self.health_sub.setWordWrap(True)
+        htip = _t('health_tooltip', 'Heuristic load index estimated from CPU, RAM, disk usage, temperature, and swap (not hardware SMART health).')
+        for hw in (hc, self._lbl_health_sec, self.health_lbl, self.health_sub):
+            hw.setToolTip(htip)
         hcl.addWidget(self.health_lbl)
         hcl.addWidget(self.health_sub)
+        hcl.addStretch()
         top.addWidget(hc)
 
-        # One-click card
+        # 3. One-Click Optimize Bento Card (With 4 Visual Telemetry Feature Chips — zero dead space!)
         oc = _card(accent_color=C['cyan'])
-        ocl = QVBoxLayout(oc); ocl.setContentsMargins(16, 14, 16, 14); ocl.setSpacing(6)
+        ocl = QVBoxLayout(oc); ocl.setContentsMargins(18, 12, 18, 12); ocl.setSpacing(10)
+
+        oc_hdr = QHBoxLayout()
         self._lbl_oneclick_sec = _lbl_section(_t('lbl_oneclick', 'ONE-CLICK OPTIMIZE'))
-        ocl.addWidget(self._lbl_oneclick_sec)
+        oc_hdr.addWidget(self._lbl_oneclick_sec)
+        oc_hdr.addStretch()
+        self._oneclick_idle = True
+        self.oneclick_log = QLabel(_t('lbl_ready', '● READY'))
+        self.oneclick_log.setStyleSheet(
+            f'color:{C["cyan"]};background:{C["cyan_dim"]};border:1px solid {_rgba(C["cyan"], 0.35)};'
+            f'font-size:10px;font-weight:700;font-family:{MONO};padding:3px 9px;border-radius:6px;'
+        )
+        oc_hdr.addWidget(self.oneclick_log)
+        ocl.addLayout(oc_hdr)
+
+        # 4 Feature Telemetry Chips inside One-Click Card
+        chips_row = QHBoxLayout(); chips_row.setSpacing(8)
+        self._oc_chip_lbls = []
+        oc_specs = (
+            [
+                ('oc_chip_dns_title', '◈ DNS CACHE', 'oc_chip_dns_sub', 'ipconfig /flushdns', C['cyan']),
+                ('oc_chip_temp_title', '⬡ TEMP PURGE', 'oc_chip_temp_sub', 'Win Temp & Cache', C['purple']),
+                ('oc_chip_ram_title', '⚡ RAM COMPACT', 'oc_chip_ram_sub_win', 'Working Set Trim', C['green']),
+                ('oc_chip_io_title', '◎ STORAGE I/O', 'oc_chip_io_sub', 'Volume Health', C['yellow']),
+            ] if IS_WINDOWS else [
+                ('oc_chip_ram_title', '⚡ RAM COMPACT', 'oc_chip_ram_sub_lin', 'Memory Defrag', C['cyan']),
+                ('oc_chip_swap_title', '◈ SWAP TUNE', 'oc_chip_swap_sub', 'vm.swappiness→10', C['purple']),
+                ('oc_chip_trim_title', '⬡ SSD FSTRIM', 'oc_chip_trim_sub', 'NVMe/SSD Blocks', C['green']),
+                ('oc_chip_journal_title', '◎ JOURNAL', 'oc_chip_journal_sub', 'Vacuum Logs >7d', C['yellow']),
+            ]
+        )
+        for tk, td, sk, sd, chip_col in oc_specs:
+            cf_box = QFrame()
+            cf_box.setObjectName('ocChip')
+            cf_box.setStyleSheet(
+                f'QFrame#ocChip{{background:{C["bg3"]};border:1px solid {C["border2"]};'
+                f'border-top:2px solid {chip_col};border-radius:8px;}}'
+                f'QFrame#ocChip QLabel{{border:none;background:transparent;}}'
+            )
+            cfl = QVBoxLayout(cf_box)
+            cfl.setContentsMargins(10, 8, 10, 8)
+            cfl.setSpacing(2)
+            ct = QLabel(_t(tk, td))
+            ct.setStyleSheet(f'color:{C["text"]};font-size:11px;font-weight:700;font-family:{MONO};')
+            cs = QLabel(_t(sk, sd))
+            cs.setStyleSheet(f'color:{C["text3"]};font-size:10px;font-family:{UI};')
+            self._oc_chip_lbls.append((ct, cs, tk, td, sk, sd))
+            cfl.addWidget(ct)
+            cfl.addWidget(cs)
+            chips_row.addWidget(cf_box, 1)
+        ocl.addLayout(chips_row)
+
+        oc_bot = QHBoxLayout()
         self._lbl_oc_desc = QLabel(
-            'Flush DNS  ·  Clear TEMP  ·  Drop cache  ·  TRIM SSD'
+            _t('oc_desc_win', 'Flush DNS  ·  Clear TEMP  ·  Drop cache  ·  TRIM SSD')
             if IS_WINDOWS else
-            'Drop cache  ·  Tune swap  ·  TRIM SSD  ·  Clean journal'
+            _t('oc_desc_linux', 'Drop cache  ·  Tune swap  ·  TRIM SSD  ·  Clean journal')
         )
         self._lbl_oc_desc.setStyleSheet(f'color:{C["text3"]};font-size:11px;font-family:{MONO};')
         self._lbl_oc_desc.setWordWrap(True)
-        oc_row = QHBoxLayout()
         self.oneclick_btn = _btn(f"⚡  {_t('btn_optimize','OPTIMIZE NOW')}", 'cyan')
         self.oneclick_btn.clicked.connect(self._one_click_fix)
-        self.oneclick_log = QLabel('')
-        self.oneclick_log.setStyleSheet(
-            f'color:{C["green"]};font-size:11px;font-family:{MONO};'
-        )
-        oc_row.addWidget(self.oneclick_btn)
-        oc_row.addStretch()
-        ocl.addWidget(self._lbl_oc_desc)
-        ocl.addLayout(oc_row)
-        ocl.addWidget(self.oneclick_log)
+        oc_bot.addWidget(self._lbl_oc_desc, 1)
+        oc_bot.addWidget(self.oneclick_btn, 0)
+        ocl.addLayout(oc_bot)
         top.addWidget(oc, 1)
         lay.addLayout(top)
 
@@ -842,29 +1018,71 @@ class CyberCleanApp(QMainWindow):
         pfl.addWidget(self.proc_table, 1)
         bot.addWidget(proc_frame, 3)
 
-        # Disk usage
+        # Disk usage (Auto-sized columns + Storage Summary Footer so zero dead void)
         disk_frame = _card()
         dfl = QVBoxLayout(disk_frame); dfl.setContentsMargins(14, 12, 14, 12); dfl.setSpacing(8)
+        disk_hdr_row = QHBoxLayout()
         self._lbl_disk_sec = _lbl_section(_t('lbl_disk', 'DISK USAGE'))
-        dfl.addWidget(self._lbl_disk_sec)
+        self._disk_mounts_badge = QLabel('—')
+        self._disk_mounts_badge.setStyleSheet(
+            f'color:{C["cyan"]};background:{C["cyan_dim"]};border:1px solid {_rgba(C["cyan"], 0.35)};'
+            f'font-size:10px;font-weight:700;font-family:{MONO};padding:2px 8px;border-radius:5px;'
+        )
+        disk_hdr_row.addWidget(self._lbl_disk_sec)
+        disk_hdr_row.addStretch()
+        disk_hdr_row.addWidget(self._disk_mounts_badge)
+        dfl.addLayout(disk_hdr_row)
+
         self.disk_table = QTableWidget(0, 4)
         self.disk_table.setHorizontalHeaderLabels([
-            _t('col_drive', 'DRIVE'), '▲ USED', '▽ FREE', '%'
+            _t('col_drive', 'DRIVE'), f"▲ {_t('col_used', 'USED')}", f"▽ {_t('col_free', 'FREE')}", '%'
         ])
         _dh = self.disk_table.horizontalHeader()
         _dh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        _dh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        _dh.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        _dh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        _dh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         _dh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.disk_table.setColumnWidth(1, 76)
-        self.disk_table.setColumnWidth(2, 76)
-        self.disk_table.setColumnWidth(3, 88)
+        self.disk_table.setColumnWidth(3, 94)
         self.disk_table.verticalHeader().setVisible(False)
-        self.disk_table.setMinimumHeight(100)
+        self.disk_table.setMinimumHeight(90)
         self.disk_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.disk_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.disk_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.disk_table.setAlternatingRowColors(True)
-        self.disk_table.verticalHeader().setDefaultSectionSize(34)
+        self.disk_table.verticalHeader().setDefaultSectionSize(38)
         dfl.addWidget(self.disk_table, 1)
+
+        # Storage Capacity Summary Footer (Eliminates dead space when system has 1-2 partitions)
+        self._disk_summary_box = QFrame()
+        self._disk_summary_box.setObjectName('diskSumBox')
+        self._disk_summary_box.setStyleSheet(
+            f'QFrame#diskSumBox{{background:{C["bg3"]};border:1px solid {C["border2"]};border-radius:8px;}}'
+            f'QFrame#diskSumBox QLabel{{border:none;background:transparent;}}'
+        )
+        ds_lay = QVBoxLayout(self._disk_summary_box)
+        ds_lay.setContentsMargins(12, 8, 12, 8)
+        ds_lay.setSpacing(5)
+        ds_top = QHBoxLayout()
+        self._lbl_ds_total = QLabel(_t('lbl_total_dash', 'TOTAL: —'))
+        self._lbl_ds_total.setStyleSheet(f'color:{C["text"]};font-size:11px;font-weight:700;font-family:{MONO};')
+        self._lbl_ds_free = QLabel(_t('lbl_free_dash', 'FREE: —'))
+        self._lbl_ds_free.setStyleSheet(f'color:{C["green"]};font-size:11px;font-weight:700;font-family:{MONO};')
+        ds_top.addWidget(self._lbl_ds_total)
+        ds_top.addStretch()
+        ds_top.addWidget(self._lbl_ds_free)
+        self._disk_total_bar = QProgressBar()
+        self._disk_total_bar.setRange(0, 100)
+        self._disk_total_bar.setValue(0)
+        self._disk_total_bar.setTextVisible(False)
+        self._disk_total_bar.setFixedHeight(6)
+        self._disk_total_bar.setStyleSheet(
+            f'QProgressBar{{background:{C["bg2"]};border:none;border-radius:3px;}}'
+            f'QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
+            f'stop:0 {C["cyan"]},stop:1 {C["purple"]});border-radius:3px;}}'
+        )
+        ds_lay.addLayout(ds_top)
+        ds_lay.addWidget(self._disk_total_bar)
+        dfl.addWidget(self._disk_summary_box)
         bot.addWidget(disk_frame, 2)
 
         lay.addLayout(bot, 1)
@@ -944,7 +1162,7 @@ class CyberCleanApp(QMainWindow):
             QProgressBar::chunk {{
                 background: qlineargradient(
                     x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {C["cyan"]}99,
+                    stop:0 {_rgba(C["cyan"], 0.60)},
                     stop:0.6 {C["cyan"]},
                     stop:1.0 #ffffff
                 );
@@ -959,7 +1177,7 @@ class CyberCleanApp(QMainWindow):
         self._helper_banner = QFrame()
         self._helper_banner.setVisible(False)
         self._helper_banner.setStyleSheet(
-            f'QFrame{{background:{C["yel_dim"]};border:1px solid {C["yellow"]}55;border-radius:{C["radius"]};}}'
+            f'QFrame{{background:{C["yel_dim"]};border:1px solid {_rgba(C["yellow"], 0.40)};border-radius:{C["radius"]};}}'
             f'QLabel{{border:none;background:transparent;color:{C["yellow"]};font-size:12px;}}')
         hb = QHBoxLayout(self._helper_banner); hb.setContentsMargins(12, 8, 12, 8)
         self._helper_lbl = QLabel('')
@@ -999,7 +1217,7 @@ class CyberCleanApp(QMainWindow):
                 f'border-top:1px solid {C["border2"]};'
                 f'border-right:1px solid {C["border2"]};'
                 f'border-bottom:1px solid {C["border2"]};'
-                f'border-left:3px solid {sc}90;'
+                f'border-left:3px solid {_rgba(sc, 0.65)};'
                 f'border-radius:{C["radius"]};}}'
                 f'QFrame#trow:hover{{background:{C["bg3"]};border-color:{C["border3"]};}}'
                 f'QFrame#trow QLabel{{border:none;background:transparent;}}'
@@ -1023,7 +1241,7 @@ class CyberCleanApp(QMainWindow):
             badge = QLabel(badge_map.get(t.safety, t.safety.upper()))
             badge.setStyleSheet(
                 f'color:{sc};font-size:10px;letter-spacing:1px;font-weight:700;'
-                f'border:1px solid {sc}55;padding:4px 10px;font-family:{UI};border-radius:6px;')
+                f'border:1px solid {_rgba(sc, 0.40)};padding:4px 10px;font-family:{UI};border-radius:6px;')
             self._target_lbls[t.id] = (nm, dc, badge, t)
             rl.addLayout(nc, 1)
             rl.addWidget(badge)
@@ -1061,7 +1279,7 @@ class CyberCleanApp(QMainWindow):
             f'QFrame#delta_frame{{'
             f'background:{C["bg2"]};'
             f'border:1px solid {C["border2"]};'
-            f'border-left:3px solid {C["cyan"]}60;'
+            f'border-left:3px solid {_rgba(C["cyan"], 0.45)};'
             f'border-radius:{C["radius"]};'
             f'}}'
         )
@@ -1139,10 +1357,20 @@ class CyberCleanApp(QMainWindow):
         lay.addWidget(self._lbl_uninst_hint)
         lay.addSpacing(10)
 
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(6)
         self.uninstall_search = QLineEdit()
         self.uninstall_search.setPlaceholderText(_t('placeholder_filter', 'Filter apps...'))
         self.uninstall_search.textChanged.connect(self._filter_uninstall)
-        lay.addWidget(self.uninstall_search)
+        filter_bar.addWidget(self.uninstall_search, 1)
+        self._uninst_filter_wrap = QWidget()
+        self._uninst_filter_lay = QHBoxLayout(self._uninst_filter_wrap)
+        self._uninst_filter_lay.setContentsMargins(0, 0, 0, 0)
+        self._uninst_filter_lay.setSpacing(4)
+        self._uninst_filter_btns = {}
+        filter_bar.addWidget(self._uninst_filter_wrap, 0)
+        lay.addLayout(filter_bar)
+        self._rebuild_uninstall_filter_buttons([])
         lay.addSpacing(8)
 
         self.uninstall_table = QTableWidget(0, 4)
@@ -1178,7 +1406,7 @@ class CyberCleanApp(QMainWindow):
         self.uninstall_log.setReadOnly(True)
         self.uninstall_log.setMinimumHeight(60)
         self.uninstall_log.setMaximumHeight(110)
-        self.uninstall_log.setPlaceholderText('  → Select an app and click Uninstall...')
+        self.uninstall_log.setPlaceholderText(_t('uninst_placeholder_log', '  → Select an app and click Uninstall...'))
         lay.addWidget(self.uninstall_log)
         return w
 
@@ -1310,6 +1538,8 @@ class CyberCleanApp(QMainWindow):
         if _HAS_GAME_BOOST_PAGE and _GameBoostPage is not None:
             # ── New cyber UI ───────────────────────────────────
             self._game_boost_page = _GameBoostPage(w)
+            if hasattr(self._game_boost_page, 'boost_toggled'):
+                self._game_boost_page.boost_toggled.connect(self._on_game_boost_toggled)
             outer.addWidget(self._game_boost_page)
         else:
             # ── Fallback: plain label nếu import thất bại ─────
@@ -1324,7 +1554,7 @@ class CyberCleanApp(QMainWindow):
         return w
 
     # ═══════════════════════════════════════════════════════════
-    # ALL LOGIC BELOW IS UNCHANGED FROM ORIGINAL
+    # ALL LOGIC BELOW
     # ═══════════════════════════════════════════════════════════
 
 
@@ -1346,18 +1576,19 @@ class CyberCleanApp(QMainWindow):
             self._ref_btn.setEnabled(False)
             self._ref_btn.setText('...')
 
-        try:
-            s = get_snapshot(interval=0.1)
-            self._on_snapshot(s)
-        except Exception:
-            pass
-        finally:
-            # Mở khóa lại sau 2s (khớp với cooldown)
-            if hasattr(self, '_ref_btn'):
-                QTimer.singleShot(2000, lambda: (
-                    self._ref_btn.setEnabled(True),
-                    self._ref_btn.setText(f"↻  {_t('btn_refresh','REFRESH')}")
-                ))
+        if hasattr(self, '_si_worker') and self._si_worker.isRunning():
+            self._si_worker.force_refresh()
+        else:
+            try:
+                s = get_snapshot(interval=0.1)
+                self._on_snapshot(s)
+            except Exception:
+                pass
+        if hasattr(self, '_ref_btn'):
+            QTimer.singleShot(1200, lambda: (
+                self._ref_btn.setEnabled(True),
+                self._ref_btn.setText(f"↻  {_t('btn_refresh','REFRESH')}")
+            ))
 
     def _on_snapshot(self, s):
         self._snap = s
@@ -1409,9 +1640,12 @@ class CyberCleanApp(QMainWindow):
         self.health_lbl.setStyleSheet(
             f'color:{C[col]};font-size:36px;font-weight:700;font-family:{MONO};'
         )
-        self.health_sub.setText(' · '.join(issues) if issues else '✓ System healthy')
+        self.health_sub.setText(' · '.join(issues) if issues else f"✓ {_t('sys_healthy', 'Normal load')}")
+        sub_col = C[col] if issues else C['green']
+        sub_bg  = C.get(col + '_dim', C['grn_dim']) if issues else C['grn_dim']
         self.health_sub.setStyleSheet(
-            f'color:{C[col] if issues else C["green"]};font-size:11px;font-family:{MONO};'
+            f'color:{sub_col};background:{sub_bg};border:1px solid {_rgba(sub_col, 0.35)};'
+            f'font-size:11px;font-weight:700;font-family:{MONO};padding:4px 10px;border-radius:6px;'
         )
 
         self._charts['cpu'].push(s.cpu_percent)
@@ -1420,6 +1654,12 @@ class CyberCleanApp(QMainWindow):
         if s.disks:
             d = s.disks[0]
             self.disk_ring.set_percent(d.percent)
+            if hasattr(self, 'dash_holo_core'):
+                self.dash_holo_core.set_usage_detail(
+                    d.percent,
+                    f'{fmt_size(d.used)} / {fmt_size(d.total)}',
+                    fmt_size(d.total),
+                )
             self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
             # Log daily disk snapshot for the 30-day trend (first snapshot each day)
             if not self._startup_snapshot_logged:
@@ -1440,10 +1680,16 @@ class CyberCleanApp(QMainWindow):
                 self.proc_table.setItem(row, col_i, item)
 
         self.disk_table.setRowCount(0)
+        tot_cap = 0
+        tot_used = 0
+        tot_free = 0
         for disk in s.disks:
+            tot_cap  += getattr(disk, 'total', 0)
+            tot_used += getattr(disk, 'used', 0)
+            tot_free += getattr(disk, 'free', 0)
             row = self.disk_table.rowCount()
             self.disk_table.insertRow(row)
-            self.disk_table.setRowHeight(row, 32)
+            self.disk_table.setRowHeight(row, 38)
             pct     = disk.percent
             col_pct = C['red'] if pct > 90 else C['yellow'] if pct > 75 else C['cyan']
 
@@ -1457,36 +1703,59 @@ class CyberCleanApp(QMainWindow):
             it0 = QTableWidgetItem(disp)
             it0.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             it0.setToolTip(full_path)
+            f_drv = QFont()
+            f_drv.setBold(True)
+            it0.setFont(f_drv)
             self.disk_table.setItem(row, 0, it0)
 
             for ci, val in enumerate([fmt_size(disk.used), fmt_size(disk.free)], 1):
                 it = QTableWidgetItem(val)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.disk_table.setItem(row, ci, it)
 
             bar = QProgressBar()
             bar.setRange(0, 100)
-            bar.setValue(int(pct))
+            bar.setValue(int(round(pct)))
             bar.setTextVisible(True)
-            bar.setFormat(f'{pct:.0f}%')
-            bar.setFixedHeight(14)
+            bar.setFormat(f'{pct:.1f}%' if pct < 99.95 else f'{round(pct)}%')
+            bar.setFixedHeight(18)
+            txt_on_bar = C['text']
             bar.setStyleSheet(
                 f'QProgressBar {{'
-                f'  background:{C["bg3"]}; border:none; border-radius:2px;'
-                f'  color:{col_pct}; font-size:10px; font-weight:700;'
+                f'  background:{C["bg3"]}; border:1px solid {C["border2"]}; border-radius:5px;'
+                f'  color:{txt_on_bar}; font-size:10px; font-weight:700;'
                 f'  font-family:{MONO}; text-align:center;'
                 f'}}'
                 f'QProgressBar::chunk {{'
                 f'  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
-                f'    stop:0 {col_pct}80, stop:1 {col_pct}cc);'
-                f'  border-radius:2px;'
+                f'    stop:0 {_rgba(col_pct, 0.35)}, stop:1 {_rgba(col_pct, 0.72)});'
+                f'  border-radius:4px;'
                 f'}}'
             )
             cw = QWidget()
+            cw.setStyleSheet('background:transparent;')
             cl = QHBoxLayout(cw)
-            cl.setContentsMargins(6, 7, 6, 7)
+            cl.setContentsMargins(6, 6, 6, 6)
             cl.addWidget(bar)
             self.disk_table.setCellWidget(row, 3, cw)
+
+        if hasattr(self, '_disk_mounts_badge'):
+            self._disk_mounts_badge.setText(_t('lbl_mounts', '{n} MOUNTS', n=len(s.disks)))
+        if hasattr(self, '_lbl_ds_total') and s.disks:
+            d0 = s.disks[0]
+            pct0 = d0.percent
+            extra_tag = ''
+            if len(s.disks) > 1:
+                other_mounts = ', '.join(f'{d.path}: {fmt_size(d.used)}' for d in s.disks[1:3])
+                extra_tag = f'  ·  +{other_mounts}'
+            self._lbl_ds_total.setText(
+                _t('lbl_used_fmt', 'USED ({path}): {used} / {total} ({pct:.1f}%){extra}',
+                   path=d0.path, used=fmt_size(d0.used), total=fmt_size(d0.total), pct=pct0, extra=extra_tag)
+            )
+            self._lbl_ds_free.setText(
+                _t('lbl_free_fmt', 'FREE ({path}): {free}', path=d0.path, free=fmt_size(d0.free))
+            )
+            self._disk_total_bar.setValue(int(min(100, round(pct0))))
 
     def _start_clock(self):
         self._clock_timer = QTimer(self)
@@ -1497,8 +1766,8 @@ class CyberCleanApp(QMainWindow):
 
     def _one_click_fix(self):
         self.oneclick_btn.setEnabled(False)
-        self.oneclick_log.setText('Running...')
-        import subprocess as _sp
+        self._oneclick_idle = False
+        self.oneclick_log.setText(_t('lbl_running', 'Running...'))
 
         self._oneclick_worker = _OneClickWorker(cleaner=CLEANER)
         self._oneclick_worker.done.connect(self._on_oneclick_done)
@@ -1506,9 +1775,14 @@ class CyberCleanApp(QMainWindow):
 
     def _on_oneclick_done(self, summary, success):
         self.oneclick_btn.setEnabled(True)
+        self._oneclick_idle = False
         col = C['green'] if success else C['yellow']
+        bg  = C['grn_dim'] if success else C['yel_dim']
         self.oneclick_log.setText(summary)
-        self.oneclick_log.setStyleSheet(f'color:{col};font-size:11px;font-family:{MONO};')
+        self.oneclick_log.setStyleSheet(
+            f'color:{col};background:{bg};border:1px solid {_rgba(col, 0.40)};'
+            f'font-size:10px;font-weight:700;font-family:{MONO};padding:3px 9px;border-radius:6px;'
+        )
         QTimer.singleShot(3000, self._refresh_now)
 
     def _kill_selected_proc(self):
@@ -1516,16 +1790,54 @@ class CyberCleanApp(QMainWindow):
         if not rows:
             return
 
-        # Disable button while killing to prevent double-click
-        if hasattr(self, '_kill_btn'):
-            self._kill_btn.setEnabled(False)
-
         to_kill = []
-        for row in rows:
+        blocked = []
+        for row in sorted(rows):
             pid_item  = self.proc_table.item(row, 0)
             name_item = self.proc_table.item(row, 1)
             if pid_item:
-                to_kill.append((pid_item.text(), name_item.text() if name_item else pid_item.text()))
+                pid_str = pid_item.text()
+                name = name_item.text() if name_item else pid_str
+                try:
+                    pid_int = int(pid_str)
+                except ValueError:
+                    pid_int = -1
+                if pid_int <= 0 or _is_protected_ui_proc(pid_int, name):
+                    blocked.append(f'{name} (PID {pid_str})')
+                else:
+                    to_kill.append((pid_str, name))
+
+        if blocked:
+            QMessageBox.warning(
+                self,
+                _t('kill_failed', 'Kill failed'),
+                _t('kill_protected_msg',
+                   'Protected system/session process (cannot be terminated from CyberClean): {names}',
+                   names=', '.join(blocked)),
+            )
+
+        if not to_kill:
+            return
+
+        items_txt = '\n'.join(f'  • {name} (PID {pid_str})' for pid_str, name in to_kill)
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle(_t('kill_confirm_title', 'Confirm Terminate Process'))
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setText(
+            _t('kill_confirm_msg',
+               'Terminate {n} selected process(es)?\n\n{items}\n\nUnsaved work in those applications may be lost.',
+               n=len(to_kill), items=items_txt)
+        )
+        confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        confirm.button(QMessageBox.StandardButton.Yes).setText(f"✕ {_t('btn_kill', 'KILL')}")
+        confirm.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};font-family:{MONO};')
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        # Disable button while killing to prevent double-click
+        if hasattr(self, '_kill_btn'):
+            self._kill_btn.setEnabled(False)
 
         def _on_kill_done(killed, errors):
             if hasattr(self, '_kill_btn'):
@@ -1535,7 +1847,7 @@ class CyberCleanApp(QMainWindow):
             if killed:
                 QMessageBox.information(
                     self, _t('lbl_done', 'Done'),
-                    f"{_t('kill_failed','Terminated')}: {', '.join(killed)}"
+                    f"{_t('kill_terminated', 'Terminated')}: {', '.join(killed)}"
                 )
                 QTimer.singleShot(1500, self._refresh_now)
 
@@ -1558,16 +1870,23 @@ class CyberCleanApp(QMainWindow):
 
     def _confirm_clean(self):
         if not self.selected:
-            QMessageBox.warning(self, 'No targets', 'Select at least one target first.')
+            QMessageBox.warning(
+                self,
+                _t('no_targets_title', 'No targets'),
+                _t('no_targets_msg', 'Select at least one target first.'),
+            )
             return
         targets = CLEANER.get_targets() if CLEANER else []
-        names   = [t.name for t in targets if t.id in self.selected]
+        names   = [_t(f'tgt_{t.id}_name', t.name) for t in targets if t.id in self.selected]
         msg = QMessageBox(self)
         msg.setWindowTitle(_t('confirm_clean','Confirm Clean'))
-        msg.setText(f'Clean {len(self.selected)} target(s)?\n\n' + '\n'.join(f'  • {n}' for n in names)
-                    + '\n\n' + _t('confirm_perm_note', 'Files are deleted permanently — they do not go to the Trash.'))
+        msg.setText(
+            _t('confirm_clean_msg', 'Clean {n} target(s)?', n=len(self.selected))
+            + '\n\n' + '\n'.join(f'  • {n}' for n in names)
+            + '\n\n' + _t('confirm_perm_note', 'Files are deleted permanently — they do not go to the Trash.')
+        )
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        msg.button(QMessageBox.StandardButton.Yes).setText('⚡ CLEAN NOW')
+        msg.button(QMessageBox.StandardButton.Yes).setText(f"⚡ {_t('btn_clean_now', 'CLEAN NOW')}")
         msg.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;')
         if msg.exec() == QMessageBox.StandardButton.Yes:
             self._run_clean(dry=False)
@@ -1593,7 +1912,7 @@ class CyberCleanApp(QMainWindow):
             f'border-radius:{C["radius"]};font-size:12px;padding:10px;'
         )
         vl.addWidget(te, 1)
-        total_lbl = QLabel('  Scanning…')
+        total_lbl = QLabel(f"  {_t('review_scanning', 'Scanning…')}")
         total_lbl.setStyleSheet(f'color:{C["green"]};font-size:11px;font-family:{MONO};')
         vl.addWidget(total_lbl)
         btn_row = QHBoxLayout(); btn_row.addStretch()
@@ -1604,7 +1923,7 @@ class CyberCleanApp(QMainWindow):
 
         # ── QThread + pyqtSignal — safe cross-thread UI update ──────────
         class _PrevWorker(QThread):
-            result_ready = pyqtSignal(str, str)   # html, summary
+            result_ready = pyqtSignal(str, str, object)   # html, summary, plans
 
             def __init__(self, selected, cleaner):
                 super().__init__()
@@ -1637,7 +1956,7 @@ class CyberCleanApp(QMainWindow):
                                 parts.append(
                                     f'<span style="color:{C["text3"]}">&nbsp;&nbsp;&nbsp;&nbsp;'
                                     f'{safe}&nbsp;'
-                                    f'<span style="color:{C["text3"]}60">({fmt_size(sz)})</span>'
+                                    f'<span style="color:{C["text3"]}">({fmt_size(sz)})</span>'
                                     f'</span><br>'
                                 )
                             if len(files) > 200:
@@ -1654,7 +1973,8 @@ class CyberCleanApp(QMainWindow):
                         )
                 html    = ''.join(parts) or f'<span style="color:{C["text3"]}">No files to preview.</span>'
                 summary = f"  {total_f} files  ·  ~{fmt_size(total_b)}"
-                self.result_ready.emit(html, summary)
+                plans   = dict(getattr(self._cl, '_approved_plans', {}))
+                self.result_ready.emit(html, summary, plans)
 
         # FIX v2.5: Clean up previous _prev_worker before creating a new one.
         # Without this, opening the preview dialog multiple times accumulates
@@ -1668,7 +1988,9 @@ class CyberCleanApp(QMainWindow):
 
         self._prev_worker = _PrevWorker(list(self.selected), CLEANER)
 
-        def _apply(html, summary):
+        def _apply(html, summary, plans):
+            if isinstance(plans, dict):
+                self._approved_plans.update(plans)
             te.setHtml(html)
             total_lbl.setText(summary)
             total_lbl.setStyleSheet(
@@ -1697,6 +2019,7 @@ class CyberCleanApp(QMainWindow):
                 self.worker.log.disconnect()
                 self.worker.progress.disconnect()
                 self.worker.done.disconnect()
+                self.worker.target_status.disconnect()
             except Exception:
                 pass
             self.worker.deleteLater()
@@ -1718,8 +2041,10 @@ class CyberCleanApp(QMainWindow):
         self._clean_prog_pct.setText('0%')
         self._prog_container.setVisible(True)
         self.clean_prog.setValue(0)
-        self.worker = CleanWorker(list(self.selected), dry=dry, cleaner=CLEANER)
+        plans_arg = None if dry else dict(getattr(self, '_approved_plans', {}))
+        self.worker = CleanWorker(list(self.selected), dry=dry, cleaner=CLEANER, plans=plans_arg)
         self.worker.log.connect(self._on_clean_log)
+        self.worker.target_status.connect(self._on_clean_target_status)
         def _on_progress(p, l):
             self.clean_prog.setValue(p)
             self._clean_prog_pct.setText(f'{p}%')
@@ -1734,6 +2059,30 @@ class CyberCleanApp(QMainWindow):
         self.worker.done.connect(self._on_clean_done)
         self.worker.start()
 
+    def _on_clean_target_status(self, tid: str, blocked: int, note: str):
+        entry = getattr(self, '_target_lbls', {}).get(tid)
+        if not entry:
+            return
+        _nm, _dc, badge, t_obj = entry
+        if blocked > 0:
+            col = C['yellow']
+            badge.setText(f"🔒 {_t('badge_locked', 'LOCKED')}")
+            badge.setToolTip(note or 'App is currently running — close it first')
+            badge.setStyleSheet(
+                f'color:{col};font-size:10px;letter-spacing:1px;font-weight:700;'
+                f'border:1px solid {_rgba(col, 0.50)};padding:4px 10px;font-family:{UI};border-radius:6px;'
+            )
+        else:
+            sc = C['green'] if t_obj.safety == 'safe' else C['yellow'] if t_obj.safety == 'caution' else C['red']
+            badge_map = {'safe': _t('badge_safe', 'SAFE'), 'caution': _t('badge_caution', 'CAUTION'),
+                         'danger': _t('badge_danger', 'DANGER')}
+            badge.setText(badge_map.get(t_obj.safety, t_obj.safety.upper()))
+            badge.setToolTip('')
+            badge.setStyleSheet(
+                f'color:{sc};font-size:10px;letter-spacing:1px;font-weight:700;'
+                f'border:1px solid {_rgba(sc, 0.40)};padding:4px 10px;font-family:{UI};border-radius:6px;'
+            )
+
     def _on_clean_log(self, msg, level):
         self.clean_terminal.append_log(msg, level)
 
@@ -1744,7 +2093,11 @@ class CyberCleanApp(QMainWindow):
         self._clean_btn.setEnabled(True)
         self._dry_btn.setText(f"⬡  {_t('btn_dryrun','DRY-RUN')}")
         self._clean_btn.setText(f"⚡  {_t('btn_clean_now','CLEAN NOW')}")
-        if not result['dry']:
+        if result.get('dry'):
+            if isinstance(result.get('plans'), dict):
+                self._approved_plans.update(result['plans'])
+        else:
+            self._approved_plans.clear()
             free_before = getattr(self, '_free_before', 0)
             pct_before = self._disk_pct_before
 
@@ -1778,16 +2131,21 @@ class CyberCleanApp(QMainWindow):
                 self._record_session(freed=freed, summary=result['summary'], rollback=result['rollback'],
                                      disk_before=pct_before, disk_after=pct_after, measured=measured,
                                      planned=result.get('planned', freed))
-            QTimer.singleShot(800, _deferred_snapshot)
+            if getattr(self, '_shutting_down', False) or result.get('interrupted'):
+                _deferred_snapshot()
+            else:
+                QTimer.singleShot(800, _deferred_snapshot)
 
         # ── Update AFTER viz panel (dry-run only — real handled in _deferred_snapshot) ─
         if hasattr(self, '_disk_delta') and result['freed'] > 0 and result['dry']:
             try:
                 disk = self._snap.disks[0] if self._snap and self._snap.disks else None
                 if disk and disk.total > 0:
-                    est_free = disk.free + result['freed']
-                    est_pct  = max(0.0, min(100.0,
-                        (disk.total - est_free) / disk.total * 100))
+                    est_free = min(disk.total, disk.free + result['freed'])
+                    # C2 FIX: compute est_pct relative to disk.percent so reserved blocks on ext4/btrfs
+                    # never make AFTER (EST) higher than BEFORE!
+                    est_pct  = max(0.0, min(disk.percent,
+                        disk.percent - (result['freed'] / disk.total * 100.0)))
                     self._disk_delta.set_before(disk.free, disk.total, disk.percent)
                     self._disk_delta.set_after(est_free, est_pct, result['freed'], dry=True)
             except Exception:
@@ -1828,14 +2186,39 @@ class CyberCleanApp(QMainWindow):
         self.advisor_page = AdvisorPage(str(_real_home()), PKG_MANAGER)
         return self.advisor_page
 
+    def _refresh_disk_usage_now(self):
+        """Immediately refresh disk usage widget & snapshot even when SysInfoWorker is paused on non-dashboard tabs."""
+        try:
+            snap_after = get_snapshot(interval=0.1)
+            self._snap = snap_after
+            if snap_after.disks:
+                d = snap_after.disks[0]
+                self.disk_ring.set_percent(d.percent)
+                if hasattr(self, 'dash_holo_core'):
+                    self.dash_holo_core.set_usage_detail(
+                        d.percent,
+                        f'{fmt_size(d.used)} / {fmt_size(d.total)}',
+                        fmt_size(d.total),
+                    )
+                self.disk_detail_lbl.setText(f'{fmt_size(d.used)} / {fmt_size(d.total)}')
+                if hasattr(self, '_disk_delta'):
+                    self._disk_delta.set_before(d.free, d.total, d.percent)
+            self._on_snapshot(snap_after)
+            return snap_after
+        except Exception:
+            return getattr(self, '_snap', None)
+
     def _on_review_cleaned(self, t, res):
-        disk_pct = self._snap.disks[0].percent if self._snap and self._snap.disks else 0
+        disk_before = self._snap.disks[0].percent if self._snap and self._snap.disks else 0.0
+        snap_after = self._refresh_disk_usage_now()
+        disk_after = snap_after.disks[0].percent if snap_after and snap_after.disks else disk_before
         self._record_session(freed=res.freed_bytes,
                              summary=_t('review_logged', 'Review clean: {name}').format(name=t.name)
                              + f' | {t.id}:{fmt_size(res.freed_bytes)}',
-                             rollback=res.rollback, disk_before=disk_pct, disk_after=disk_pct,
+                             rollback=res.rollback, disk_before=disk_before, disk_after=disk_after,
                              measured=res.measured_bytes, planned=res.planned_bytes)
-        QTimer.singleShot(1500, self._refresh_now)
+        if hasattr(self, '_si_worker') and self._si_worker.isRunning():
+            self._si_worker.force_refresh()
 
     def _check_helper_async(self):
         """Linux: kiểm tra helper đặc quyền (thiếu / bản cũ) và hiện banner — chạy nền, không chặn UI."""
@@ -1867,9 +2250,9 @@ class CyberCleanApp(QMainWindow):
         self._helper_btn.setEnabled(True)
         if ok:
             self._helper_banner.setVisible(False)
-            QMessageBox.information(self, 'CyberClean', 'Helper updated.')
+            QMessageBox.information(self, 'CyberClean', _t('helper_updated_msg', 'Helper updated.'))
         else:
-            QMessageBox.warning(self, 'CyberClean', f'Could not update the helper:\n{msg}')
+            QMessageBox.warning(self, 'CyberClean', _t('helper_update_err', 'Could not update the helper:\n{msg}', msg=msg))
 
     def _load_uninstall(self):
         # Guard: don't start a second scan while one is running
@@ -1881,12 +2264,12 @@ class CyberCleanApp(QMainWindow):
             self._uninst_ref_btn.setText('⟳ ...')
         if hasattr(self, '_lbl_uninst_hint'):
             self._lbl_uninst_hint.setText(
-                f'<span style="color:{C["cyan"]}">⟳  Scanning installed apps...</span>'
+                f'<span style="color:{C["cyan"]}">{_t("uninst_scanning", "⟳  Scanning installed apps...")}</span>'
             )
         self.uninstall_table.setRowCount(0)
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["cyan"]}">  ⟳  Reading app registry — please wait...</span>'
+            f'<span style="color:{C["cyan"]}">{_t("uninst_reading_reg", "  ⟳  Reading app registry — please wait...")}</span>'
         )
 
         self._uninstall_worker = _UninstallWorker()
@@ -1899,9 +2282,52 @@ class CyberCleanApp(QMainWindow):
         self._uninstall_worker.finished.connect(self._on_uninstall_loaded)
         self._uninstall_worker.start()
 
+    def _default_platform_sources(self):
+        if IS_WINDOWS:
+            return ['winget', 'registry']
+        pm = (PKG_MANAGER or '').lower()
+        out = [pm] if pm else []
+        if HAS_FLATPAK and 'flatpak' not in out:
+            out.append('flatpak')
+        return out
+
+    def _rebuild_uninstall_filter_buttons(self, apps):
+        if not hasattr(self, '_uninst_filter_lay'):
+            return
+        while self._uninst_filter_lay.count():
+            item = self._uninst_filter_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._uninst_filter_btns = {}
+        present = []
+        for a in apps:
+            s = (getattr(a, 'source', '') or '').lower()
+            if s and s not in present:
+                present.append(s)
+        if not present:
+            present = self._default_platform_sources()
+        sources = ['ALL'] + [s.upper() for s in present]
+        if getattr(self, '_uninst_source_filter', 'ALL') not in sources:
+            self._uninst_source_filter = 'ALL'
+        for src in sources:
+            lbl = _t('filter_all', 'ALL') if src == 'ALL' else src
+            active = (src == self._uninst_source_filter)
+            b = _btn(lbl, 'cyan' if active else 'dim', small=True)
+            b.clicked.connect(lambda _=False, s=src: self._set_uninstall_source_filter(s))
+            self._uninst_filter_btns[src] = b
+            self._uninst_filter_lay.addWidget(b)
+
+    def _set_uninstall_source_filter(self, src: str):
+        self._uninst_source_filter = src
+        self._rebuild_uninstall_filter_buttons(getattr(self, '_all_apps', []))
+        self._filter_uninstall(self.uninstall_search.text() if hasattr(self, 'uninstall_search') else '')
+
     def _on_uninstall_loaded(self, apps):
         self._all_apps = apps
-        self._populate_uninstall(apps)
+        self._rebuild_uninstall_filter_buttons(apps)
+        self._filter_uninstall(self.uninstall_search.text() if hasattr(self, 'uninstall_search') else '')
         self.uninstall_log.clear()
         self.uninstall_log.append(
             f'<span style="color:{C["text3"]}">  ✓  {_t("uninstall_found","Found {n} apps — select one or more, then click Uninstall").replace("{n}", str(len(apps)))}</span>'
@@ -1945,20 +2371,35 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_uninstall_empty'):
             self._uninstall_empty.sync()
 
-    def _filter_uninstall(self, text):
-        if not hasattr(self, '_all_apps'): return
-        filtered = [a for a in self._all_apps if text.lower() in a.name.lower()]
+    def _filter_uninstall(self, text=''):
+        if not hasattr(self, '_all_apps'):
+            return
+        q = (text or '').lower()
+        src_f = getattr(self, '_uninst_source_filter', 'ALL')
+        filtered = [
+            a for a in self._all_apps
+            if q in a.name.lower()
+            and (src_f == 'ALL' or (getattr(a, 'source', '') or '').upper() == src_f)
+        ]
         self._populate_uninstall(filtered)
 
     def _do_uninstall(self):
         # Guard: don't start another uninstall while one is running
         if getattr(self, '_do_uninst_worker', None) and self._do_uninst_worker.isRunning():
-            QMessageBox.information(self, 'Busy', 'An uninstall is already in progress.')
+            QMessageBox.information(
+                self,
+                _t('uninst_busy_title', 'Busy'),
+                _t('uninst_busy_msg', 'An uninstall is already in progress.'),
+            )
             return
 
         rows = set(i.row() for i in self.uninstall_table.selectedItems())
         if not rows:
-            QMessageBox.information(self, 'Select', 'Select at least one app first.')
+            QMessageBox.information(
+                self,
+                _t('uninst_select_title', 'Select'),
+                _t('uninst_select_msg', 'Select at least one app first.'),
+            )
             return
         apps = []
         for row in rows:
@@ -1971,12 +2412,14 @@ class CyberCleanApp(QMainWindow):
         # Gói lõi (kernel, bootloader, init, sudo, mạng...) không bao giờ được gỡ từ đây.
         blocked = [a for a in apps if getattr(a, 'protected', False)]
         if blocked:
+            items_str = '\n'.join(f'  🔒 {a.name}' for a in blocked[:12])
             QMessageBox.warning(
                 self, _t('confirm_uninstall', 'Uninstall'),
-                'These are protected system packages and will NOT be removed:\n\n'
-                + '\n'.join(f'  🔒 {a.name}' for a in blocked[:12])
-                + '\n\nRemoving a kernel, bootloader, init system, sudo or the network manager can leave '
-                  'the machine unable to boot or connect.')
+                _t('uninst_protected_msg',
+                   'These are protected system packages and will NOT be removed:\n\n{items}\n\n'
+                   'Removing a kernel, bootloader, init system, sudo or the network manager can leave '
+                   'the machine unable to boot or connect.',
+                   items=items_str))
             apps = [a for a in apps if a not in blocked]
             if not apps:
                 return
@@ -1988,26 +2431,27 @@ class CyberCleanApp(QMainWindow):
             try:
                 p = a.uninstall_preview
                 sz = f'{p["size_mb"]:.0f} MB' if p['size_mb'] > 0 else '—'
-                rev = '' if p['reversible'] else '  ⚠ not reversible'
+                rev = '' if p['reversible'] else _t('uninst_not_reversible', '  ⚠ not reversible')
                 lines.append(f'  • {a.name}  [{sz}]{rev}')
             except Exception:
                 lines.append(f'  • {a.name}')
 
         detail = '\n'.join(lines[:10])
         if len(apps) > 10:
-            detail += f'\n  … and {len(apps) - 10} more'
-        size_str = f'\n\nTotal: ~{total_mb:.0f} MB' if total_mb > 0 else ''
+            detail += f'\n  … +{len(apps) - 10}'
+        size_str = f'\n\n~{total_mb:.0f} MB' if total_mb > 0 else ''
 
         msg = QMessageBox(self)
         msg.setWindowTitle(_t('confirm_uninstall', 'Uninstall'))
         msg.setIcon(QMessageBox.Icon.Question)
         msg.setText(
-            f'Uninstall {len(apps)} app(s)?{size_str}\n\n{detail}'
+            _t('uninst_confirm_msg', 'Uninstall {n} app(s)?{size_str}\n\n{detail}',
+               n=len(apps), size_str=size_str, detail=detail)
         )
         msg.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
-        msg.button(QMessageBox.StandardButton.Yes).setText('✕  UNINSTALL')
+        msg.button(QMessageBox.StandardButton.Yes).setText(f"✕  {_t('btn_uninstall', 'UNINSTALL SELECTED')}")
         msg.setStyleSheet(
             f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;'
         )
@@ -2017,12 +2461,12 @@ class CyberCleanApp(QMainWindow):
         # ── Lock UI so user sees progress, not a frozen window ──────
         self.uninstall_log.clear()
         self.uninstall_log.append(
-            f'<span style="color:{C["cyan"]}">  ▸  Starting uninstall ({len(apps)} app(s))...</span>'
+            f'<span style="color:{C["cyan"]}">{_t("uninst_starting", "  ▸  Starting uninstall ({n} app(s))...", n=len(apps))}</span>'
         )
         # Disable uninstall + refresh buttons during operation
         if hasattr(self, '_uninst_btn'):
             self._uninst_btn.setEnabled(False)
-            self._uninst_btn.setText('⟳  UNINSTALLING...')
+            self._uninst_btn.setText(_t('uninst_running_btn', '⟳  UNINSTALLING...'))
         if hasattr(self, '_uninst_ref_btn'):
             self._uninst_ref_btn.setEnabled(False)
 
@@ -2038,9 +2482,15 @@ class CyberCleanApp(QMainWindow):
                 self.uninstall_log.verticalScrollBar().maximum()
             )
 
+        _disk_before = self._snap.disks[0].percent if self._snap and self._snap.disks else 0.0
+        _free_before = self._snap.disks[0].free if self._snap and self._snap.disks else 0
+        _removed_apps = []
+
         def _on_one_done(app, result):
             """Remove successfully uninstalled app row immediately for instant feedback."""
             if result is True or result == 'UI_OPENED':
+                if result is True:
+                    _removed_apps.append(app)
                 for row in range(self.uninstall_table.rowCount()):
                     item = self.uninstall_table.item(row, 0)
                     if item and item.data(Qt.ItemDataRole.UserRole) == app:
@@ -2051,20 +2501,53 @@ class CyberCleanApp(QMainWindow):
                         break
 
         def _on_all_done(had_ui):
-            """Re-enable UI after all apps processed."""
+            """Re-enable UI, immediately refresh disk usage, and record uninstall in History/Rollback."""
             if hasattr(self, '_uninst_btn'):
                 self._uninst_btn.setEnabled(True)
                 self._uninst_btn.setText(f"✕  {_t('btn_uninstall','UNINSTALL SELECTED')}")
             if hasattr(self, '_uninst_ref_btn'):
                 self._uninst_ref_btn.setEnabled(True)
             _append_log('  ─────────────────────────────────────', 'info')
+
+            # Force immediate disk usage update even while on the Uninstall tab
+            snap_after = self._refresh_disk_usage_now()
+            if hasattr(self, '_si_worker') and self._si_worker.isRunning():
+                self._si_worker.force_refresh()
+
+            if _removed_apps:
+                disk_after = snap_after.disks[0].percent if snap_after and snap_after.disks else _disk_before
+                free_after = snap_after.disks[0].free if snap_after and snap_after.disks else _free_before
+                est_bytes = int(sum(max(0.0, getattr(a, 'size_mb', 0.0)) for a in _removed_apps) * 1024 * 1024)
+                measured = max(0, free_after - _free_before) if _free_before else None
+                freed_bytes = measured if (measured is not None and measured > 0) else est_bytes
+                names_str = ", ".join(a.name for a in _removed_apps[:5])
+                rollback_entries = [
+                    {
+                        'time': datetime.now().isoformat(timespec='seconds'),
+                        'type': f'uninstall:{getattr(a, "source", "pkg")}',
+                        'path': a.name,
+                        'size': int(max(0.0, getattr(a, 'size_mb', 0.0)) * 1024 * 1024),
+                        'note': f'Uninstalled {a.name} ({getattr(a, "version", "")})',
+                    }
+                    for a in _removed_apps
+                ]
+                self._record_session(
+                    freed=freed_bytes,
+                    summary=f'Uninstall: {names_str} ({fmt_size(freed_bytes)})',
+                    rollback=rollback_entries,
+                    disk_before=_disk_before,
+                    disk_after=disk_after,
+                    measured=measured,
+                    planned=est_bytes,
+                )
+
             if had_ui:
                 _append_log(
                     f'  ℹ  {_t("lbl_installer_open","Installer window opened — complete it, then click REFRESH")}.',
                     'warn',
                 )
             else:
-                _append_log('  ✓  Done — refreshing list...', 'ok')
+                _append_log(_t('uninst_done_log', '  ✓  Done — disk usage updated & refreshing list...'), 'ok')
                 QTimer.singleShot(1200, self._load_uninstall)
 
         # ── Launch in background thread — UI stays fully responsive ─
@@ -2080,6 +2563,10 @@ class CyberCleanApp(QMainWindow):
             for line in reversed(LOG_FILE.read_text().strip().splitlines()):
                 try:
                     e = json.loads(line)
+                    # C4 FIX: auto_snapshot is an internal daily metric for the 30-day trend,
+                    # not a user cleaning session — do not pollute LỊCH SỬ DỌN DẸP.
+                    if e.get('summary') == 'auto_snapshot':
+                        continue
                     row = self.log_table.rowCount()
                     self.log_table.insertRow(row)
                     t = datetime.fromisoformat(e['time']).strftime('%Y-%m-%d %H:%M')
@@ -2099,7 +2586,11 @@ class CyberCleanApp(QMainWindow):
             self._log_empty.sync()
 
     def _clear_log(self):
-        if QMessageBox.question(self, 'Clear', 'Delete all history?') == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+            self,
+            _t('clear_history_title', 'Clear'),
+            _t('clear_history_msg', 'Delete all history?'),
+        ) == QMessageBox.StandardButton.Yes:
             LOG_FILE.unlink(missing_ok=True)
             self.log_table.setRowCount(0)
             if hasattr(self, '_log_empty'):
@@ -2130,7 +2621,11 @@ class CyberCleanApp(QMainWindow):
             self._rollback_empty.sync()
 
     def _clear_rollback(self):
-        if QMessageBox.question(self, 'Clear', 'Delete rollback history?') == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+            self,
+            _t('clear_history_title', 'Clear'),
+            _t('clear_rollback_msg', 'Delete rollback history?'),
+        ) == QMessageBox.StandardButton.Yes:
             ROLLBACK_FILE.unlink(missing_ok=True)
             self.rollback_table.setRowCount(0)
             if hasattr(self, '_rollback_empty'):
@@ -2150,6 +2645,10 @@ class CyberCleanApp(QMainWindow):
             self._si_worker.paused = True
         if hasattr(self, '_clock_timer'):
             self._clock_timer.stop()
+        if hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
+            self.dash_holo_core._timer.stop()
+        if hasattr(self, '_game_boost_page') and hasattr(self._game_boost_page, '_btn'):
+            self._game_boost_page._btn._timer.stop()
         if notify and hasattr(self, 'tray'):
             self.tray.showMessage(
                 'CyberClean',
@@ -2307,14 +2806,15 @@ class CyberCleanApp(QMainWindow):
             msg = QMessageBox(self)
             msg.setWindowTitle(_t('setup_required','Setup Required'))
             msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setText(
+            msg.setText(_t(
+                'polkit_warn_msg',
                 'The privileged helper is not installed, so root-level cleaning (system logs, package caches, '
                 'journal) is unavailable.\n\n'
                 'Fix: re-run the installer\n'
                 '  curl -fsSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash\n\n'
                 'Please do NOT start the whole app with sudo: the GUI loses access to your desktop session '
                 '(Wayland/DBus) and may treat /root as your home folder.'
-            )
+            ))
             msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg.setStyleSheet(f'background:{C["bg2"]};color:{C["text"]};font-family:monospace;')
             msg.exec()
@@ -2337,7 +2837,7 @@ class CyberCleanApp(QMainWindow):
             f'QMenu{{background:{C["bg2"]};color:{C["text"]};border:1px solid {C["border2"]};'
             f'font-family:monospace;font-size:11px;padding:4px;}}'
             f'QMenu::item{{padding:7px 20px;border-radius:2px;}}'
-            f'QMenu::item:selected{{background:{C["cyan"]}20;color:{C["cyan"]};}}'
+            f'QMenu::item:selected{{background:{_rgba(C["cyan"], 0.15)};color:{C["cyan"]};}}'
         )
         show_act  = QAction('◈  Show CyberClean', self)
         show_act.triggered.connect(self._show_from_tray)
@@ -2348,6 +2848,8 @@ class CyberCleanApp(QMainWindow):
         self._tray_update_act.triggered.connect(
             lambda: (self._show_from_tray(), self._open_update_dialog())
         )
+        self._tray_autoclean_act = QAction(self._autoclean_btn_text(), self)
+        self._tray_autoclean_act.triggered.connect(self._toggle_auto_clean)
         self._tray_reset_close_act = QAction(
             _t('tray_reset_close_pref', 'Reset close-window preference…'), self
         )
@@ -2363,6 +2865,7 @@ class CyberCleanApp(QMainWindow):
         self.tray_menu.addAction(show_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(clean_act)
+        self.tray_menu.addAction(self._tray_autoclean_act)
         self.tray_menu.addAction(self._tray_update_act)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction(self._tray_reset_close_act)
@@ -2373,7 +2876,10 @@ class CyberCleanApp(QMainWindow):
         self.tray.show()
 
     def _tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
             self._show_from_tray()
 
     def closeEvent(self, event):
@@ -2473,7 +2979,7 @@ class CyberCleanApp(QMainWindow):
         )
         btn_tray = QPushButton(_t('close_btn_tray', 'HIDE TO TRAY'))
         btn_tray.setStyleSheet(
-            f'background:{C["cyan"]}22;color:{C["cyan"]};border:1px solid {C["cyan"]};'
+            f'background:{_rgba(C["cyan"], 0.15)};color:{C["cyan"]};border:1px solid {C["cyan"]};'
             f'padding:7px 22px;font-family:{MONO};font-size:11px;font-weight:bold;border-radius:3px;'
         )
         btn_row.addWidget(btn_quit)
@@ -2510,6 +3016,86 @@ class CyberCleanApp(QMainWindow):
             self._si_worker.paused = (self.stack.currentIndex() != 0)
         if hasattr(self, '_clock_timer'):
             self._clock_timer.start(1000)
+        if self.stack.currentIndex() == 0 and hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
+            self.dash_holo_core._timer.start(120)
+
+    def _theme_btn_text(self) -> str:
+        if is_dark_theme():
+            return _t('btn_theme_light', '☀ LIGHT')
+        return _t('btn_theme_dark', '🌙 CYBER')
+
+    def _toggle_theme(self):
+        new_mode = 'light' if is_dark_theme() else 'dark'
+        self.set_theme(new_mode)
+
+    def set_theme(self, mode: str):
+        # Guard against rebuilding while an active clean/uninstall worker is mid-flight
+        if (getattr(self, 'worker', None) and self.worker.isRunning()) or (
+            getattr(self, '_do_uninst_worker', None) and self._do_uninst_worker.isRunning()
+        ):
+            return
+        self._theme_mode = 'light' if str(mode).lower() == 'light' else 'dark'
+        try:
+            self._settings.setValue('theme_mode', self._theme_mode)
+            self._settings.sync()
+        except Exception:
+            pass
+        set_theme_mode(self._theme_mode)
+        try:
+            import ui_pages as _up
+            _up._CHECK_ICON = None
+        except Exception:
+            pass
+
+        # Preserve live UI state before re-rendering with new theme palette
+        cur_tab = getattr(self, '_active_tab', 'dashboard')
+        saved_sel = set(getattr(self, 'selected', set()))
+        cpu_hist = list(self._charts['cpu'].data) if 'cpu' in getattr(self, '_charts', {}) else []
+        ram_hist = list(self._charts['ram'].data) if 'ram' in getattr(self, '_charts', {}) else []
+        saved_apps = getattr(self, '_all_apps', None)
+
+        # Cleanly stop any read-only scan threads on DeepClean/Advisor pages before replacing widgets
+        for _pg_attr in ('deep_page', 'advisor_page'):
+            _pg = getattr(self, _pg_attr, None)
+            if _pg is not None and hasattr(_pg, 'shutdown'):
+                try:
+                    _pg.shutdown()
+                except Exception:
+                    pass
+
+        old_cw = self.centralWidget()
+        self._init_palette()
+        self._build_ui()
+        if old_cw is not None:
+            old_cw.deleteLater()
+
+        # Restore target selection checkboxes
+        self.selected = saved_sel
+        for tid, chk in getattr(self, 'target_checks', {}).items():
+            chk.blockSignals(True)
+            chk.setChecked(tid in self.selected)
+            chk.blockSignals(False)
+
+        # Restore sparkline history
+        if 'cpu' in self._charts:
+            self._charts['cpu'].data = cpu_hist
+            self._charts['cpu'].update()
+        if 'ram' in self._charts:
+            self._charts['ram'].data = ram_hist
+            self._charts['ram'].update()
+
+        # Restore cached uninstall list if already scanned
+        if saved_apps is not None:
+            self._all_apps = saved_apps
+            self._rebuild_uninstall_filter_buttons(saved_apps)
+            self._populate_uninstall(saved_apps)
+
+        self._nav(cur_tab)
+        if self._snap is not None:
+            try:
+                self._on_snapshot(self._snap)
+            except Exception:
+                pass
 
     def _change_language(self, index):
         code = list(SUPPORTED_LANGS.keys())[index]
@@ -2523,13 +3109,21 @@ class CyberCleanApp(QMainWindow):
         # ── Sidebar nav buttons ──────────────────────────────
         for (pid, icon_name, label), btn in zip(self.NAV_ITEMS, self.nav_btns.values()):
             btn.set_label(label)
-        # Sidebar static labels (NAVIGATION / ACTIVE)
+        # Sidebar static labels (NAVIGATION / ACTIVE / DISK USAGE)
         if hasattr(self, '_lbl_navigation'):
             self._lbl_navigation.setText(_t('lbl_navigation', 'NAVIGATION'))
         if hasattr(self, '_lbl_status_active'):
             self._lbl_status_active.setText(_t('lbl_active', 'ACTIVE'))
+        if hasattr(self, '_lbl_sidebar_disk'):
+            self._lbl_sidebar_disk.setText(_t('lbl_disk', 'DISK USAGE'))
 
         # ── Header ───────────────────────────────────────────
+        if hasattr(self, '_theme_btn'):
+            self._theme_btn.setText(self._theme_btn_text())
+            self._theme_btn.setIcon(_theme_icon(is_dark_theme(), size=16))
+            self._theme_btn.setToolTip(_t('theme_toggle_tip', ''))
+        if hasattr(self, '_lbl_holo_sec'):
+            self._lbl_holo_sec.setText(_t('lbl_holo_3d', '3D HOLO DISK CORE'))
         if hasattr(self, '_os_info_lbl'):
             self._os_info_lbl.setText(
                 f'{OS.upper()}  ·  '
@@ -2553,14 +3147,24 @@ class CyberCleanApp(QMainWindow):
         if hasattr(self, '_ref_btn'):
             self._ref_btn.setText(f"↻  {_t('btn_refresh','REFRESH')}")
         if hasattr(self, '_lbl_health_sec'):
-            self._lbl_health_sec.setText(_t('lbl_health', 'HEALTH SCORE'))
+            self._lbl_health_sec.setText(_t('lbl_health', 'LOAD INDEX'))
+        htip = _t('health_tooltip', '')
+        for hw_attr in ('_health_card', '_lbl_health_sec', 'health_lbl', 'health_sub'):
+            hw = getattr(self, hw_attr, None)
+            if hw is not None:
+                hw.setToolTip(htip)
         if hasattr(self, '_lbl_oneclick_sec'):
             self._lbl_oneclick_sec.setText(_t('lbl_oneclick', 'ONE-CLICK OPTIMIZE'))
+        if getattr(self, '_oneclick_idle', False) and hasattr(self, 'oneclick_log'):
+            self.oneclick_log.setText(_t('lbl_ready', '● READY'))
+        for ct, cs, tk, td, sk, sd in getattr(self, '_oc_chip_lbls', []):
+            ct.setText(_t(tk, td))
+            cs.setText(_t(sk, sd))
         if hasattr(self, '_lbl_oc_desc'):
             self._lbl_oc_desc.setText(
-                'Flush DNS  ·  Clear TEMP  ·  Drop cache  ·  TRIM SSD'
+                _t('oc_desc_win', 'Flush DNS  ·  Clear TEMP  ·  Drop cache  ·  TRIM SSD')
                 if IS_WINDOWS else
-                'Drop cache  ·  Tune swap  ·  TRIM SSD  ·  Clean journal'
+                _t('oc_desc_linux', 'Drop cache  ·  Tune swap  ·  TRIM SSD  ·  Clean journal')
             )
         if hasattr(self, 'oneclick_btn'):
             self.oneclick_btn.setText(f"⚡  {_t('btn_optimize','OPTIMIZE NOW')}")
@@ -2588,6 +3192,11 @@ class CyberCleanApp(QMainWindow):
                 f"▽ {_t('col_free','Free')}",
                 '%'
             ])
+        if self._snap is not None:
+            try:
+                self._on_snapshot(self._snap)
+            except Exception:
+                pass
 
         # ── Clean tab ─────────────────────────────────────────
         if hasattr(self, '_dry_btn'):
@@ -2617,10 +3226,14 @@ class CyberCleanApp(QMainWindow):
             self._lbl_uninst_title.setText(_t('uninstall_title', 'APP UNINSTALLER'))
         if hasattr(self, '_uninst_ref_btn') and self._uninst_ref_btn.isEnabled():
             self._uninst_ref_btn.setText(f"↻ {_t('btn_refresh','REFRESH')}")
+        if hasattr(self, '_uninst_btn') and self._uninst_btn.isEnabled():
+            self._uninst_btn.setText(f"✕  {_t('btn_uninstall','UNINSTALL SELECTED')}")
         if hasattr(self, '_lbl_uninst_hint'):
             self._lbl_uninst_hint.setText(_t('uninstall_hint', 'Select one or more apps  →  Uninstall'))
         if hasattr(self, 'uninstall_search'):
             self.uninstall_search.setPlaceholderText(_t('placeholder_filter','Filter apps...'))
+        if hasattr(self, 'uninstall_log'):
+            self.uninstall_log.setPlaceholderText(_t('uninst_placeholder_log', '  → Select an app and click Uninstall...'))
         if hasattr(self, 'uninstall_table'):
             self.uninstall_table.setHorizontalHeaderLabels([
                 _t('col_name','NAME'), _t('col_version','VERSION'),
@@ -2696,9 +3309,9 @@ class CyberCleanApp(QMainWindow):
                 '_boost_memory_tune': (f"\u2b21  {_t('booster_mem_tune','MEMORY TUNE')}",
                                        _t('mem_tune_desc','Linux: set swappiness=10 + compact memory. Windows: flush standby list & optimize VM.'),
                                        f"\u25b6  {_t('btn_tune_now','TUNE NOW')}"),
-                '_boost_kill_bloat':  (f"\u2715  {_t('booster_kill_bloat','KILL BACKGROUND BLOAT')}",
-                                       _t('kill_desc','Find and kill zombie, sleeping & high-memory idle processes safely.'),
-                                       f"\u2715  {_t('btn_kill_bloat','KILL BLOAT')}"),
+                '_boost_kill_bloat':  (f"\u2715  {_t('booster_kill_bloat','THROTTLE BACKGROUND BLOAT')}",
+                                       _t('kill_desc','Deprioritize idle background bloat processes safely without killing active apps.'),
+                                       f"\u2715  {_t('btn_kill_bloat','THROTTLE BLOAT')}"),
             }
             for slot_name, (title, desc, btn_text) in _cmap.items():
                 if slot_name in self._boost_lbls:
@@ -2714,9 +3327,15 @@ class CyberCleanApp(QMainWindow):
             self._more_lbl.setText(_t('more_ways', 'Packages, Docker, dev caches, Trash — or find the biggest space hogs:'))
             self._more_deep_btn.setText(f"{_t('nav_deep', 'DEEP CLEAN')} ›")
             self._more_adv_btn.setText(f"{_t('nav_advisor', 'DISK ADVISOR')} ›")
-        for _pg in (getattr(self, 'deep_page', None), getattr(self, 'advisor_page', None)):
-            if _pg is not None:
+        for _pg in (getattr(self, 'deep_page', None), getattr(self, 'advisor_page', None), getattr(self, '_game_boost_page', None)):
+            if _pg is not None and hasattr(_pg, 'retranslate'):
                 _pg.retranslate()
+        if hasattr(self, '_autoclean_btn'):
+            self._autoclean_btn.setText(self._autoclean_btn_text())
+            self._autoclean_btn.setToolTip(_t('autoclean_tip', ''))
+        if hasattr(self, '_tray_autoclean_act'):
+            self._tray_autoclean_act.setText(self._autoclean_btn_text())
+        self._rebuild_uninstall_filter_buttons(getattr(self, '_all_apps', []))
         if hasattr(self, '_target_lbls'):
             badge_map = {
                 'safe':    _t('badge_safe',    'SAFE'),
@@ -2818,21 +3437,41 @@ class CyberCleanApp(QMainWindow):
             self._clock_timer.stop()
         if hasattr(self, '_auto_clean_timer'):
             self._auto_clean_timer.stop()
-        # Deep Clean / Disk Advisor: một lần xóa đang chạy phải được chờ xong, không bị cắt giữa chừng
-        for _pg in (getattr(self, 'deep_page', None), getattr(self, 'advisor_page', None)):
+        # Deep Clean / Disk Advisor / GameBoostPage: đảm bảo dọn/khôi phục trạng thái hoàn tất khi thoát
+        for _pg in (getattr(self, 'deep_page', None), getattr(self, 'advisor_page', None), getattr(self, '_game_boost_page', None)):
             try:
-                if _pg is not None:
+                if _pg is not None and hasattr(_pg, 'shutdown'):
                     _pg.shutdown()
             except Exception:
                 pass
         # ── Stop all running workers gracefully ─────────────────────────────
-        # CleanWorker — most critical: may be deleting files mid-operation
+        # CleanWorker — most critical: may be deleting files mid-operation.
+        # Cooperative cancellation only — never force-kill a running CleanWorker thread.
+        self._shutting_down = True
         if getattr(self, 'worker', None) and self.worker.isRunning():
-            self.worker.stop()       # request graceful stop
+            self.worker.stop()       # request cooperative stop & cancel active helpers
             self.worker.quit()       # interrupt event loop
-            if not self.worker.wait(4000):   # wait up to 4s for current target
-                self.worker.terminate()      # force kill only if stuck
-                self.worker.wait(1000)
+            deadline_w = time.monotonic() + 30.0
+            while self.worker.isRunning() and time.monotonic() < deadline_w:
+                try:
+                    app_inst = QApplication.instance()
+                    if app_inst is not None:
+                        app_inst.processEvents()
+                except Exception:
+                    pass
+                if self.worker.wait(50):
+                    break
+            try:
+                if hasattr(PRIV, 'wait_active_helpers'):
+                    PRIV.wait_active_helpers(timeout=5.0)
+            except Exception:
+                pass
+            try:
+                app_inst = QApplication.instance()
+                if app_inst is not None:
+                    app_inst.processEvents()
+            except Exception:
+                pass
 
         # Smart boost workers
         if getattr(self, '_smart_worker', None) and self._smart_worker.isRunning():
@@ -2869,6 +3508,36 @@ class CyberCleanApp(QMainWindow):
             self._auto_worker.quit()
             self._auto_worker.wait(1000)
 
+    def _autoclean_btn_text(self) -> str:
+        if getattr(self, '_auto_clean_enabled', False):
+            return f"● {_t('autoclean_btn_on', 'Auto-Clean: ON (6h)')}"
+        return f"○ {_t('autoclean_btn_off', 'Auto-Clean: OFF')}"
+
+    def _toggle_auto_clean(self):
+        self.set_auto_clean_enabled(not getattr(self, '_auto_clean_enabled', False))
+
+    def set_auto_clean_enabled(self, enabled: bool):
+        self._auto_clean_enabled = bool(enabled)
+        try:
+            self._settings.setValue('auto_clean_enabled', self._auto_clean_enabled)
+            self._settings.sync()
+        except Exception:
+            pass
+        if hasattr(self, '_auto_clean_timer'):
+            if self._auto_clean_enabled:
+                self._auto_clean_timer.start(5 * 60 * 1000)
+            else:
+                self._auto_clean_timer.stop()
+        if hasattr(self, '_autoclean_btn'):
+            self._autoclean_btn.setText(self._autoclean_btn_text())
+        if hasattr(self, '_tray_autoclean_act'):
+            self._tray_autoclean_act.setText(self._autoclean_btn_text())
+
+    def _on_game_boost_toggled(self, active: bool):
+        self._game_active = bool(active)
+        if hasattr(self, '_si_worker'):
+            self._si_worker.paused = active or (self.stack.currentIndex() != 0)
+
     def _start_auto_clean(self):
         self._scheduler = IdleScheduler(
             min_interval_hours=6,
@@ -2877,42 +3546,46 @@ class CyberCleanApp(QMainWindow):
         )
         self._auto_clean_timer = QTimer(self)
         self._auto_clean_timer.timeout.connect(self._run_auto_clean)
-        # Check mỗi 5 phút xem máy có rảnh không
-        self._auto_clean_timer.start(5 * 60 * 1000)
+        # Mặc định TẮT (OFF) — chỉ chạy timer khi người dùng chủ động bật Auto-Clean
+        if getattr(self, '_auto_clean_enabled', False):
+            self._auto_clean_timer.start(5 * 60 * 1000)
 
     def _run_auto_clean(self):
+        if not getattr(self, '_auto_clean_enabled', False):
+            return
         if self.isVisible() or getattr(self, '_game_active', False):
             return
-        # Chỉ dọn khi máy thực sự rảnh và đã hết cooldown
-        if self._scheduler.should_run():
-            self._do_background_clean(notify=True)
-            self._scheduler.mark_completed()
+        # Fast non-blocking cooldown check on GUI thread; the 2s CPU/network sample runs inside _AutoCleanWorker!
+        if self._scheduler.time_until_eligible() <= 0:
+            self._do_background_clean(notify=True, use_scheduler=True)
 
-    def _do_background_clean(self, notify=True):
-        # Nền chỉ chạy tầng AUTO có cờ `scheduled` (xem rules/*.toml + CleanTarget). Không còn danh sách
-        # "bỏ qua" tên-theo-tên: tầng REVIEW (thùng rác, orphan, dev cache, Docker...) không bao giờ
-        # được tự chạy, và cleaner tự từ chối lần nữa ở clean(..., unattended=True).
+    def _do_background_clean(self, notify=True, use_scheduler=False):
+        # Nền chỉ chạy tầng AUTO có cờ `scheduled` và TUYỆT ĐỐI KHÔNG BAO GIỜ chạm vào Trash / Recycle Bin.
+        _never_bg = {'empty_trash', 'win_recycle', 'trash', 'recycle_bin'}
         safe_targets = [
             t.id for t in CLEANER.get_targets()
-            if t.tier == 'auto' and t.scheduled and t.enabled
+            if t.tier == 'auto' and t.scheduled and t.enabled and t.id not in _never_bg
         ]
         if not safe_targets:
             return
 
         if getattr(self, '_auto_worker', None) and self._auto_worker.isRunning():
-            if hasattr(self, 'tray'):
+            if hasattr(self, 'tray') and not use_scheduler:
                 self.tray.showMessage('CyberClean',
                                       'Already cleaning, please wait...',
                                       QSystemTrayIcon.MessageIcon.Warning, 2000)
             return
 
-        self._auto_worker = _AutoCleanWorker(safe_targets, cleaner=CLEANER)
+        sched = getattr(self, '_scheduler', None) if use_scheduler else None
+        self._auto_worker = _AutoCleanWorker(safe_targets, cleaner=CLEANER, scheduler=sched)
         self._auto_worker.done.connect(
             lambda freed, n: self._on_auto_clean_done(freed, n, notify)
         )
         self._auto_worker.start()
 
     def _on_auto_clean_done(self, freed_bytes, num_targets, notify=True):
+        if freed_bytes < 0:
+            return
         if hasattr(self, 'tray'):
             self.tray.setToolTip(f'CyberClean v{__version__}')
         if notify and hasattr(self, 'tray'):
@@ -2946,7 +3619,7 @@ class CyberCleanApp(QMainWindow):
         self._upd_lbl.setText(_t("upd_badge", "⬆ v{ver} UPDATE", ver=ver))
         self._upd_lbl.setStyleSheet(
             f'color:{C["yellow"]};font-size:11px;letter-spacing:0.6px;'
-            f'font-family:{UI};border:1px solid {C["yellow"]}55;'
+            f'font-family:{UI};border:1px solid {_rgba(C["yellow"], 0.40)};'
             f'padding:5px 10px;border-radius:{C["radius"]};'
         )
         self._upd_lbl.setVisible(True)
@@ -2990,6 +3663,10 @@ if __name__ == '__main__':
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')
     app.setApplicationVersion(__version__)
+    try:
+        app.setDesktopFileName('cyberclean')
+    except Exception:
+        pass
     
     # Windows OTA: if update is in progress, don't ask the user to kill.
     # The update itself will restart the app after installation.
@@ -3054,6 +3731,15 @@ if __name__ == '__main__':
         sys.exit(1)
     # Keep _lock_file alive for the process lifetime
     app._cc_lock = _lock_file
+    if sys.platform == 'win32':
+        try:
+            import ctypes as _ct_mutex
+            # Create Win32 Named Mutex matching AppMutex=CyberClean_Single_Instance_Lock in CyberClean.iss
+            app._cc_win_mutex = _ct_mutex.windll.kernel32.CreateMutexW(
+                None, False, 'CyberClean_Single_Instance_Lock'
+            )
+        except Exception:
+            pass
 
     app.setOrganizationName('CyberClean')
     app.setApplicationName('CyberClean')

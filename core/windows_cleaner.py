@@ -228,6 +228,9 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         except Exception as e:                          # luật hỏng → vẫn chạy phần còn lại
             self.ruleset = R.RuleSet()
             self._rules_error = str(e)
+        self._estimate_cache = {}
+        self._approved_plans = {}
+        self._review_cache = {}
         self._targets: Dict[str, CleanTarget] = {}
         self._refresh_targets()
 
@@ -351,13 +354,47 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             raise ValueError(f'{target_id} is not a review target')
         if self.has_rules(target_id):
             return PlanCleanerMixin.review_scan(self, target_id, progress_cb)
+        rc = self._ensure_review_cache_dict()
         est = self._run_target(target_id, True)
         scan = ReviewScan(target_id, permanent=target_id != 'win_prefetch')
-        scan.items.append(ReviewItem(
-            id='all', label=tgt.name, size=est.freed_bytes, files=est.files_removed, detail=tgt.desc,
-            risk=self._MONOLITH_RISK.get(target_id, 'medium'),
-            blocked=est.error or '', payload={}))
-        scan.notes = list(est.notes)
+        risk = self._MONOLITH_RISK.get(target_id, 'medium')
+        if target_id in ('win_prefetch', 'win_shader_cache', 'win_crash_dumps') and est.rollback:
+            plan = E.Plan(target_id)
+            pol = E.Policy(min_age_sec=0.0, recent_sec=0.0, require_owner=False)
+            for rb in est.rollback[:200]:
+                p_str = rb.get('path', '')
+                if not p_str:
+                    continue
+                it, _ = E.make_item(
+                    p_str, pol, label=p_str, group=target_id,
+                    note=rb.get('note', tgt.desc), risk=risk,
+                )
+                if it is not None:
+                    plan.items.append(it)
+                    mtime = it.newest
+                    sz = it.size or int(rb.get('size', 0))
+                    fls = it.files or 1
+                else:
+                    try:
+                        mtime = Path(p_str).stat().st_mtime
+                    except OSError:
+                        mtime = 0.0
+                    sz = int(rb.get('size', 0))
+                    fls = 1
+                scan.items.append(ReviewItem(
+                    id=p_str, label=p_str, size=sz, files=fls,
+                    newest=mtime, detail=rb.get('note', tgt.desc),
+                    risk=risk, blocked=est.error or '', payload={'path': p_str}))
+            if len(est.rollback) > 200:
+                scan.notes.append(f'Showing first 200 of {len(est.rollback)} items.')
+            rc[target_id] = (time.monotonic(), plan)
+        else:
+            scan.items.append(ReviewItem(
+                id='all', label=tgt.name, size=est.freed_bytes, files=est.files_removed, detail=tgt.desc,
+                risk=risk,
+                blocked=est.error or '', payload={}))
+            rc[target_id] = (time.monotonic(), est)
+        scan.notes.extend(est.notes)
         if target_id in ('win_recycle', 'win_eventlog'):
             scan.warning = 'This cannot be undone. Nothing is selected by default.'
         return scan
@@ -370,10 +407,27 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             return r
         if self.has_rules(target_id):
             return PlanCleanerMixin.review_clean(self, target_id, item_ids, dry)
-        if 'all' not in item_ids:
+        if not item_ids:
             return CleanResult(target_id, dry=dry)
-        r = self._run_target(target_id, dry)
-        r.dry = dry
+        cached = self._get_fresh_review_cache(target_id)
+        if cached is None:
+            return self._expired_review_result(target_id, dry)
+        if 'all' in item_ids or target_id not in ('win_prefetch', 'win_shader_cache', 'win_crash_dumps'):
+            r = self._run_target(target_id, dry)
+            r.dry = dry
+            if not dry:
+                self._cache_invalidate(target_id)
+            return r
+        if not isinstance(cached, E.Plan):
+            return self._expired_review_result(target_id, dry)
+        wanted = set(item_ids)
+        sel = E.Plan(
+            target_id,
+            [i for i in cached.items if i.id in wanted or i.path in wanted],
+            list(cached.skipped),
+            list(cached.notes),
+        )
+        r = self.result_from_plan(target_id, sel, dry=dry, label=target_id)
         if not dry:
             self._cache_invalidate(target_id)
         return r
@@ -474,21 +528,41 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         if not pf.exists():
             return r
         now = time.time()
-        old_files = [f for f in pf.glob('*.pf') if (now - f.stat().st_mtime) > 604800]
-        r.freed_bytes   = sum(f.stat().st_size for f in old_files)
-        r.files_removed = len(old_files)
+        old_files = [f for f in pf.glob('*.pf') if not f.is_symlink() and (now - f.stat().st_mtime) > 604800]
+        for f in old_files:
+            try:
+                sz = f.stat().st_size
+                r.freed_bytes += sz
+                r.files_removed += 1
+                r.rollback.append({
+                    'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'type': 'win_prefetch', 'path': str(f),
+                    'size': sz, 'note': 'prefetch file (>7d old)',
+                })
+            except OSError:
+                pass
         if not dry and is_admin():
             deleted = 0
+            actual_rb = []
             for f in old_files:
                 try:
                     sz = f.stat().st_size
                     f.unlink()
                     deleted += sz
+                    actual_rb.append({
+                        'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                        'type': 'win_prefetch', 'path': str(f),
+                        'size': sz, 'note': 'prefetch file (>7d old)',
+                    })
                 except (PermissionError, OSError):
                     pass
+            r.rollback      = actual_rb
             r.freed_bytes   = deleted
-            r.files_removed = len([f for f in old_files if not f.exists()])
+            r.files_removed = len(actual_rb)
         elif not dry and not is_admin():
+            r.rollback      = []
+            r.freed_bytes   = 0
+            r.files_removed = 0
             r.error = 'Needs admin — relaunch as Administrator'
         return r
 
@@ -749,21 +823,39 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             # Vulkan pipeline cache (common location)
             local / 'Temp/NVIDIA Corporation/Turing',
         ]
-        existing = [d for d in shader_dirs if d.exists()]
-        size_before = sum(_dir_size_safe(d) for d in existing)
-        r.freed_bytes = size_before
-        if not dry:
-            total_freed = 0
-            for d in existing:
-                before = _dir_size_safe(d)
-                shutil.rmtree(d, ignore_errors=True)
-                total_freed += _real_freed(before, d)
+        existing = [d for d in shader_dirs if d.exists() and not d.is_symlink()]
+        size_before = 0
+        for d in existing:
+            sz = _dir_size_safe(d)
+            size_before += sz
+            if dry and sz > 0:
                 r.rollback.append({
                     'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                     'type': 'shader_cache', 'path': str(d),
-                    'size': before,
-                    'note': 'auto-rebuilds on next game launch (first launch slower)',
+                    'size': sz,
+                    'note': 'auto-rebuilds on next game launch',
                 })
+        r.freed_bytes = size_before
+        if not dry:
+            total_freed = 0
+            actual_rb = []
+            for d in existing:
+                before = _dir_size_safe(d)
+                shutil.rmtree(d, ignore_errors=True)
+                try:
+                    d.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                freed_now = _real_freed(before, d)
+                total_freed += freed_now
+                if freed_now > 0:
+                    actual_rb.append({
+                        'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                        'type': 'shader_cache', 'path': str(d),
+                        'size': freed_now,
+                        'note': 'auto-rebuilds on next game launch (first launch slower)',
+                    })
+            r.rollback = actual_rb
             r.freed_bytes = total_freed
         return r
 
@@ -791,21 +883,24 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             return r
 
         if dry:
-            # Estimate: parse DISM analyze output for estimated reduction
+            # Estimate: pass /English so DISM output is locale-independent across all Windows display languages
             out, code = run_win(
-                'Dism /Online /Cleanup-Image /AnalyzeComponentStore 2>nul',
+                'Dism /Online /English /Cleanup-Image /AnalyzeComponentStore 2>nul',
                 timeout=120,
             )
             if code != 0:
                 r.error = 'DISM analysis failed — may not be supported on this edition'
                 return r
-            # Look for "Component Store Size (Estimated Reduction)" line
+            # Look for "Component Store Size (Estimated Reduction)" or "Backups and Disabled Features" line
             for line in out.splitlines():
-                if 'Estimated Reduction' in line or 'ReducedSize' in line:
-                    m = re.search(r'([\d,]+)\s*MB', line)
+                if any(k in line for k in ('Estimated Reduction', 'ReducedSize', 'Backups and Disabled Features')):
+                    m = re.search(r'([\d.,]+)\s*(MB|GB|KB)', line, re.IGNORECASE)
                     if m:
                         try:
-                            r.freed_bytes = int(m.group(1).replace(',', '')) * 1024 * 1024
+                            val = float(m.group(1).replace(',', ''))
+                            unit = m.group(2).upper()
+                            mult = 1024**3 if unit == 'GB' else (1024 if unit == 'KB' else 1024**2)
+                            r.freed_bytes = int(val * mult)
                         except (ValueError, TypeError):
                             pass
                     break
@@ -814,7 +909,7 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             # which breaks Windows Update on managed/office machines (WSUS/SCCM).
             # /StartComponentCleanup alone is safe and still reclaims significant space.
             out, code = run_win(
-                'Dism /Online /Cleanup-Image /StartComponentCleanup 2>nul',
+                'Dism /Online /English /Cleanup-Image /StartComponentCleanup 2>nul',
                 timeout=600,   # can take several minutes on first run
             )
             if code not in (0, 3010):
@@ -856,12 +951,15 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
                 except Exception:
                     pass
                 if _pending or code == 3010:
-                    r.error = (
-                        '⚠ DISM xong — cần RESTART để hoàn tất. '
-                        'Hãy RESTART đúng cách (Start → Restart), '
-                        'KHÔNG tắt nguồn trực tiếp hoặc force shutdown. '
-                        'Nếu tắt nguồn giữa chừng Windows sẽ chạy Startup Repair khi mở lại.'
-                    )
+                    try:
+                        from utils.i18n import _t as _tr
+                        warn_msg = _tr(
+                            'win_dism_reboot_warn',
+                            '⚠ DISM cleanup completed — please RESTART Windows (Start → Restart) to finish freeing space',
+                        )
+                    except Exception:
+                        warn_msg = '⚠ DISM cleanup completed — please RESTART Windows (Start → Restart) to finish freeing space'
+                    r.notes.append(warn_msg)
         return r
 
     # ── Event Logs ────────────────────────────────────────────
@@ -1014,12 +1112,16 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             except OSError:
                 pass
         if not dry:
-            # Recompute actual freed (some files may have already been removed)
+            # Recompute actual freed and filter rollback to only files actually deleted
             remaining = 0
+            remaining_paths = set()
             for f in all_files:
                 try:
                     remaining += f.stat().st_size
+                    remaining_paths.add(str(f))
                 except OSError:
                     pass   # already deleted — counts as freed
             r.freed_bytes = max(0, r.freed_bytes - remaining)
+            r.rollback = [rb for rb in r.rollback if rb.get('path') not in remaining_paths]
+            r.files_removed = len(r.rollback)
         return r
