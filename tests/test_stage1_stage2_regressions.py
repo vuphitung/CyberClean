@@ -29,7 +29,10 @@ from core import windows_cleaner as W
 from utils import i18n
 
 ROOT = Path(__file__).resolve().parent.parent
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
 import struct
 import subprocess
 import textwrap
@@ -921,10 +924,11 @@ def test_b2_windows_booster_timer_restore_and_partial_failure_handling(monkeypat
         _cleanup_pyqt_stub(installed_stub, before_mods)
 
 
+@pytest.mark.skipif(resource is None, reason="POSIX resource API")
 def test_b3_linux_nice_capability_check_and_pid_identity_verification(monkeypatch):
     monkeypatch.setattr(B, "IS_LINUX", True)
     monkeypatch.setattr(B, "IS_WINDOWS", False)
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
 
     monkeypatch.setattr(resource, "getrlimit", lambda _: (0, 0))
     assert B._can_restore_linux_nice(0) is False
@@ -1040,6 +1044,7 @@ def test_b6_and_b7_preview_plan_bound_to_clean_and_new_files_preserved(monkeypat
     assert f_after.exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX UID behavior")
 def test_c1_kill_bloat_separates_mb_affected_from_actual_mb_freed(monkeypatch):
     monkeypatch.setattr(B, "IS_LINUX", True)
     monkeypatch.setattr(B, "IS_WINDOWS", False)

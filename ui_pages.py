@@ -568,6 +568,8 @@ class ReviewPanel(ElevatedCard):
 
     def set_target(self, target, scan=None):
         """Chuyển sang một danh mục. `scan` (nếu có) là kết quả quét còn mới → hiện ngay, khỏi quét lại."""
+        if getattr(self, '_shutting_down', False):
+            return
         self._t = target
         self._scan = None
         self._result.setVisible(False)
@@ -582,15 +584,27 @@ class ReviewPanel(ElevatedCard):
             self.rescan()
 
     def rescan(self):
-        if self._t is None or self._deleting:
+        if getattr(self, '_shutting_down', False) or self._t is None or self._deleting:
             return
         self._set_busy(True, _t('review_scanning', 'Scanning…'))
         self._worker = _ScanWorker(self._cl, self._t.id)
+        if sys.platform == 'win32':
+            from utils.windows_workers import track_thread
+            track_thread(self, self._worker)
         self._worker.done.connect(self._on_scan)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def shutdown(self):
+        self._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads, tracked_threads
+            workers = tracked_threads(self) + [self._worker]
+            for worker in workers:
+                if worker is not None:
+                    worker.requestInterruption()
+            drain_threads(workers)
+            return
         w = self._worker
         if w is not None and w.isRunning():
             w.wait(20000 if self._deleting else 5000)
@@ -749,6 +763,8 @@ class ReviewPanel(ElevatedCard):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def _delete(self):
+        if getattr(self, '_shutting_down', False):
+            return
         sel = self._checked()
         if not sel or self._busy or self._t is None:
             return
@@ -757,6 +773,9 @@ class ReviewPanel(ElevatedCard):
         self._deleting = True
         self._set_busy(True, _t('review_deleting', 'Deleting…'))
         self._worker = _CleanWorker(self._cl, self._t.id, [i.id for i in sel])
+        if sys.platform == 'win32':
+            from utils.windows_workers import track_thread
+            track_thread(self, self._worker)
         tgt = self._t
         self._worker.done.connect(lambda res, t=tgt: self._on_cleaned(t, res))
         self._worker.failed.connect(lambda msg, t=tgt: self._on_failed(t.id, msg))
@@ -915,6 +934,8 @@ class DeepCleanPage(QWidget):
         self._total.setText(_t('deep_total', '{size} to review across {n} categories').format(size=fmt_size(total), n=n))
 
     def _toggle_scan_all(self):
+        if getattr(self, '_shutting_down', False):
+            return
         w = self._all_worker
         if w is not None and w.isRunning():
             w.stop()
@@ -940,6 +961,8 @@ class DeepCleanPage(QWidget):
         self._record(tid, scan)
 
     def _on_scan_all_done(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self._scan_all_btn.setText(_t('btn_scan_all', 'SCAN ALL'))
         for tid, card in self._cards.items():
             if tid not in self._scans and card._kind == 'scanning':
@@ -969,6 +992,15 @@ class DeepCleanPage(QWidget):
             self._left_col.setFixedWidth(250 if w < 860 else (290 if w < 1020 else 330))
 
     def shutdown(self):
+        self._shutting_down = True
+        self._panel._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads
+            if self._all_worker is not None and self._all_worker.isRunning():
+                self._all_worker.stop()
+            drain_threads([self._all_worker])
+            self._panel.shutdown()
+            return
         if self._all_worker is not None and self._all_worker.isRunning():
             self._all_worker.stop()
             self._all_worker.wait(8000)
@@ -1208,7 +1240,7 @@ class AdvisorPage(QWidget):
             self.start()
 
     def start(self):
-        if self.scanning:
+        if getattr(self, '_shutting_down', False) or self.scanning:
             return
         self._scan_btn.setText(f"■  {_t('btn_stop', 'STOP')}")
         self._prog.setVisible(True)
@@ -1221,6 +1253,13 @@ class AdvisorPage(QWidget):
         self._worker.start()
 
     def shutdown(self):
+        self._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads
+            if self.scanning:
+                self._worker.stop()
+            drain_threads([self._worker])
+            return
         if self.scanning:
             self._worker.stop()
             self._worker.wait(5000)
@@ -1265,13 +1304,14 @@ class AdvisorPage(QWidget):
         from core import advisor
         self._clear_results()
         groups = rep.by_category()
+        category_totals = rep.category_totals()
         if not rep.findings:
             self._status.setText(_t('advisor_nothing', 'Nothing large found — your disk looks tidy.'))
             self._stack.setCurrentIndex(0)
             return
         self._stack.setCurrentIndex(1)
 
-        cats = [(c, sum(f.size for f in fs), fs) for c, fs in groups.items() if c != 'info']
+        cats = [(c, category_totals.get(c, 0), fs) for c, fs in groups.items() if c != 'info']
         cats.sort(key=lambda x: -x[1])
         n_items = sum(len(fs) for _, _, fs in cats)
 
@@ -1317,7 +1357,7 @@ class AdvisorPage(QWidget):
             self._rl.addWidget(share_card)
 
         # ── thẻ danh mục ──
-        for cat, total, findings in [(c, sum(f.size for f in fs), fs) for c, fs in groups.items()]:
+        for cat, total, findings in [(c, category_totals.get(c, 0), fs) for c, fs in groups.items()]:
             color = CAT_COLORS.get(cat, C['text3'])
             card = ElevatedCard(accent_color=color, shadow=False)
             card.setObjectName('cat')

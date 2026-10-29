@@ -16,7 +16,9 @@ import math
 import os
 import platform
 import tempfile
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 from PyQt6.QtCore import (
@@ -196,6 +198,10 @@ def _global_check_icon_path() -> str:
 
 def apply_elevation_shadow(widget: QWidget, blur: int = 20, y_offset: int = 4, alpha: int = -1):
     """Attach a subtle commercial drop shadow (soft ambient shadow in Light Mode, deep shadow in Dark Mode)."""
+    if IS_WINDOWS:
+        # Qt's software shadow re-rasterizes the complete card when a live
+        # child changes. Borders/gradients already provide card separation.
+        return
     try:
         eff = QGraphicsDropShadowEffect(widget)
         dark = is_dark_theme()
@@ -730,10 +736,22 @@ class Cyber3DDiskCore(QWidget):
             self._particles.append(Point3D(pr * math.cos(theta), py, pr * math.sin(theta)))
 
         self._hover = False
+        self._last_motion = 0.
+        self._frame_time = time.monotonic()
+        self._tilt_y = 0.
+        self._static_key = None
+        self._static_builds = 0
+        self._ring_geometry = []
+        for points, tilt in ((self._ring3, 32.), (self._ring2, -18.), (self._ring1, 8.)):
+            cosine, sine = math.cos(math.radians(tilt)), math.sin(math.radians(tilt))
+            self._ring_geometry.append([(pt.x*cosine-pt.y*sine, pt.x*sine+pt.y*cosine, pt.z)
+                                        for pt in points])
         self._intro_ticks = 0
         self._timer = QTimer(self)
+        if IS_WINDOWS:
+            self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # Adaptive: 33ms (~30 FPS) on intro/hover, throttles to 120ms (~8 FPS) when idle
+        self._timer.start(33)  # 30 FPS; hidden/minimized widgets pause to avoid background work
 
     def set_percent(self, v: float):
         self.percent = float(v)
@@ -747,6 +765,7 @@ class Cyber3DDiskCore(QWidget):
 
     def showEvent(self, ev):
         self._intro_ticks = 0
+        self._frame_time = time.monotonic()
         self._timer.start(33)
         super().showEvent(ev)
 
@@ -756,11 +775,15 @@ class Cyber3DDiskCore(QWidget):
 
     def enterEvent(self, event):
         self._hover = True
+        self._last_motion = time.monotonic()
         if self.isVisible():
             self._timer.setInterval(33)
         super().enterEvent(event)
 
     def mouseMoveEvent(self, event):
+        self._last_motion = time.monotonic()
+        if IS_WINDOWS and self._timer.isActive():
+            self._timer.setInterval(33)
         w, h = max(1.0, float(self.width())), max(1.0, float(self.height()))
         rx = (event.position().x() - w / 2.0) / (w / 2.0)
         ry = (event.position().y() - h / 2.0) / (h / 2.0)
@@ -773,7 +796,7 @@ class Cyber3DDiskCore(QWidget):
         self._target_rot_x = 24.0
         self._target_rot_y = 0.0
         if self._timer.isActive():
-            self._timer.setInterval(120)
+            self._timer.setInterval(33 if IS_WINDOWS else 120)
         super().leaveEvent(event)
 
     def _tick(self):
@@ -785,8 +808,26 @@ class Cyber3DDiskCore(QWidget):
             self._timer.stop()
             return
         self._intro_ticks += 1
-        if self._intro_ticks > 60 and not self._hover and self._timer.interval() != 120:
-            self._timer.setInterval(120)
+        idle_interval = 33 if IS_WINDOWS else 120
+        interactive = self._hover and (not IS_WINDOWS or time.monotonic()-self._last_motion < .75)
+        if IS_WINDOWS:
+            now = time.monotonic()
+            elapsed = min(.1, max(0., now-self._frame_time))
+            self._frame_time = now
+            # Clipped by a scroll viewport: keep a cheap visibility check so
+            # scrolling back resumes without a new showEvent.
+            if self.visibleRegion().isEmpty():
+                self._timer.setInterval(200)
+                return
+            self._timer.setInterval(33 if interactive else idle_interval)
+            self._rot_y = (self._rot_y + elapsed*(42. if interactive else 32.)) % 360.
+            blend = 1.-math.exp(-8.*elapsed)
+            self._rot_x += (self._target_rot_x-self._rot_x)*blend
+            self._tilt_y += (self._target_rot_y-self._tilt_y)*blend
+            self.update()
+            return
+        if self._intro_ticks > 60 and not interactive and self._timer.interval() != idle_interval:
+            self._timer.setInterval(idle_interval)
         step = 1.35 if self._timer.interval() <= 40 else 2.2
         self._rot_y = (self._rot_y + step) % 360.0
         self._rot_x += (self._target_rot_x - self._rot_x) * 0.16
@@ -794,6 +835,9 @@ class Cyber3DDiskCore(QWidget):
         self.update()
 
     def paintEvent(self, _):
+        if IS_WINDOWS:
+            self._paint_windows()
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = float(self.width()), float(self.height())
@@ -880,7 +924,7 @@ class Cyber3DDiskCore(QWidget):
         p.drawEllipse(QPointF(cx, cy), core_r, core_r)
 
         # Crisp Percentage Readout centered inside the sphere (NEVER collides with used_str!)
-        pct_txt = f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%'
+        pct_txt = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
         font_sz = 10 if self._compact else 12
         p.setFont(QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code', font_sz, QFont.Weight.Bold))
         p.setPen(QColor(C['text']))
@@ -909,6 +953,122 @@ class Cyber3DDiskCore(QWidget):
             p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, self.used_str)
 
         p.end()
+
+    def _windows_static_layers(self, width, height, cx, cy, has_pill, primary, secondary):
+        """Rasterize gradients and text only when their actual inputs change."""
+        dark = is_dark_theme()
+        dpr = self.devicePixelRatioF()
+        pct = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
+        key = (width, height, dpr, dark, primary.name(), secondary.name(), C['text'],
+               C['cyan_dim'], C['yel_dim'], C['red_dim'], pct, self.used_str, has_pill)
+        if key == self._static_key:
+            return
+        self._static_key = key
+        self._static_builds += 1
+        def layer():
+            pixmap = QPixmap(max(1, round(width*dpr)), max(1, round(height*dpr)))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            return pixmap, painter
+        self._glow_layer, painter = layer()
+        radius = min(width, height)*.44
+        glow = QRadialGradient(cx, cy, radius)
+        for position, color, alpha in ((0., primary, .20 if dark else .12),
+                                       (.65, secondary, .07 if dark else .04), (1., primary, 0.)):
+            shade = QColor(color); shade.setAlphaF(alpha)
+            glow.setColorAt(position, shade)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.end()
+        self._readout_layer, painter = layer()
+        radius = 24. if self._compact else 31.
+        sphere = QRadialGradient(cx-radius*.25, cy-radius*.25, radius*1.2)
+        sphere.setColorAt(0., QColor(24,38,64,242) if dark else QColor(255,255,255,252))
+        sphere.setColorAt(.72 if dark else .75, QColor(9,14,26,248) if dark else QColor(238,244,252,250))
+        rim = QColor(primary); rim.setAlpha(165 if dark else 135)
+        sphere.setColorAt(1., rim)
+        painter.setBrush(sphere)
+        painter.setPen(QPen(primary, 1.6))
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.setFont(QFont('Cascadia Code', 10 if self._compact else 12, QFont.Weight.Bold))
+        painter.setPen(QColor(C['text']))
+        painter.drawText(QRectF(cx-radius,cy-10,radius*2.,20.),Qt.AlignmentFlag.AlignCenter,pct)
+        if has_pill:
+            pill_width = min(width-12.,146.)
+            rect = QRectF(cx-pill_width/2.,height-22.,pill_width,20.)
+            color = QColor(C['cyan_dim'] if self.percent <= 75 else C['yel_dim'] if self.percent <= 90 else C['red_dim'])
+            if dark: color.setAlpha(190)
+            border = QColor(primary); border.setAlpha(110)
+            painter.setBrush(color); painter.setPen(QPen(border,1.))
+            painter.drawRoundedRect(rect,6.,6.)
+            font=QFont('Cascadia Code'); font.setPixelSize(10); font.setBold(True)
+            painter.setFont(font); painter.setPen(primary if dark else QColor(C['text']))
+            painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,self.used_str)
+        painter.end()
+
+    def _paint_windows(self):
+        """Cheap animated geometry over cached, DPI-aware static layers."""
+        width, height = float(self.width()), float(self.height())
+        has_pill = bool(self.used_str and not self._compact)
+        cx, cy = width/2., (height-24.)/2. if has_pill else height/2.
+        dark = is_dark_theme()
+        primary = QColor(C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan'])
+        secondary = QColor(C.get('purple','#A855F7'))
+        self._windows_static_layers(width,height,cx,cy,has_pill,primary,secondary)
+        painter=QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0,0,self._glow_layer)
+        angle=math.radians(self._rot_x+self._tilt_y*.15)
+        cosine_x,sine_x=math.cos(angle),math.sin(angle)
+        specs=((-self._rot_y*.4,QColor(C['cyan2']),1.,1.2),
+               (self._rot_y+55.,secondary,.82,1.6),
+               (self._rot_y,primary,min(1.,max(0.,self.percent/100.)),2.6))
+        for points,(angle,color,ratio,base_width) in zip(self._ring_geometry,specs):
+            cosine_y,sine_y=math.cos(math.radians(angle)),math.sin(math.radians(angle))
+            projected=[]
+            for x,y,z in points:
+                rotated_x=x*cosine_y+z*sine_y
+                rotated_z=-x*sine_y+z*cosine_y
+                rotated_y=y*cosine_x-rotated_z*sine_x
+                depth=y*sine_x+rotated_z*cosine_x
+                factor=215./(255.+depth)
+                projected.append((rotated_x*factor+cx,rotated_y*factor+cy,depth))
+            active=max(1,int(len(points)*min(1.,max(.02,ratio))))
+            paths={}
+            for index,first in enumerate(projected):
+                second=projected[(index+1)%len(projected)]
+                bucket=max(0,min(7,int(((first[2]+second[2])*.5+60.)/15.))) if index < active else -1
+                if bucket not in paths:
+                    paths[bucket]=QPainterPath()
+                path=paths[bucket]
+                path.moveTo(first[0],first[1]); path.lineTo(second[0],second[1])
+            for bucket,path in sorted(paths.items(),reverse=True):
+                if bucket < 0:
+                    shade=QColor(C['border3']); shade.setAlpha(60 if dark else 85); thickness=1.
+                else:
+                    depth=bucket*15.-52.5
+                    shade=QColor(color); shade.setAlpha(int(max(50,min(255,(175 if dark else 200)-depth*1.6))))
+                    thickness=max(1.1,min(3.6,base_width-depth*.02))
+                painter.setPen(QPen(shade,thickness,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap))
+                painter.drawPath(path)
+        cosine_y,sine_y=math.cos(math.radians(self._rot_y*1.4)),math.sin(math.radians(self._rot_y*1.4))
+        cosine_x,sine_x=math.cos(math.radians(self._rot_x)),math.sin(math.radians(self._rot_x))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for point in self._particles:
+            x=point.x*cosine_y+point.z*sine_y
+            z=-point.x*sine_y+point.z*cosine_y
+            y=point.y*cosine_x-z*sine_x
+            depth=point.y*sine_x+z*cosine_x
+            factor=215./(255.+depth)
+            shade=QColor(primary); shade.setAlpha(int(max(30,min(210,130-depth*1.5))))
+            painter.setBrush(shade)
+            radius=max(1.,min(2.8,1.8*factor))
+            painter.drawEllipse(QPointF(x*factor+cx,y*factor+cy),radius,radius)
+        painter.drawPixmap(0,0,self._readout_layer)
+        painter.end()
 
 
 class DiskRing(QWidget):
@@ -972,7 +1132,7 @@ class DiskRing(QWidget):
             )
 
         # Center percentage text
-        pct_txt = f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%'
+        pct_txt = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
         f_val = QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code')
         f_val.setPixelSize(13)
         f_val.setBold(True)
@@ -1134,7 +1294,9 @@ class StatCard(ElevatedCard):
             f'font-family:{UI};font-weight:700;border:none;background:transparent;'
         )
         self._dot = QLabel('●')
-        self._dot.setStyleSheet(f'color:{col};font-size:8px;border:none;background:transparent;')
+        dot_style = f'color:{col};font-size:8px;border:none;background:transparent;'
+        if self._dot.styleSheet() != dot_style:
+            self._dot.setStyleSheet(dot_style)
         top_row.addWidget(self.lbl_name)
         top_row.addStretch()
         top_row.addWidget(self._dot)
@@ -1151,13 +1313,35 @@ class StatCard(ElevatedCard):
         self.lbl_val.setText(text)
         col = C.get(color or self.color, C.get(self.color, C['cyan']))
         self._top_accent = col
-        self._dot.setStyleSheet(f'color:{col};font-size:8px;border:none;background:transparent;')
+        dot_style = f'color:{col};font-size:8px;border:none;background:transparent;'
+        if self._dot.styleSheet() != dot_style:
+            self._dot.setStyleSheet(dot_style)
         val_col = col if is_dark_theme() else (col if color in ('red', 'yellow') else C['text'])
-        self.lbl_val.setStyleSheet(
+        value_style = (
             f'color:{val_col};font-size:22px;font-weight:700;'
             f'font-family:{MONO};letter-spacing:0.4px;border:none;background:transparent;'
         )
+        if self.lbl_val.styleSheet() != value_style:
+            self.lbl_val.setStyleSheet(value_style)
         self.update()
+
+
+class TemperatureStatCard(StatCard):
+    """Clickable temperature-only card for the optional Windows sensor helper."""
+    accessRequested = pyqtSignal()
+
+    def __init__(self, label, init_val, color='green', parent=None):
+        super().__init__(label, init_val, color, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for child in (self.lbl_name, self.lbl_val, self._dot):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton and
+                self.rect().contains(event.position().toPoint())):
+            self.accessRequested.emit()
+        super().mouseReleaseEvent(event)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1530,7 +1714,12 @@ class SysInfoWorker(QThread):
                 try:
                     self.snapshot.emit(get_snapshot(interval=iv))
                 except Exception:
-                    pass
+                    if IS_WINDOWS:
+                        import logging
+                        logging.getLogger('cyberclean').exception('SysInfoWorker snapshot failed')
+            # Windows counters keep sampling at 1 s in their own service. The
+            # dashboard renders every 4 s (the documented UI cadence); manual
+            # refresh still wakes this consumer immediately.
             self._wake.wait(4.0)
             self._wake.clear()
 
@@ -1580,6 +1769,23 @@ class CleanWorker(QThread):
         total_planned = 0; measured_sum = 0; has_measured = False
         steps = max(len(self.targets), 1)
         out_plans = {}
+        volume_meter = None
+        volume_deltas = {}
+        if IS_WINDOWS and not self.dry:
+            try:
+                from utils.windows_cleanup_measurement import VolumeMeter
+                paths = [str(Path.home())]
+                paths.extend(os.environ[k] for k in ('TEMP', 'LOCALAPPDATA', 'SystemRoot') if os.environ.get(k))
+                for tid in self.targets:
+                    plan = self._plans.get(tid)
+                    if plan is None and hasattr(CLEANER, 'get_approved_plan'):
+                        plan, _expired = CLEANER.get_approved_plan(tid)
+                    paths.extend(item.path for item in getattr(plan, 'items', []))
+                volume_meter = VolumeMeter(paths)
+                volume_meter.begin()
+            except Exception as exc:
+                self.log.emit(f'  ~ Whole-operation volume measurement unavailable: {exc}', 'warn')
+
 
         def _report_extras(result):
             notes = getattr(result, 'notes', []) or []
@@ -1587,6 +1793,11 @@ class CleanWorker(QThread):
                 self.log.emit(_tlog(f'  ⚠  {n}'), 'warn')
             sk = getattr(result, 'skipped', []) or []
             if sk and not self.dry:
+                if IS_WINDOWS:
+                    from collections import Counter
+                    reasons = Counter(str(reason) for _path, reason in sk)
+                    for reason, count in reasons.items():
+                        self.log.emit(f'  – Skipped {count}: {reason}', 'dry')
                 self.log.emit(_tlog(f'  –  {len(sk)} item(s) skipped (in use / changed since the scan)'), 'dry')
             blk = int(getattr(result, 'blocked', 0) or 0)
             lock_note = next((n for n in notes if 'running' in n.lower() or 'close' in n.lower()), '')
@@ -1735,14 +1946,18 @@ class CleanWorker(QThread):
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} items'), 'dry')
                     else:
-                        self.log.emit(_tlog(f'  ✓  {fmt_size(result.freed_bytes)} freed'), 'ok')
+                        if IS_WINDOWS and tid == 'win_dns':
+                            self.log.emit('  ✓ DNS resolver flush completed (operation; no files removed)', 'ok')
+                        else:
+                            label = 'logical removed' if IS_WINDOWS else 'freed'
+                            self.log.emit(_tlog(f'  ✓  {fmt_size(result.freed_bytes)} {label}'), 'ok')
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} removed'), 'ok')
 
                     _report_extras(result)
                     total_freed += result.freed_bytes
                     total_planned += getattr(result, 'planned_bytes', 0) or result.freed_bytes
-                    if getattr(result, 'measured_bytes', None) is not None:
+                    if not IS_WINDOWS and getattr(result, 'measured_bytes', None) is not None:
                         measured_sum += max(result.measured_bytes, 0)
                         has_measured = True
                     rollback    += result.rollback
@@ -1767,15 +1982,24 @@ class CleanWorker(QThread):
                 except Exception:
                     pass
 
+        if volume_meter is not None:
+            measured_sum = volume_meter.end()
+            has_measured = measured_sum is not None
+            volume_deltas = volume_meter.observations
+            for entry in volume_deltas.values():
+                self.log.emit(f"  i {entry['root']} observed free-space delta: {entry['delta']:+d} bytes (all disk activity)", 'ok')
+            for error in volume_meter.errors:
+                self.log.emit(f'  ~ Volume measurement: {error}', 'warn')
         self.progress.emit(100, 'done')
         self.log.emit('\n' + '─' * 44, 'head')
-        label = 'ESTIMATED' if self.dry else 'FREED'
+        label = 'ESTIMATED' if self.dry else ('LOGICAL REMOVED' if IS_WINDOWS else 'FREED')
         self.log.emit(_tlog(f'TOTAL {label}: {fmt_size(total_freed)}'), 'ok')
         self.done.emit({'freed': total_freed, 'dry': self.dry,
                         'interrupted': bool(self._stop_requested),
                         'summary': ' | '.join(summary), 'rollback': rollback,
                         'planned': total_planned,
                         'measured': measured_sum if has_measured else None,
+                        **({'measured_by_volume': volume_deltas} if IS_WINDOWS else {}),
                         'plans': out_plans})
         self._finished_event.set()
 
@@ -1816,10 +2040,11 @@ class _SmartOffWorker(QThread):
     def run(self):
         try:
             from core.booster import smart_boost_off
-            smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(_tlog(m), l))
+            outcome = smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(_tlog(m), l))
         except Exception as e:
             self.log_signal.emit(f'  x Smart Boost restore error: {e}', 'err')
-        self.done.emit(None)
+            outcome = False
+        self.done.emit(outcome)
 
 
 class _OneClickWorker(QThread):
@@ -1856,28 +2081,40 @@ class _OneClickWorker(QThread):
             except Exception:
                 pass
         elif platform.system() == 'Windows':
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 r = _sp.run(['ipconfig', '/flushdns'], capture_output=True, text=True, timeout=30,
                             creationflags=0x08000000)
                 results.append(('Flush DNS', r.returncode == 0))
             except Exception:
                 results.append(('Flush DNS', False))
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             if self._cleaner is not None:
                 try:
                     res = self._cleaner.clean('win_temp', dry=False)
                     results.append(('Clear TEMP', res.error is None))
                 except Exception:
                     results.append(('Clear TEMP', False))
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 from core.booster import free_ram
                 free_ram(lambda m, l='text': None)
                 results.append(('Smart RAM Free', True))
             except Exception:
                 pass
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 r_trim = _sp.run(
                     ['powershell', '-NoProfile', '-NonInteractive', '-Command',
-                     'Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue'],
+                     'Optimize-Volume -DriveLetter C -ReTrim -ErrorAction Stop'],
                     capture_output=True, text=True, timeout=60, creationflags=0x08000000,
                 )
                 results.append(('SSD TRIM', r_trim.returncode == 0))

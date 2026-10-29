@@ -16,6 +16,52 @@ Refactor goals achieved:
 """
 import sys, os, json, time, platform
 
+# Install diagnostics before native dependency setup so failures are recorded.
+if sys.platform == "win32":
+    from utils.windows_diagnostics import install, stage, normal_exit
+    install()
+    stage(f"preflight frozen={getattr(sys, 'frozen', False)} bundle={getattr(sys, '_MEIPASS', '')}")
+
+# PyInstaller's onedir bundle keeps Qt's native DLLs below PyQt6/Qt6/bin.
+# Register that directory before importing any PyQt6 extension modules; otherwise
+# Windows may resolve a mismatched Qt DLL from elsewhere (or fail to find one).
+_QT_DLL_DIR_HANDLE = None
+if sys.platform == "win32" and getattr(sys, "frozen", False):
+    _bundle_root = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    _qt_dll_dir = os.path.join(_bundle_root, "PyQt6", "Qt6", "bin")
+    try:
+        import ctypes
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _set_dll_directory = _kernel32.SetDllDirectoryW
+        _set_dll_directory.argtypes = (ctypes.c_wchar_p,)
+        _set_dll_directory.restype = ctypes.c_bool
+        # PyInstaller points the process DLL search at _MEIPASS. That makes
+        # Qt's extension load a conflicting runtime DLL; reset it before adding
+        # Qt's own native directory explicitly.
+        if not _set_dll_directory(""):
+            stage(f"could not reset process DLL search path: winerror={ctypes.get_last_error()}")
+        else:
+            stage("reset PyInstaller process DLL search path")
+    except Exception as exc:
+        stage(f"process DLL search reset failed: {exc!r}")
+    if os.path.isdir(_qt_dll_dir):
+        try:
+            _QT_DLL_DIR_HANDLE = os.add_dll_directory(_qt_dll_dir)
+            stage(f"registered Qt DLL directory: {_qt_dll_dir}")
+        except OSError as exc:
+            stage(f"Qt DLL directory registration failed: {exc!r}; path={_qt_dll_dir}")
+    else:
+        stage(f"bundled Qt DLL directory missing: {_qt_dll_dir}")
+
+if sys.platform == "win32":
+    stage("before dependency imports")
+
+if sys.platform == "win32" and "--windows-temp-host" in sys.argv:
+    from utils.windows_temperature_host import run
+    _host_code = run()
+    normal_exit(_host_code, 'temperature host stopped')
+    sys.exit(_host_code)
+
 # ── Version (single source of truth: version.py) ──────────────
 try:
     from version import __version__
@@ -43,16 +89,21 @@ _missing = []
 try:    import psutil
 except ImportError: _missing.append('psutil')
 try:    from PyQt6.QtWidgets import QApplication
-except ImportError: _missing.append('PyQt6')
+except ImportError as exc:
+    _missing.append('PyQt6')
+    if sys.platform == 'win32':
+        stage(f'PyQt6 import failed: {exc!r}')
 
 if _missing:
+    if sys.platform == 'win32':
+        stage('missing dependencies: ' + ', '.join(_missing))
     print(f"[CyberClean] Missing: {', '.join(_missing)}")
     print("Install: pip install psutil PyQt6")
     sys.exit(1)
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QStackedWidget, QScrollArea,
+    QPushButton, QLabel, QFrame, QStackedWidget, QScrollArea, QGridLayout, QBoxLayout,
     QTableWidget, QTableWidgetItem, QCheckBox, QProgressBar,
     QTextEdit, QHeaderView, QMessageBox, QSystemTrayIcon, QMenu,
     QSizePolicy, QLineEdit, QComboBox, QFileDialog, QDialog
@@ -78,6 +129,7 @@ from core.os_detect  import (IS_LINUX, IS_WINDOWS, IS_WSL, PKG_MANAGER, platform
 from utils.sysinfo   import get_snapshot, fmt_size, fmt_speed, fmt_uptime, _is_kernel_or_skipped_proc
 from core.uninstaller import get_installed_apps, InstalledApp
 from utils.i18n import _t, T, SUPPORTED_LANGS
+from utils.windows_temperature import temperature_status_text
 from utils.updater import UpdateDialog, UpdateBadge, UpdateCheckThread
 from core.analyzer import IdleScheduler
 from core import privileged as PRIV
@@ -97,8 +149,9 @@ except ImportError:
     _GameBoostPage = None
 
 
-if IS_WINDOWS and not is_windows_admin():
-    request_windows_admin()
+# Monitoring does not require elevation. Privileged actions report access errors.
+if IS_WINDOWS:
+    stage("imports completed; starting without automatic elevation")
 
 if IS_LINUX:
     from core.linux_cleaner import LinuxCleaner
@@ -158,7 +211,7 @@ from ui_widgets import (
     _icon_dashboard, _icon_clean,
     _icon_uninstall, _icon_history, _icon_rollback, _icon_booster,
     # Widgets
-    SparklineChart, DiskRing, Cyber3DDiskCore, HexLogoWidget, StatCard, NavButton, CyberTerminal,
+    SparklineChart, DiskRing, Cyber3DDiskCore, HexLogoWidget, StatCard, TemperatureStatCard, NavButton, CyberTerminal,
     DiskDeltaWidget, EmptyStateBinder,
     # UI helpers
     _btn, _lbl_section, _lbl_val, _card, _divider,
@@ -502,6 +555,7 @@ class CyberCleanApp(QMainWindow):
         os_sep = QLabel('│')
         os_sep.setStyleSheet(f'color:{C["border3"]};padding:0 18px;font-size:15px;')
         lay.addWidget(os_sep)
+        self._header_os_sep = os_sep
 
         self._os_info_lbl = QLabel(
             f'{OS.upper()}  ·  '
@@ -717,7 +771,7 @@ class CyberCleanApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        compact = self.width() < 980
+        compact = self.width() < (1200 if IS_WINDOWS else 980)
         if compact != getattr(self, '_sidebar_compact', False):
             self._sidebar_compact = compact
             if hasattr(self, '_sidebar_frame'):
@@ -731,6 +785,50 @@ class CyberCleanApp(QMainWindow):
             for btn in getattr(self, 'nav_btns', {}).values():
                 if hasattr(btn, 'set_compact'):
                     btn.set_compact(compact)
+
+        if IS_WINDOWS and hasattr(self, '_os_info_lbl'):
+            self._os_info_lbl.setToolTip(self._os_info_lbl.text())
+            self._os_info_lbl.setVisible(self.width() >= 1200)
+            self._header_os_sep.setVisible(self.width() >= 1200)
+        if IS_WINDOWS and hasattr(self, '_dash_scroll'):
+            QTimer.singleShot(0, self._layout_windows_dashboard)
+
+    def _layout_windows_dashboard(self):
+        width = self._dash_scroll.viewport().width() - 56
+        narrow = width < 980
+        direction = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
+        for layout in self._windows_dashboard_rows:
+            if layout.direction() != direction:
+                layout.setDirection(direction)
+        columns = 2 if width < 650 else 3 if width < 980 else 5
+        if columns != getattr(self, '_windows_stat_columns', None):
+            self._windows_stat_columns = columns
+            for index, card in enumerate(self._stat_cards.values()):
+                self._windows_stat_grid.addWidget(card, index // columns, index % columns)
+        self._dash_scroll.widget().adjustSize()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if not IS_WINDOWS:
+            return
+        from PyQt6.QtCore import QEvent
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if getattr(self, '_shutting_down', False):
+            return
+        animations = [widget for widget in self.findChildren(QWidget)
+                      if widget.__class__.__name__ in ('Cyber3DDiskCore', 'OrbitButton')]
+        if self.isMinimized():
+            self._windows_paused_animations = [widget for widget in animations if widget._timer.isActive()]
+            for widget in self._windows_paused_animations:
+                widget._timer.stop()
+            stage('window minimized; animation timers paused')
+        else:
+            for widget in getattr(self, '_windows_paused_animations', []):
+                if widget.isVisible():
+                    widget._timer.start(widget._timer.interval())
+            self._windows_paused_animations = []
+            stage('window restored')
 
     # ── MAIN STACK ───────────────────────────────────────────
     def _build_main(self):
@@ -775,6 +873,8 @@ class CyberCleanApp(QMainWindow):
 
     # ── NAV logic — updated for NavButton ────────────────────
     def _nav(self, pid):
+        if getattr(self, '_shutting_down', False):
+            return
         pages = [item[0] for item in self.NAV_ITEMS]
         if pid not in pages:
             return
@@ -786,7 +886,7 @@ class CyberCleanApp(QMainWindow):
             self._si_worker.paused = (pid != 'dashboard')
         if hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
             if pid == 'dashboard' and self.isVisible():
-                self.dash_holo_core._timer.start(120)
+                self.dash_holo_core._timer.start(40 if IS_WINDOWS else 120)
             else:
                 self.dash_holo_core._timer.stop()
         if pid == 'log':       self._load_log()
@@ -840,6 +940,9 @@ class CyberCleanApp(QMainWindow):
         self._lbl_holo_sec = _lbl_section(_t('lbl_holo_3d', '3D HOLO DISK CORE'))
         holo_lay.addWidget(self._lbl_holo_sec)
         self.dash_holo_core = Cyber3DDiskCore(compact=False)
+        if IS_WINDOWS:
+            self.dash_holo_core._data_available = False
+            self.disk_ring._data_available = False
         holo_lay.addWidget(self.dash_holo_core, 1)
         top.addWidget(holo_card)
 
@@ -940,18 +1043,27 @@ class CyberCleanApp(QMainWindow):
         lay.addLayout(top)
 
         # ── Stat cards row ─────────────────────────────
-        sc_row = QHBoxLayout(); sc_row.setSpacing(10)
+        sc_row = QGridLayout() if IS_WINDOWS else QHBoxLayout()
+        sc_row.setSpacing(10)
+        if IS_WINDOWS:
+            self._windows_stat_grid = sc_row
         self._stat_cards = {}
         for sid, label, init, col in [
             ('cpu',  'CPU',                                      '—%',  'red'),
             ('ram',  'RAM',                                      '—%',  'cyan'),
             ('temp', _t('lbl_temperature', 'TEMPERATURE'),       '—°C', 'green'),
-            ('swap', _t('lbl_swap', 'SWAP'),                     '—',   'yellow'),
+            ('swap', 'COMMIT' if IS_WINDOWS else _t('lbl_swap', 'SWAP'), '—', 'yellow'),
             ('net',  'NET  ↓—',                                  '↑—',  'cyan'),
         ]:
-            card_w = StatCard(label, init, col)
+            card_w = (TemperatureStatCard(label, init, col) if sid == 'temp' and IS_WINDOWS
+                      else StatCard(label, init, col))
+            if sid == 'temp' and IS_WINDOWS:
+                card_w.accessRequested.connect(self._request_temperature_access)
             self._stat_cards[sid] = card_w
-            sc_row.addWidget(card_w)
+            if IS_WINDOWS:
+                sc_row.addWidget(card_w, 0, len(self._stat_cards)-1)
+            else:
+                sc_row.addWidget(card_w)
 
         # Uptime label (small, sits under stat cards)
         self._lbl_uptime = QLabel('')
@@ -1086,6 +1198,27 @@ class CyberCleanApp(QMainWindow):
         bot.addWidget(disk_frame, 2)
 
         lay.addLayout(bot, 1)
+        if IS_WINDOWS:
+            self._windows_dashboard_rows = (hdr, top, chips_row, oc_bot, bot)
+            holo_card.setMaximumWidth(16777215)
+            hc.setMaximumWidth(16777215)
+            self._lbl_sys_overview.setWordWrap(True)
+            for label in [self._lbl_holo_sec, self._lbl_health_sec, self.health_sub, self._lbl_ds_total, self._lbl_ds_free]:
+                label.setWordWrap(True)
+            for title, subtitle, *_ in self._oc_chip_lbls:
+                title.setWordWrap(True)
+                subtitle.setWordWrap(True)
+            self.proc_table.horizontalHeader().setMinimumSectionSize(40)
+            for column, size in [(0, 65), (2, 65), (3, 65)]:
+                self.proc_table.setColumnWidth(column, size)
+            self.proc_table.setToolTip('CPU %: fraction of whole machine; MEM %: working set / physical RAM')
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setWidget(w)
+            self._dash_scroll = scroll
+            QTimer.singleShot(0, self._layout_windows_dashboard)
+            return scroll
         return w
 
     # ─────────────────────────────────────────────────────────
@@ -1559,11 +1692,31 @@ class CyberCleanApp(QMainWindow):
 
 
     def _start_sysinfo(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self._si_worker = SysInfoWorker()
         self._si_worker.snapshot.connect(self._on_snapshot)
         self._si_worker.start()
 
+    def _request_temperature_access(self):
+        """Request an elevated, read-only sensor helper; keep the GUI unprivileged."""
+        if getattr(self, '_shutting_down', False) or not IS_WINDOWS:
+            return
+        from utils.windows_sensor_access import installed_sensor_helper
+        if installed_sensor_helper() is None:
+            QMessageBox.information(
+                self, _t('temp_helper_install_title', 'Temperature reader unavailable'),
+                _t('temp_helper_install_body',
+                   'This source-run copy cannot safely request hardware access. Install CyberClean so its protected, read-only temperature helper can run when you approve the Windows prompt.'))
+            return
+        from utils.windows_telemetry import request_windows_temperature_access
+        if request_windows_temperature_access():
+            self._stat_cards['temp'].setToolTip(_t(
+                'temp_access_pending', 'Waiting for Windows approval to read CPU temperature.'))
+
     def _refresh_now(self):
+        if getattr(self, '_shutting_down', False):
+            return
         import time as _time
         now = _time.time()
         # Debounce: chặn spam, cooldown 2 giây
@@ -1596,10 +1749,10 @@ class CyberCleanApp(QMainWindow):
         def color_pct(v):
             return 'red' if v > 85 else 'yellow' if v > 70 else 'cyan'
 
-        self._stat_cards['cpu'].set_val(f'{s.cpu_percent:.0f}%', color_pct(s.cpu_percent))
-        self._stat_cards['ram'].set_val(f'{s.ram_percent:.0f}%', color_pct(s.ram_percent))
+        self._stat_cards['cpu'].set_val(f'{s.cpu_percent:.0f}%' if s.cpu_percent is not None else '—', color_pct(s.cpu_percent) if s.cpu_percent is not None else 'dim')
+        self._stat_cards['ram'].set_val(f'{s.ram_percent:.0f}%' if s.ram_percent is not None else '—', color_pct(s.ram_percent) if s.ram_percent is not None else 'dim')
 
-        if s.swap_total == 0:
+        if s.swap_percent is None or s.swap_total == 0:
             self._stat_cards['swap'].set_val('N/A', 'dim')
         else:
             gb = s.swap_used / 1024 ** 3
@@ -1607,50 +1760,85 @@ class CyberCleanApp(QMainWindow):
                 f'{gb:.1f} GB',
                 'red' if s.swap_percent > 80 else 'yellow' if s.swap_percent > 40 else 'cyan'
             )
+        if IS_WINDOWS:
+            self._stat_cards['swap'].setToolTip(
+                f'Windows committed memory: used={s.swap_used}; limit={s.swap_total}; '
+                f'percent={s.swap_percent}. GetPerformanceInfo CommitTotal / CommitLimit; '
+                'includes memory resident in RAM, not page-file occupancy. ' +
+                s.errors.get('swap', s.errors.get('service', 'fresh')))
 
         if s.temp_max:
             tc = 'red' if s.temp_max > 85 else 'yellow' if s.temp_max > 75 else 'green'
             self._stat_cards['temp'].set_val(f'{s.temp_max:.0f}°C', tc)
 
+        elif IS_WINDOWS:
+            self._stat_cards['temp'].set_val('N/A', 'dim')
+        if IS_WINDOWS:
+            temp_tip = temperature_status_text(
+                getattr(s, 'temperature_status', {}), s.temp_max)
+            if s.temp_max is None:
+                temp_tip += '\n\n' + _t('temp_click_access',
+                    'Click this card to request Windows permission for a read-only CPU temperature sample.')
+            self._stat_cards['temp'].setToolTip(temp_tip)
         # Network speed (NEW: uses net_up_bps / net_down_bps from sysinfo v2.3)
         if hasattr(self, '_stat_cards') and 'net' in self._stat_cards:
-            up_s   = fmt_speed(s.net_up_bps)   if s.net_up_bps   else '—'
-            down_s = fmt_speed(s.net_down_bps) if s.net_down_bps else '—'
+            up_s   = fmt_speed(s.net_up_bps)   if (s.net_up_bps is not None if IS_WINDOWS else bool(s.net_up_bps)) else '—'
+            down_s = fmt_speed(s.net_down_bps) if (s.net_down_bps is not None if IS_WINDOWS else bool(s.net_down_bps)) else '—'
             self._stat_cards['net'].set_val(f'↑{up_s}', 'cyan')
-            self._stat_cards['net'].lbl_name.setText(f'NET  ↓{down_s}')
+            self._stat_cards['net'].lbl_name.setText(f'ALL NICs ↓{down_s}' if IS_WINDOWS else f'NET  ↓{down_s}')
+            if IS_WINDOWS:
+                self._stat_cards['net'].setToolTip(str(getattr(s, 'network_interfaces', {})) + '\n' + getattr(s, 'errors', {}).get('network', '') + '\nB/s throughput; includes virtual adapters, excludes loopback. Link speed is Mb/s.')
 
         # Uptime (NEW: fmt_uptime from sysinfo v2.3)
         if hasattr(self, '_lbl_uptime') and s.uptime_seconds:
             self._lbl_uptime.setText(s.uptime_str)
 
         score = 100; issues = []
-        if s.cpu_percent > 85:   score -= 20; issues.append(f'CPU {s.cpu_percent:.0f}%')
-        elif s.cpu_percent > 70: score -= 10
-        if s.ram_percent > 85:   score -= 20; issues.append(f'RAM {s.ram_percent:.0f}%')
-        elif s.ram_percent > 70: score -= 10
+        if s.cpu_percent is not None and s.cpu_percent > 85:   score -= 20; issues.append(f'CPU {s.cpu_percent:.0f}%')
+        elif s.cpu_percent is not None and s.cpu_percent > 70: score -= 10
+        if s.ram_percent is not None and s.ram_percent > 85:   score -= 20; issues.append(f'RAM {s.ram_percent:.0f}%')
+        elif s.ram_percent is not None and s.ram_percent > 70: score -= 10
         if s.disks:
             worst = max(s.disks, key=lambda d: d.percent)
             if worst.percent > 90:   score -= 25; issues.append(f'Disk {worst.percent:.0f}%')
             elif worst.percent > 75: score -= 15; issues.append(f'Disk {worst.percent:.0f}%')
         if s.temp_max and s.temp_max > 85: score -= 15; issues.append(f'Temp {s.temp_max:.0f}°C')
-        if s.swap_total > 0 and s.swap_percent > 60: score -= 10
+        if s.swap_percent is not None and s.swap_total > 0 and s.swap_percent > 60: score -= 10
         score = max(0, score)
         col = 'green' if score >= 80 else 'yellow' if score >= 50 else 'red'
         self.health_lbl.setText(f'{score}%')
-        self.health_lbl.setStyleSheet(
+        health_style = (
             f'color:{C[col]};font-size:36px;font-weight:700;font-family:{MONO};'
         )
+        if self.health_lbl.styleSheet() != health_style:
+            self.health_lbl.setStyleSheet(health_style)
         self.health_sub.setText(' · '.join(issues) if issues else f"✓ {_t('sys_healthy', 'Normal load')}")
         sub_col = C[col] if issues else C['green']
         sub_bg  = C.get(col + '_dim', C['grn_dim']) if issues else C['grn_dim']
-        self.health_sub.setStyleSheet(
+        health_sub_style = (
             f'color:{sub_col};background:{sub_bg};border:1px solid {_rgba(sub_col, 0.35)};'
             f'font-size:11px;font-weight:700;font-family:{MONO};padding:4px 10px;border-radius:6px;'
         )
+        if self.health_sub.styleSheet() != health_sub_style:
+            self.health_sub.setStyleSheet(health_sub_style)
 
-        self._charts['cpu'].push(s.cpu_percent)
-        self._charts['ram'].push(s.ram_percent)
+        if s.cpu_percent is not None:
+            self._charts['cpu'].push(s.cpu_percent)
+        if s.ram_percent is not None:
+            self._charts['ram'].push(s.ram_percent)
+        if IS_WINDOWS:
+            self._stat_cards['cpu'].setToolTip('Whole-machine CPU; total/per-core share a 1 s counter window. Dashboard refreshes every 4 s; manual refresh is immediate. ' + s.errors.get('cpu', s.errors.get('service', 'fresh')))
+            self._stat_cards['ram'].setToolTip(f'Physical RAM: total={s.ram_total}; used={s.ram_used}; available={s.ram_available}; percent={s.ram_percent}. Process MEM % = working set / physical total. COMMIT is a separate Windows virtual-memory metric.')
+        if IS_WINDOWS:
+            self._update_windows_load_index(s, score, issues)
 
+        if IS_WINDOWS:
+            self.disk_ring._data_available = bool(s.disks)
+            self.dash_holo_core._data_available = bool(s.disks)
+            if not s.disks:
+                self.disk_detail_lbl.setText('Disk data unavailable')
+            self.disk_ring.update()
+            self.dash_holo_core.update()
         if s.disks:
             d = s.disks[0]
             self.disk_ring.set_percent(d.percent)
@@ -1666,19 +1854,32 @@ class CyberCleanApp(QMainWindow):
                 self._startup_snapshot_logged = True
                 QTimer.singleShot(500, lambda pct=d.percent: self._log_startup_disk_snapshot(pct))
 
-        self.proc_table.setRowCount(0)
-        for proc in s.top_cpu_procs[:6]:
-            row = self.proc_table.rowCount()
-            self.proc_table.insertRow(row)
-            vals = [str(proc.pid), proc.name, f'{proc.cpu:.1f}', f'{proc.mem:.1f}']
+        if IS_WINDOWS:
+            self.proc_table.setRowCount(min(6, len(s.top_cpu_procs)))
+        else:
+            self.proc_table.setRowCount(0)
+        for row, proc in enumerate(s.top_cpu_procs[:6]):
+            if not IS_WINDOWS:
+                self.proc_table.insertRow(row)
+            vals = [str(proc.pid), proc.name, f'{proc.cpu:.1f}' if proc.cpu is not None else '—', f'{proc.mem:.1f}']
             for col_i, val in enumerate(vals):
-                item = QTableWidgetItem(val)
-                if col_i == 2 and float(val) > 15:
+                item = self.proc_table.item(row, col_i) if IS_WINDOWS else None
+                if item is None:
+                    item = QTableWidgetItem(val)
+                else:
+                    item.setText(val)
+                item.setToolTip(val)
+                if col_i == 2 and proc.cpu is not None and proc.cpu > 15:
                     item.setForeground(QColor(C['red']))
                 elif col_i == 2:
                     item.setForeground(QColor(C['text3']))
                 self.proc_table.setItem(row, col_i, item)
 
+        disk_signature = tuple((d.path, d.total, d.used, d.free, d.percent) for d in s.disks)
+        disk_signature += (self._theme_mode, str(T.lang))
+        if IS_WINDOWS and disk_signature == getattr(self, '_windows_disk_signature', None):
+            return
+        self._windows_disk_signature = disk_signature
         self.disk_table.setRowCount(0)
         tot_cap = 0
         tot_used = 0
@@ -1757,6 +1958,37 @@ class CyberCleanApp(QMainWindow):
             )
             self._disk_total_bar.setValue(int(min(100, round(pct0))))
 
+    def _update_windows_load_index(self, snapshot, score, issues):
+        """Keep the familiar score when only optional temperature is missing."""
+        missing_base = []
+        if snapshot.cpu_percent is None:
+            missing_base.append('CPU')
+        if snapshot.ram_percent is None:
+            missing_base.append('RAM')
+        if not snapshot.disks:
+            missing_base.append(_t('health_disk', 'Disk'))
+        optional_missing = []
+        if snapshot.temp_max is None:
+            optional_missing.append(_t('health_temperature', 'temperature'))
+        if snapshot.swap_percent is None or not snapshot.swap_total:
+            optional_missing.append('Commit')
+        missing = missing_base + optional_missing
+        if missing_base:
+            self.health_lbl.setText('—')
+            self.health_sub.setText(_t('health_waiting', 'Waiting for system readings'))
+        elif optional_missing:
+            self.health_lbl.setText(f'{score}%')
+            self.health_sub.setText(_t('health_partial', 'Estimate · missing {metrics}',
+                                      metrics=', '.join(optional_missing)))
+        else:
+            self.health_sub.setText(' · '.join(
+                issue.replace('Disk ', _t('health_disk', 'Disk') + ' ')
+                     .replace('Temp ', _t('health_temperature', 'temperature') + ' ')
+                for issue in issues) if issues else '✓ ' + _t('sys_healthy', 'Normal load'))
+        self.health_sub.setToolTip(_t('health_score_explanation',
+            'Estimated score: higher means more headroom. This is not CPU usage or hardware health. '
+            'Missing readings: {metrics}.', metrics=', '.join(missing) if missing else _t('health_none', 'none')))
+
     def _start_clock(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(
@@ -1765,6 +1997,8 @@ class CyberCleanApp(QMainWindow):
         self._clock_timer.start(1000)
 
     def _one_click_fix(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self.oneclick_btn.setEnabled(False)
         self._oneclick_idle = False
         self.oneclick_log.setText(_t('lbl_running', 'Running...'))
@@ -1786,6 +2020,8 @@ class CyberCleanApp(QMainWindow):
         QTimer.singleShot(3000, self._refresh_now)
 
     def _kill_selected_proc(self):
+        if getattr(self, '_shutting_down', False):
+            return
         rows = set(i.row() for i in self.proc_table.selectedItems())
         if not rows:
             return
@@ -1892,6 +2128,10 @@ class CyberCleanApp(QMainWindow):
             self._run_clean(dry=False)
 
     def _show_preview_files(self):
+        if getattr(self, '_shutting_down', False):
+            return
+        if IS_WINDOWS and getattr(self, '_prev_worker', None) is not None and self._prev_worker.isRunning():
+            return
         """Open a dialog listing files that would be deleted for selected targets."""
         if not CLEANER or not self.selected:
             return
@@ -2006,6 +2246,8 @@ class CyberCleanApp(QMainWindow):
             self._prev_worker.wait(2000)
 
     def _run_clean(self, dry=True):
+        if getattr(self, '_shutting_down', False):
+            return
         if not CLEANER or not self.selected: return
         # ── Properly tear down old worker before creating a new one ──────
         # This prevents the double-signal crash (emit from dead Python object)
@@ -2104,6 +2346,22 @@ class CyberCleanApp(QMainWindow):
             def _deferred_snapshot():
                 """Đo lại sau khi hệ thống kịp cập nhật số liệu; ghi lịch sử MỘT lần với số đo thật."""
                 measured, pct_after = None, pct_before
+                if IS_WINDOWS:
+                    measured = result.get('measured')
+                    volumes = result.get('measured_by_volume', {})
+                    disk = self._snap.disks[0] if self._snap and self._snap.disks else None
+                    drive = os.path.normcase(os.path.splitdrive(disk.path)[0]) if disk else ''
+                    observation = volumes.get(drive)
+                    if observation is not None and hasattr(self, '_disk_delta'):
+                        pct_after = observation['percent']
+                        self._disk_delta.set_after(observation['after'], pct_after, max(0, observation['delta']), dry=False)
+                        self._disk_delta.setToolTip(f"Observed volume free-space delta: {observation['delta']:+d} bytes; all disk activity. Logical removed: {result['freed']} bytes.")
+                    self._record_session(freed=result['freed'], summary=result['summary'], rollback=result['rollback'],
+                                         disk_before=pct_before, disk_after=pct_after,
+                                         measured=measured, planned=result.get('planned', result['freed']))
+                    if hasattr(self, '_si_worker'):
+                        self._si_worker.force_refresh()
+                    return
                 try:
                     snap_after = get_snapshot(interval=0.2)
                     if snap_after.disks:
@@ -2221,6 +2479,8 @@ class CyberCleanApp(QMainWindow):
             self._si_worker.force_refresh()
 
     def _check_helper_async(self):
+        if getattr(self, '_shutting_down', False):
+            return
         """Linux: kiểm tra helper đặc quyền (thiếu / bản cũ) và hiện banner — chạy nền, không chặn UI."""
         if not IS_LINUX or PRIV.IS_ROOT:
             return
@@ -2241,6 +2501,8 @@ class CyberCleanApp(QMainWindow):
             self._helper_banner.setVisible(False)
 
     def _upgrade_helper(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self._helper_btn.setEnabled(False)
         self._helper_upg = _HelperUpgrade()
         self._helper_upg.result.connect(self._on_helper_upgraded, Qt.ConnectionType.QueuedConnection)
@@ -2255,6 +2517,8 @@ class CyberCleanApp(QMainWindow):
             QMessageBox.warning(self, 'CyberClean', _t('helper_update_err', 'Could not update the helper:\n{msg}', msg=msg))
 
     def _load_uninstall(self):
+        if getattr(self, '_shutting_down', False):
+            return
         # Guard: don't start a second scan while one is running
         if getattr(self, '_uninstall_worker', None) and self._uninstall_worker.isRunning():
             return
@@ -2384,6 +2648,8 @@ class CyberCleanApp(QMainWindow):
         self._populate_uninstall(filtered)
 
     def _do_uninstall(self):
+        if getattr(self, '_shutting_down', False):
+            return
         # Guard: don't start another uninstall while one is running
         if getattr(self, '_do_uninst_worker', None) and self._do_uninst_worker.isRunning():
             QMessageBox.information(
@@ -2640,6 +2906,8 @@ class CyberCleanApp(QMainWindow):
 
     def _hide_to_tray(self, event, notify=True):
         event.ignore()
+        if IS_WINDOWS:
+            stage("hiding window to tray")
         self.hide()
         if hasattr(self, '_si_worker'):
             self._si_worker.paused = True
@@ -2679,6 +2947,8 @@ class CyberCleanApp(QMainWindow):
             self.done_signal.emit(result)
 
     def _run_booster_action(self, func, on_done=None):
+        if getattr(self, '_shutting_down', False):
+            return
         if getattr(self, '_booster_worker', None) and self._booster_worker.isRunning():
             self._blog('  ! Please wait for the current task to finish...', 'warn')
             return
@@ -2699,6 +2969,8 @@ class CyberCleanApp(QMainWindow):
         self._run_booster_action(clear_disk_cache)
 
     def _toggle_game_mode(self):
+        if getattr(self, '_shutting_down', False):
+            return
         if not hasattr(self, '_game_frozen_pids'):   self._game_frozen_pids   = {}
         if not hasattr(self, '_game_active'):        self._game_active        = False
         if not hasattr(self, '_game_transitioning'): self._game_transitioning = False
@@ -2736,8 +3008,16 @@ class CyberCleanApp(QMainWindow):
                 self._si_worker.paused = (self.stack.currentIndex() != 0)
 
             saved = self._game_frozen_pids
-            def _do_off(log): game_mode_off(saved, log)
-            def _on_game_off(_):
+            def _do_off(log): return game_mode_off(saved, log)
+            def _on_game_off(outcome):
+                if IS_WINDOWS and outcome is not True:
+                    self._game_active = True
+                    self._game_btn.setChecked(True)
+                    self._game_btn.setText('RESTORE PENDING — CLICK TO RETRY')
+                    self._game_transitioning = False
+                    self._game_btn.setEnabled(True)
+                    self._eco_btn.setEnabled(False)
+                    return
                 self._game_frozen_pids   = {}
                 self._game_transitioning = False
                 self._game_btn.setEnabled(True)
@@ -2745,6 +3025,8 @@ class CyberCleanApp(QMainWindow):
             self._run_booster_action(_do_off, on_done=_on_game_off)
 
     def _toggle_eco_mode(self):
+        if getattr(self, '_shutting_down', False):
+            return
         if not hasattr(self, '_eco_saved'):        self._eco_saved        = {}
         if not hasattr(self, '_eco_active'):       self._eco_active       = False
         if not hasattr(self, '_eco_transitioning'): self._eco_transitioning = False
@@ -2776,8 +3058,16 @@ class CyberCleanApp(QMainWindow):
             self._eco_active = False
 
             saved = self._eco_saved
-            def _do_off(log): eco_mode_off(saved, log)
-            def _on_eco_off(_):
+            def _do_off(log): return eco_mode_off(saved, log)
+            def _on_eco_off(outcome):
+                if IS_WINDOWS and outcome is not True:
+                    self._eco_active = True
+                    self._eco_btn.setChecked(True)
+                    self._eco_btn.setText('RESTORE PENDING — CLICK TO RETRY')
+                    self._eco_transitioning = False
+                    self._eco_btn.setEnabled(True)
+                    self._game_btn.setEnabled(False)
+                    return
                 self._eco_saved        = {}
                 self._eco_transitioning = False
                 self._eco_btn.setEnabled(True)
@@ -2883,6 +3173,8 @@ class CyberCleanApp(QMainWindow):
             self._show_from_tray()
 
     def closeEvent(self, event):
+        if IS_WINDOWS:
+            stage("close requested (may hide to tray)")
         if not event.spontaneous():
             self._shutdown(); event.accept(); return
 
@@ -3011,13 +3303,15 @@ class CyberCleanApp(QMainWindow):
             self._shutdown(); event.accept()
 
     def _show_from_tray(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self.show(); self.raise_(); self.activateWindow()
         if hasattr(self, '_si_worker'):
             self._si_worker.paused = (self.stack.currentIndex() != 0)
         if hasattr(self, '_clock_timer'):
             self._clock_timer.start(1000)
         if self.stack.currentIndex() == 0 and hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
-            self.dash_holo_core._timer.start(120)
+            self.dash_holo_core._timer.start(40 if IS_WINDOWS else 120)
 
     def _theme_btn_text(self) -> str:
         if is_dark_theme():
@@ -3176,7 +3470,7 @@ class CyberCleanApp(QMainWindow):
             self._lbl_disk_sec.setText(_t('lbl_disk', 'DISK USAGE'))
         for sid, key, default in [('temp','lbl_temperature','TEMPERATURE'),('swap','lbl_swap','SWAP')]:
             if hasattr(self, '_stat_cards') and sid in self._stat_cards:
-                self._stat_cards[sid].lbl_name.setText(_t(key, default))
+                self._stat_cards[sid].lbl_name.setText('COMMIT' if IS_WINDOWS and sid == 'swap' else _t(key, default))
         # Reset NET card label on language change (speed suffix updated on next snapshot)
         if hasattr(self, '_stat_cards') and 'net' in self._stat_cards:
             self._stat_cards['net'].lbl_name.setText('NET  ↓—')
@@ -3362,6 +3656,8 @@ class CyberCleanApp(QMainWindow):
 
     def _toggle_smart_boost(self):
         """Smart Boost — thread-safe theo chuẩn Qt signal/slot."""
+        if getattr(self, '_shutting_down', False):
+            return
         if not hasattr(self, '_smart_saved'):  self._smart_saved  = {}
         if not hasattr(self, '_smart_active'): self._smart_active = False
         if not hasattr(self, '_smart_trans'):  self._smart_trans  = False
@@ -3398,7 +3694,16 @@ class CyberCleanApp(QMainWindow):
             self._smart_active = False
             saved = self._smart_saved
 
-            def _on_off_done(_):
+            def _on_off_done(outcome):
+                if IS_WINDOWS and outcome is not True:
+                    self._smart_active = True
+                    self._smart_btn.setChecked(True)
+                    self._smart_btn.setText('RESTORE PENDING — CLICK TO RETRY')
+                    self._smart_trans = False
+                    self._smart_btn.setEnabled(True)
+                    self._game_btn.setEnabled(False)
+                    self._eco_btn.setEnabled(False)
+                    return
                 self._smart_saved = {}
                 self._smart_trans = False
                 self._smart_btn.setEnabled(True)
@@ -3409,7 +3714,83 @@ class CyberCleanApp(QMainWindow):
             self._smart_off_worker.start()
 
 
+    def _shutdown_windows(self):
+        if getattr(self, '_windows_shutdown_started', False):
+            return
+        self._windows_shutdown_started = self._shutting_down = True
+        stage('shutdown requested')
+        self.setEnabled(False)
+        pages = (getattr(self, 'deep_page', None), getattr(self, 'advisor_page', None),
+                 getattr(self, '_game_boost_page', None))
+        # Delivering a completed delete/scan while draining can otherwise
+        # launch a replacement scan after the worker list was captured.
+        for page in pages:
+            if page is not None:
+                page._shutting_down = True
+            panel = getattr(page, 'panel', None)
+            if panel is not None:
+                panel._shutting_down = True
+        for name in ('_clock_timer', '_auto_clean_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+
+        # Include preview, kill and actual uninstall workers too. A fixed wait
+        # followed by owner destruction can abort Qt and lose rollback state.
+        workers = [getattr(self, name, None) for name in (
+            '_si_worker', 'worker', '_smart_worker', '_smart_off_worker',
+            '_booster_worker', '_oneclick_worker', '_uninstall_worker',
+            '_do_uninst_worker', '_upd_check_thread', '_auto_worker',
+            '_prev_worker', '_kill_worker', '_helper_worker', '_helper_upg')]
+        for worker in workers:
+            if worker is not None and worker.isRunning():
+                if hasattr(worker, 'stop'):
+                    worker.stop()
+                worker.requestInterruption()
+                worker.quit()
+        from utils.windows_workers import drain_threads
+        drain_threads(workers)
+        from utils.windows_telemetry import close_windows_telemetry
+        close_windows_telemetry()
+
+        # Result callbacks have now captured the original settings. Restore
+        # after all mutations, including a Boost just finishing at close time.
+        for page in pages:
+            if page is not None and hasattr(page, 'shutdown'):
+                page.shutdown()
+            drain_threads([getattr(page, name, None) for name in
+                           ('_worker', '_all_worker')])
+            panel = getattr(page, 'panel', None)
+            drain_threads([getattr(panel, '_worker', None)])
+
+        log = lambda message, level='text': stage(str(message))
+        for active, state, restore_fn in (
+            ('_game_active', '_game_frozen_pids', game_mode_off),
+            ('_eco_active', '_eco_saved', eco_mode_off),
+            ('_smart_active', '_smart_saved', smart_boost_off)):
+            saved = getattr(self, state, None)
+            if saved:
+                try:
+                    outcome = restore_fn(saved, log)
+                    if outcome is False:
+                        stage(f'Shutdown restore remains pending: {state}')
+                    else:
+                        setattr(self, active, False)
+                except Exception:
+                    import logging
+                    logging.getLogger('cyberclean').exception('Shutdown restore failed: %s', state)
+        if getattr(self, '_mem_tune_originals', None):
+            try:
+                memory_tune_restore(self._mem_tune_originals, log)
+            except Exception:
+                import logging
+                logging.getLogger('cyberclean').exception('Memory tune restore failed')
+        stage('shutdown workers finished')
+
     def _shutdown(self):
+        if IS_WINDOWS:
+            self._shutdown_windows()
+            return
         if getattr(self, '_game_active', False):
             try:
                 saved = getattr(self, '_game_frozen_pids', {})
@@ -3551,6 +3932,8 @@ class CyberCleanApp(QMainWindow):
             self._auto_clean_timer.start(5 * 60 * 1000)
 
     def _run_auto_clean(self):
+        if getattr(self, '_shutting_down', False):
+            return
         if not getattr(self, '_auto_clean_enabled', False):
             return
         if self.isVisible() or getattr(self, '_game_active', False):
@@ -3560,6 +3943,8 @@ class CyberCleanApp(QMainWindow):
             self._do_background_clean(notify=True, use_scheduler=True)
 
     def _do_background_clean(self, notify=True, use_scheduler=False):
+        if getattr(self, '_shutting_down', False):
+            return
         # Nền chỉ chạy tầng AUTO có cờ `scheduled` và TUYỆT ĐỐI KHÔNG BAO GIỜ chạm vào Trash / Recycle Bin.
         _never_bg = {'empty_trash', 'win_recycle', 'trash', 'recycle_bin'}
         safe_targets = [
@@ -3605,6 +3990,8 @@ class CyberCleanApp(QMainWindow):
     CURRENT_VER = __version__
 
     def _check_update_async(self):
+        if getattr(self, '_shutting_down', False):
+            return
         # QThread (not threading.Thread): emitting from std threads can crash Qt on some Linux setups.
         self._upd_check_thread = UpdateCheckThread(self.CURRENT_VER, parent=self)
         self._upd_check_thread.found.connect(
@@ -3657,7 +4044,15 @@ if __name__ == '__main__':
         )
     except Exception:
         pass
+    if IS_WINDOWS:
+        stage('creating QApplication')
     app = QApplication(sys.argv)
+    if IS_WINDOWS:
+        from PyQt6.QtCore import qInstallMessageHandler
+        import logging
+        def _qt_message(kind, context, message):
+            logging.getLogger('cyberclean.qt').warning('%s: %s', kind, message)
+        qInstallMessageHandler(_qt_message)
     # Set QSettings identity early so the single-instance conflict branch can
     # detect "update in progress" and avoid the kill prompt.
     app.setOrganizationName('CyberClean')
@@ -3675,6 +4070,8 @@ if __name__ == '__main__':
     except Exception:
         upd_until = 0
     if upd_until > int(time.time()):
+        if IS_WINDOWS:
+            normal_exit(0, 'update-in-progress guard')
         msg = QMessageBox()
         msg.setWindowTitle('CyberClean - Updating')
         msg.setIcon(QMessageBox.Icon.Information)
@@ -3712,7 +4109,11 @@ if __name__ == '__main__':
     _lock_path = str(Path(_tmp2.gettempdir()) / 'CyberClean.lock')
     _lock_file  = QLockFile(_lock_path)
     _lock_file.setStaleLockTime(5000)   # 5s — treats stale locks as dead
+    if IS_WINDOWS:
+        stage('checking single-instance lock')
     if not _lock_file.tryLock(200):     # wait 200ms in case of brief race
+        if IS_WINDOWS:
+            normal_exit(1, 'single-instance lock rejected startup')
         err = QMessageBox()
         err.setWindowTitle('CyberClean')
         err.setIcon(QMessageBox.Icon.Warning)
@@ -3753,7 +4154,12 @@ if __name__ == '__main__':
     if Path(_icon_path).exists():
         app.setWindowIcon(QIcon(_icon_path))
 
+    if IS_WINDOWS:
+        stage("creating main window")
     win = CyberCleanApp()
+    if IS_WINDOWS:
+        app.aboutToQuit.connect(lambda: stage("aboutToQuit"))
+        app.aboutToQuit.connect(win._shutdown)
 
     if hasattr(win, 'tray'):
         _tray_icon = _res('assets/logo.png')
@@ -3761,4 +4167,9 @@ if __name__ == '__main__':
             win.tray.setIcon(QIcon(_tray_icon))
 
     win.show()
-    sys.exit(app.exec())
+    if IS_WINDOWS:
+        stage("window shown; entering event loop")
+    _exit_code = app.exec()
+    if IS_WINDOWS:
+        normal_exit(_exit_code)
+    sys.exit(_exit_code)

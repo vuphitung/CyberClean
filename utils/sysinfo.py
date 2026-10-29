@@ -70,6 +70,8 @@ class SystemSnapshot:
     ram_percent:    float = 0.0
     ram_used:       int   = 0
     ram_total:      int   = 0
+    # Windows uses explicit system commit charge/limit (GetPerformanceInfo).
+    # Linux uses swap occupancy. Never label the Windows values page-file usage.
     swap_percent:   float = 0.0
     swap_total:     int   = 0
     swap_used:      int   = 0
@@ -83,6 +85,13 @@ class SystemSnapshot:
     net_up_bps:     int   = 0   # NEW: upload bytes/sec this tick
     net_down_bps:   int   = 0   # NEW: download bytes/sec this tick
     uptime_seconds: int   = 0
+    # Windows cache metadata; Linux sampling keeps its existing path and values.
+    ram_available: Optional[int] = None
+    sample_time: float = 0.0
+    inventory_time: float = 0.0
+    errors: dict = field(default_factory=dict)
+    network_interfaces: dict = field(default_factory=dict)
+    temperature_status: dict = field(default_factory=dict)
 
     @property
     def uptime_str(self) -> str:
@@ -152,6 +161,12 @@ def _read_temperature():
     Priority: LHM DLL → psutil → /sys/thermal → /sys/hwmon → WMI → PowerShell CIM
     Unchanged from v2.2; documented here for reference.
     """
+    if _OS == 'Windows':
+        # Never load the legacy root DLL/ACPI maximum in the GUI. CPU sensors
+        # are owned by the isolated, verified Windows temperature host.
+        from utils.windows_telemetry import get_windows_snapshot
+        snapshot = get_windows_snapshot()
+        return snapshot.temp_all, snapshot.temp_max
     global _temp_cache
     with _temp_lock:
         max_cached, all_cached, ts = _temp_cache
@@ -382,6 +397,9 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     Delta = (counter_hiện_tại - counter_lần_trước) / (thời_gian_thực_tế_giữa_2_lần_gọi).
     Không block thêm, không bỏ lỡ 1 byte, ăn ~0% CPU thêm.
     """
+    if _OS == "Windows":
+        from utils.windows_telemetry import get_windows_snapshot
+        return get_windows_snapshot()
     global _last_net_io, _last_net_time
     s = SystemSnapshot()
     if not HAS_PSUTIL:

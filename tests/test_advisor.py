@@ -1,5 +1,6 @@
 import ast
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -9,6 +10,15 @@ from core import advisor as A
 from tests.helpers import age, tree
 
 MB = 1024 ** 2
+
+
+@pytest.fixture(autouse=True)
+def isolate_windows_system_collectors(monkeypatch):
+    # These tests describe their temporary home only. Native system inventory
+    # has its own tests and must not add the real machine's findings here.
+    if sys.platform == 'win32':
+        monkeypatch.setattr(A, 'collect_windows', lambda *args: [])
+        monkeypatch.setattr(A, 'collect_wsl_docker_desktop', lambda *args: [])
 
 
 def big(path: Path, mb: int, days=10):
@@ -21,7 +31,7 @@ def big(path: Path, mb: int, days=10):
 
 def test_advisor_module_is_read_only_by_construction():
     """Advisor KHÔNG được xóa/ghi gì: không import shutil.rmtree/os.remove/unlink... và không gọi chúng."""
-    src = Path(A.__file__).read_text()
+    src = Path(A.__file__).read_text(encoding='utf-8')
     tree_ = ast.parse(src)
     banned_anywhere = {"unlink", "rmdir", "rmtree", "removedirs", "write_text", "write_bytes", "truncate",
                        "chmod", "chown", "symlink_to", "hardlink_to", "mkdir", "makedirs", "remove_path",
@@ -62,6 +72,7 @@ def test_big_files_classified(tmp_path):
     assert vm.size == 600 * MB and vm.age_days == 10 and vm.open_path.endswith("VMs")
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux .cache exclusion and Unix symlink fixture')
 def test_walker_never_follows_symlinks_or_crosses_into_cache(tmp_path):
     outside = tmp_path / "outside"
     big(outside / "huge.bin", 900)
@@ -115,7 +126,8 @@ def test_downloads_summary_and_hints(tmp_path):
     assert "installer" in by["setup.exe"].advice and "archive" in by["backup.zip"].advice
 
 
-def test_xdg_download_dir_is_respected(tmp_path):
+def test_xdg_download_dir_is_respected(tmp_path, monkeypatch):
+    monkeypatch.setattr(A, 'IS_WINDOWS', False)
     (tmp_path / ".config").mkdir()
     (tmp_path / ".config/user-dirs.dirs").write_text('XDG_DOWNLOAD_DIR="$HOME/Telechargements"\n')
     big(tmp_path / "Telechargements/x.iso", 60)
@@ -135,7 +147,8 @@ def test_time_budget_and_cancel_give_partial_report(tmp_path):
 
 
 def test_collector_failure_does_not_break_report(tmp_path, monkeypatch):
-    monkeypatch.setattr(A, "collect_opt", lambda b: (_ for _ in ()).throw(RuntimeError("boom")))
+    collector = 'collect_windows' if A.IS_WINDOWS else 'collect_opt'
+    monkeypatch.setattr(A, collector, lambda *args: (_ for _ in ()).throw(RuntimeError("boom")))
     rep = A.scan(str(tmp_path), seconds=20)
     assert any("boom" in n for n in rep.notes)
 

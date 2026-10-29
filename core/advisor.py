@@ -11,6 +11,7 @@ bằng AST). Mọi collector đều có hạn thời gian và có thể hủy gi
 from __future__ import annotations
 
 import os
+import ntpath
 import re
 import shutil
 import subprocess
@@ -58,6 +59,7 @@ class Report:
     notes: List[str] = field(default_factory=list)
     truncated: bool = False
     seconds: float = 0.0
+    windows_accounting: bool = IS_WINDOWS
 
     def by_category(self) -> Dict[str, List[Finding]]:
         out: Dict[str, List[Finding]] = {}
@@ -69,7 +71,50 @@ class Report:
 
     @property
     def total(self) -> int:
-        return sum(f.size for f in self.findings if f.category != "info")
+        return sum(self.category_totals().values())
+
+    def category_totals(self) -> Dict[str, int]:
+        """Logical bytes attributed once across overlapping Windows findings.
+
+        Rows retain their measured size. A Downloads folder summary can contain
+        an ISO already reported as a VM and several individual download rows;
+        only the folder's remaining bytes are attributed to Downloads. Path
+        aliases and hard links are not resolved into physical allocated bytes.
+        """
+        totals: Dict[str, int] = {}
+        if not self.windows_accounting:
+            for finding in self.findings:
+                if finding.category != 'info':
+                    totals[finding.category] = totals.get(finding.category, 0) + finding.size
+            return totals
+        selected = {}
+        for index, finding in enumerate(self.findings):
+            if finding.category == 'info':
+                continue
+            totals.setdefault(finding.category, 0)
+            if not finding.path:
+                totals[finding.category] += max(0, finding.size)
+                continue
+            path = ntpath.normcase(ntpath.abspath(finding.path))
+            old = selected.get(path)
+            if old is None or finding.size > old[1].size:
+                selected[path] = (index, finding)
+        # Descendants first; commonpath handles drive boundaries and avoids
+        # treating C:\\Downloads-old as a child of C:\\Downloads.
+        accounted = {}
+        for path, (_, finding) in sorted(selected.items(),
+                                         key=lambda item: len(item[0].split('\\')), reverse=True):
+            nested = 0
+            for child, contribution in accounted.items():
+                try:
+                    if ntpath.commonpath((path, child)) == path:
+                        nested += contribution
+                except ValueError:  # different drives / UNC shares
+                    continue
+            contribution = max(0, finding.size - nested)
+            accounted[path] = contribution
+            totals[finding.category] += contribution
+        return totals
 
 
 def human(n: int) -> str:
@@ -130,6 +175,8 @@ def walk_home(root: str, *, big_min: int, budget: _Budget, max_depth: int = 14,
     skip = _SKIP_DIRS_WIN if IS_WINDOWS else _SKIP_DIRS_LINUX
     stack: List[Tuple[str, int]] = [(root, 0)]
     while stack:
+        if IS_WINDOWS and budget.expired():
+            return res
         cur, depth = stack.pop()
         try:
             it = os.scandir(cur)
@@ -144,7 +191,7 @@ def walk_home(root: str, *, big_min: int, budget: _Budget, max_depth: int = 14,
                     budget.hit = True
                     return res
                 try:
-                    st = e.stat(follow_symlinks=False)
+                    st = E._entry_lstat(e)
                 except OSError:
                     continue
                 if E.is_link_like(st):
@@ -512,8 +559,9 @@ def report_to_text(rep: Report, home: str = "", cat_title=None, advice=None, tit
     lines = ["CyberClean — Disk Advisor report", "=" * 34]
     if rep.truncated:
         lines.append("(partial: the scan hit its time limit)")
+    category_totals = rep.category_totals()
     for cat, findings in rep.by_category().items():
-        total = sum(f.size for f in findings)
+        total = category_totals.get(cat, 0)
         head = cat_title(cat) if cat_title else CATEGORY_TITLES.get(cat, cat)
         lines += ["", f"{head}" + (f" — {human(total)}" if cat != "info" and total else "")]
         for f in findings:
@@ -539,7 +587,7 @@ def scan(home: str, pm: str = "", *, seconds: float = 60.0, stop: Optional[Calla
     t0 = time.monotonic()
     now = time.time()
     budget = _Budget(seconds, stop)
-    rep = Report()
+    rep = Report(windows_accounting=IS_WINDOWS)
 
     def step(msg: str) -> None:
         if progress:
@@ -556,10 +604,12 @@ def scan(home: str, pm: str = "", *, seconds: float = 60.0, stop: Optional[Calla
             return []
 
     step("Walking your home folder")
-    walk = walk_home(home, big_min=big_min_mb * MB, budget=budget.sub(0.55), want_artifacts=True)
+    walk_budget = budget.sub(0.55)
+    walk = walk_home(home, big_min=big_min_mb * MB, budget=walk_budget, want_artifacts=True)
     big_findings = collect_big_files(walk, now)
     rep.findings += big_findings
-    rep.findings += safe("Old project build folders", collect_project_artifacts, walk, now, budget.sub(0.5))
+    project_budget = budget.sub(0.5)
+    rep.findings += safe("Old project build folders", collect_project_artifacts, walk, now, project_budget)
     already = {f.path for f in big_findings}
     rep.findings += safe("Downloads", lambda: collect_downloads(home, now, budget, exclude=already))
     if IS_WINDOWS:
@@ -572,7 +622,10 @@ def scan(home: str, pm: str = "", *, seconds: float = 60.0, stop: Optional[Calla
         rep.findings += safe("Flatpak apps", collect_flatpak_snap, home)
         rep.findings += safe("Containers", collect_containers)
     rep.findings += collect_btrfs_note()
-    rep.truncated = budget.hit
+    if IS_WINDOWS:
+        rep.notes.append('Totals count each Windows path once; folder and file rows can overlap. '
+                         'Sizes are logical bytes, not unique physical allocation across hard links or aliases.')
+    rep.truncated = budget.hit or (IS_WINDOWS and (walk_budget.hit or project_budget.hit))
     if rep.truncated:
         rep.notes.append("The scan hit its time limit — results are partial (largest items first).")
     rep.seconds = time.monotonic() - t0

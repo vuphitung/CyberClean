@@ -753,7 +753,8 @@ def _chromium_running(ud: str, ctx: RuleContext, rule: Rule, guards: Guards) -> 
     for d in dirs:
         if E.chromium_profile_in_use(d) or guards.user_data_dir_in_use(d):
             cleaned_ud = ud.rstrip('/\\')
-            return f"{os.path.basename(cleaned_ud)} is running — close it first"
+            label = E.windows_browser_label(cleaned_ud) if ctx.os_name == 'windows' else os.path.basename(cleaned_ud)
+            return f"{label} is running — close it first"
     if procs:
         hit = guards.running(procs)
         if hit:

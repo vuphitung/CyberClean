@@ -15,6 +15,11 @@ Usage:
 import sys, os, shutil, subprocess, platform, re
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except (AttributeError, OSError):
+    pass
+
 OS   = platform.system()
 ROOT = Path(__file__).parent
 DIST = ROOT / 'dist'
@@ -101,12 +106,16 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     sep  = ';' if OS == 'Windows' else ':'
     mode = '--onefile' if onefile else '--onedir'
 
-    dll = ROOT / 'LibreHardwareMonitorLib.dll'
-    if OS == 'Windows' and not dll.exists():
-        warn('LibreHardwareMonitorLib.dll not found - temp will use WMI fallback')
+    if sys.platform == "win32":
+        import json, hashlib
+        vendor = ROOT / 'vendor' / 'lhm'
+        manifest = json.loads((vendor / 'manifest.json').read_text(encoding='utf-8'))
+        for name, expected in manifest['sha256'].items():
+            if hashlib.sha256((vendor / name).read_bytes()).hexdigest() != expected:
+                raise RuntimeError(f'Missing or mismatched Windows dependency: {name}')
 
     parts = [
-        f'{_pyinstaller_bin()} {mode} --noconsole',
+        f'{_pyinstaller_bin()} {mode} --noconsole --noconfirm',
         f'--name {APP}',
         f'--add-data "VERSION{sep}."',           # bundle VERSION file (matches CyberClean.spec)
         f'--add-data "rules/*.toml{sep}rules"',   # luật dọn rác khai báo (core/rules.py)
@@ -114,9 +123,9 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
         f'--add-data "assets{sep}assets"',
     ]
 
-    if dll.exists():
-        parts.append(f'--add-data "LibreHardwareMonitorLib.dll{sep}."')
-        ok('Bundling LibreHardwareMonitorLib.dll')
+    if sys.platform == "win32":
+        parts.append(f'--add-data "vendor/lhm{sep}vendor/lhm"')
+        parts.extend(['--hidden-import pythonnet', '--hidden-import utils.windows_temperature_host'])
 
     parts += [
         '--hidden-import psutil',
@@ -177,9 +186,56 @@ def build_windows(make_inno: bool = False):
         err(f'{exe} not found after build')
         return False
 
+    if not _build_windows_sensor_host(app_dir):
+        err('Protected temperature helper build failed')
+        return False
+
     ok(f'Built: {app_dir}  ({sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1024/1024:.1f} MB total)')
     if make_inno:
         _generate_inno_script(exe)
+    return True
+
+
+def _build_windows_sensor_host(app_dir: Path) -> bool:
+    """Bundle the minimal read-only elevated helper beside the normal GUI."""
+    helper_name = 'CyberCleanSensorHost'
+    helper_dist = BUILD / 'sensor-host-dist'
+    helper_work = BUILD / 'sensor-host-work'
+    if helper_dist.exists():
+        shutil.rmtree(helper_dist)
+    if helper_work.exists():
+        shutil.rmtree(helper_work)
+    helper_dist.mkdir(parents=True)
+    helper_work.mkdir(parents=True)
+    BUILD.mkdir(parents=True, exist_ok=True)
+    sep = ';'
+    vendor_dir = ROOT / 'vendor' / 'lhm'
+    entrypoint = ROOT / 'sensor_host_entry.py'
+    cmd = ' '.join([
+        f'{_pyinstaller_bin()} --onedir --noconsole --clean',
+        f'--name {helper_name}',
+        f'--distpath "{helper_dist}"',
+        f'--workpath "{helper_work}"',
+        f'--specpath "{BUILD}"',
+        f'--add-data "{vendor_dir}{sep}vendor/lhm"',
+        '--hidden-import pythonnet',
+        '--hidden-import utils.windows_temperature_host',
+        '--hidden-import clr',
+        f'"{entrypoint}"',
+    ])
+    if run(cmd).returncode != 0:
+        return False
+    built = helper_dist / helper_name
+    if not (built / f'{helper_name}.exe').is_file():
+        return False
+    internal = built / '_internal'
+    if not (internal / 'vendor' / 'lhm' / 'manifest.json').is_file():
+        return False
+    destination = app_dir / 'sensor-host'
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(built, destination)
+    ok(f'Bundled protected sensor helper: {destination / (helper_name + ".exe")}')
     return True
 
 

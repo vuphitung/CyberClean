@@ -23,7 +23,8 @@ CyberClean — Windows Cleaner (3.1)
 NOTE: this file could not be executed on a real Windows machine while producing 3.1.0.
 """
 
-import os, re, shutil, subprocess, time
+import os, re, shutil, stat, subprocess, time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List
 from . import engine as E
@@ -149,7 +150,13 @@ def _dir_size_safe(path, _limit=500_000_000_000) -> int:
     Also applies a 500 GB ceiling to prevent hanging on huge dirs.
     """
     total = 0
+    links = {}
     try:
+        root_stat = os.lstat(path)
+        if E.is_link_like(root_stat) or E.check_ancestor_chain(str(path))[0]:
+            return 0
+        if not stat.S_ISDIR(root_stat.st_mode):
+            return root_stat.st_size if root_stat.st_nlink <= 1 else 0
         stack = [str(path)]
         while stack:
             current = stack.pop()
@@ -157,13 +164,18 @@ def _dir_size_safe(path, _limit=500_000_000_000) -> int:
                 with os.scandir(current) as it:
                     for entry in it:
                         try:
-                            if entry.is_symlink():
+                            info = E._entry_lstat(entry)
+                            if E.is_link_like(info) or info.st_dev != root_stat.st_dev:
                                 continue
-                            if entry.is_file(follow_symlinks=False):
-                                total += entry.stat(follow_symlinks=False).st_size
+                            if stat.S_ISREG(info.st_mode):
+                                if info.st_nlink > 1:
+                                    rec = links.setdefault((info.st_dev, info.st_ino), [info.st_size, 0, info.st_nlink])
+                                    rec[1] += 1
+                                else:
+                                    total += info.st_size
                                 if total > _limit:
                                     return total
-                            elif entry.is_dir(follow_symlinks=False):
+                            elif stat.S_ISDIR(info.st_mode):
                                 stack.append(entry.path)
                         except OSError:
                             pass
@@ -171,7 +183,85 @@ def _dir_size_safe(path, _limit=500_000_000_000) -> int:
                 pass
     except OSError:
         pass
-    return total
+    return total + sum(size for size, seen, count in links.values() if seen >= count)
+
+
+def _recycle_stats():
+    """Query the current user's bins, including the contents of deleted folders."""
+    import ctypes
+    from ctypes import wintypes
+
+    class QueryInfo(ctypes.Structure):
+        _fields_ = [('cbSize', wintypes.DWORD), ('size', ctypes.c_longlong),
+                    ('items', ctypes.c_longlong)]
+
+    info = QueryInfo()
+    info.cbSize = ctypes.sizeof(info)
+    query = ctypes.WinDLL('shell32').SHQueryRecycleBinW
+    query.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(QueryInfo)]
+    query.restype = ctypes.c_long
+    code = query(None, ctypes.byref(info))
+    if code != 0:
+        raise OSError(f'SHQueryRecycleBinW failed (0x{code & 0xffffffff:08X})')
+    return max(0, info.size), max(0, info.items)
+
+
+def _empty_recycle_bin():
+    import ctypes
+    from ctypes import wintypes
+    empty = ctypes.WinDLL('shell32').SHEmptyRecycleBinW
+    empty.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.DWORD]
+    empty.restype = ctypes.c_long
+    return empty(None, None, 0x1 | 0x2 | 0x4)
+
+
+def _service_status(name):
+    import psutil
+    return psutil.win_service_get(name).status()
+
+
+def _wait_service(name, wanted, timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        if _service_status(name) == wanted:
+            return
+        if time.monotonic() >= deadline:
+            raise OSError(f'{name} did not reach {wanted} state')
+        time.sleep(0.1)
+
+
+@contextmanager
+def _stopped_services(names):
+    """Only clean after confirmed stops; restore services that were running."""
+    # Capture the entire transaction before changing any service.
+    before = {name: _service_status(name) for name in names}
+    restart = []
+    try:
+        for name, status in before.items():
+            if status == 'stopped':
+                continue
+            if status != 'running':
+                raise OSError(f'{name} is {status} — try again later')
+            # Retain restoration intent even if a stop times out after taking effect.
+            restart.append(name)
+            _, code = run_win(f'sc stop {name}', timeout=15)
+            if code not in (0, 1062):
+                raise OSError(f'Could not stop {name} (code {code})')
+            _wait_service(name, 'stopped')
+        yield
+    finally:
+        failures = []
+        for name in reversed(restart):
+            try:
+                if _service_status(name) != 'running':
+                    _, code = run_win(f'sc start {name}', timeout=15)
+                    if code not in (0, 1056):
+                        raise OSError(f'code {code}')
+                    _wait_service(name, 'running')
+            except Exception as exc:
+                failures.append(f'{name}: {exc}')
+        if failures:
+            raise OSError('Could not restore service(s): ' + '; '.join(failures))
 
 
 def _real_freed(size_before: int, path) -> int:
@@ -358,14 +448,14 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         est = self._run_target(target_id, True)
         scan = ReviewScan(target_id, permanent=target_id != 'win_prefetch')
         risk = self._MONOLITH_RISK.get(target_id, 'medium')
-        if target_id in ('win_prefetch', 'win_shader_cache', 'win_crash_dumps') and est.rollback:
+        if target_id in ('win_prefetch', 'win_shader_cache', 'win_crash_dumps'):
             plan = E.Plan(target_id)
             pol = E.Policy(min_age_sec=0.0, recent_sec=0.0, require_owner=False)
             for rb in est.rollback[:200]:
                 p_str = rb.get('path', '')
                 if not p_str:
                     continue
-                it, _ = E.make_item(
+                it, why = E.make_item(
                     p_str, pol, label=p_str, group=target_id,
                     note=rb.get('note', tgt.desc), risk=risk,
                 )
@@ -384,7 +474,7 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
                 scan.items.append(ReviewItem(
                     id=p_str, label=p_str, size=sz, files=fls,
                     newest=mtime, detail=rb.get('note', tgt.desc),
-                    risk=risk, blocked=est.error or '', payload={'path': p_str}))
+                    risk=risk, blocked=est.error or (why if it is None else '') or '', payload={'path': p_str}))
             if len(est.rollback) > 200:
                 scan.notes.append(f'Showing first 200 of {len(est.rollback)} items.')
             rc[target_id] = (time.monotonic(), plan)
@@ -412,15 +502,22 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         cached = self._get_fresh_review_cache(target_id)
         if cached is None:
             return self._expired_review_result(target_id, dry)
-        if 'all' in item_ids or target_id not in ('win_prefetch', 'win_shader_cache', 'win_crash_dumps'):
+        if not isinstance(cached, E.Plan):
+            if set(item_ids) != {'all'}:
+                r = CleanResult(target_id, dry=dry)
+                r.error = 'Selection does not match the preview — scan again'
+                return r
             r = self._run_target(target_id, dry)
             r.dry = dry
             if not dry:
                 self._cache_invalidate(target_id)
             return r
-        if not isinstance(cached, E.Plan):
-            return self._expired_review_result(target_id, dry)
         wanted = set(item_ids)
+        known = {key for item in cached.items for key in (item.id, item.path)}
+        if wanted - known:
+            r = CleanResult(target_id, dry=dry)
+            r.error = 'Selection does not match the preview — scan again'
+            return r
         sel = E.Plan(
             target_id,
             [i for i in cached.items if i.id in wanted or i.path in wanted],
@@ -569,20 +666,21 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
     # ── Recycle Bin ───────────────────────────────────────────
     def _win_recycle(self, dry):
         r = CleanResult('win_recycle')
-        out, _ = run_win(
-            'PowerShell -NoProfile -Command "'
-            '(New-Object -ComObject Shell.Application).Namespace(10).Items()'
-            ' | Where-Object {$_.Size -ne $null}'
-            ' | Measure-Object -Property Size -Sum -ErrorAction SilentlyContinue'
-            ' | Select-Object -ExpandProperty Sum" 2>$null'
-        )
         try:
-            val = out.strip() if out else ''
-            r.freed_bytes = int(float(val)) if val and val.lower() not in ('', 'null', 'none') else 0
-        except (ValueError, TypeError):
-            r.freed_bytes = 0
-        if not dry:
-            run_win('PowerShell -NoProfile -Command "Clear-RecycleBin -Force -EA SilentlyContinue" 2>$null')
+            before_size, before_items = _recycle_stats()
+            r.planned_bytes = before_size
+            if dry:
+                r.freed_bytes = before_size
+                r.files_removed = before_items
+            elif before_items:
+                code = _empty_recycle_bin()
+                if code != 0:
+                    r.error = f'Recycle Bin cleanup failed (0x{code & 0xffffffff:08X})'
+                after_size, after_items = _recycle_stats()
+                r.freed_bytes = max(0, before_size - after_size)
+                r.files_removed = max(0, before_items - after_items)
+        except (OSError, AttributeError) as exc:
+            r.error = str(exc)
         return r
 
     # ── Windows Update Cache ──────────────────────────────────
@@ -592,7 +690,8 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         if not sd.exists():
             return r
         size_before = _dir_size_safe(sd)
-        r.freed_bytes = size_before
+        r.planned_bytes = size_before
+        r.freed_bytes = size_before if dry else 0
         busy = E.Guards().running(['tiworker', 'wusa', 'msiexec', 'trustedinstaller'])
         if busy:
             # Dừng dịch vụ Windows Update giữa lúc đang cài update có thể làm hỏng trạng thái servicing.
@@ -600,54 +699,26 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             r.freed_bytes = 0
             return r
         if not dry and is_admin():
-            # Use 'sc stop' — more reliable than 'net stop' on managed/office machines.
-            # Also stop BITS (Background Intelligent Transfer) which holds file locks.
-            # Try both; proceed if at least wuauserv stopped (return code 0 or 1062=already stopped).
-            _ALREADY_STOPPED = ('1062', '1060', 'already')
-
-            def _stop_svc(name) -> bool:
-                out, code = run_win(f'sc stop {name}', timeout=20)
-                if code == 0:
-                    return True
-                # 1062 = service not running — that's fine for our purposes
-                return any(s in out for s in _ALREADY_STOPPED)
-
-            def _start_svc(name):
-                run_win(f'sc start {name}', timeout=20)
-
-            stopped_wu   = _stop_svc('wuauserv')
-            _stop_svc('bits')
-            _stop_svc('dosvc')
-
-            if stopped_wu:
-                try:
+            try:
+                with _stopped_services(('wuauserv', 'bits', 'dosvc')):
                     for item in list(sd.iterdir()):
                         try:
-                            sz = _dir_size_safe(item) if item.is_dir() else item.stat().st_size
+                            sz = _dir_size_safe(item)
+                            E.remove_path(str(item))
+                            freed = _real_freed(sz, item)
                             r.rollback.append({
                                 'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                                 'type': 'win_updates', 'path': str(item),
-                                'size': sz, 'note': 're-downloads when needed',
+                                'size': freed, 'note': 're-downloads when needed',
                             })
-                            if item.is_dir():
-                                shutil.rmtree(item, ignore_errors=True)
-                            else:
-                                item.unlink(missing_ok=True)
+                            if not item.exists():
+                                r.files_removed += 1
                         except (PermissionError, OSError):
                             pass
-                finally:
-                    _start_svc('bits')
-                    _start_svc('wuauserv')
-                    _start_svc('dosvc')               # đã dừng ở trên — trước đây không bao giờ bật lại
+            except OSError as exc:
+                r.error = str(exc)
+            finally:
                 r.freed_bytes = _real_freed(size_before, sd)
-            else:
-                _start_svc('bits')
-                _start_svc('wuauserv')
-                _start_svc('dosvc')
-                r.error = (
-                    'Could not stop Windows Update service — '
-                    'try running CyberClean as Administrator'
-                )
         elif not dry and not is_admin():
             r.error = 'Needs admin'
         return r
@@ -659,20 +730,20 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         if not do_path.exists():
             return r
         size_before = _dir_size_safe(do_path)
-        r.freed_bytes = size_before
+        r.planned_bytes = size_before
+        r.freed_bytes = size_before if dry else 0
         if not dry and is_admin():
-            # FIX v2.5: wrap in try/finally so dosvc ALWAYS restarts even if
-            # shutil.rmtree raises unexpectedly (mirrors the _win_updates pattern).
-            run_win('net stop dosvc /y', timeout=10)
             try:
-                for child in E.iter_dir(do_path):          # giữ thư mục gốc: nó mang ACL riêng của dịch vụ
-                    try:
-                        E.remove_path(child.path)
-                    except OSError:
-                        pass
+                with _stopped_services(('dosvc',)):
+                    for child in E.iter_dir(do_path):      # keep the service's root ACLs
+                        try:
+                            E.remove_path(child.path)
+                        except OSError:
+                            pass
+            except OSError as exc:
+                r.error = str(exc)
             finally:
-                run_win('net start dosvc', timeout=10)
-            r.freed_bytes = _real_freed(size_before, do_path)
+                r.freed_bytes = _real_freed(size_before, do_path)
         elif not dry and not is_admin():
             r.error = 'Needs admin'
         return r
@@ -747,64 +818,60 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
             *Path(sysroot).glob('ServiceProfiles/LocalService/AppData/Local/FontCache/FontCache*.dat'),
             *Path(sysroot).glob('ServiceProfiles/LocalService/AppData/Local/FontCache-System/FontCache*.dat'),
         ]
-        existing = [f for f in targets if f.exists()]
+        existing = []
+        for f in targets:
+            try:
+                if not E.is_link_like(f.lstat()) and not E.check_ancestor_chain(str(f))[0] and f.is_file():
+                    existing.append(f)
+            except OSError:
+                pass
         size_before = sum(f.stat().st_size for f in existing)
         r.freed_bytes   = size_before
         r.files_removed = len(existing)
         if not dry and is_admin():
-            # FIX v2.5: Two-phase strategy — avoids the font rendering glitch caused
-            # by stopping the service while the UI is live.
-            #
-            # Phase 1: Try direct delete first (works if service already released file).
-            # Phase 2: For still-locked files, rename to .old — Windows allows renaming
-            #          open files (unlike deletion). On next boot, FontCache rebuilds
-            #          fresh and the .old files are left orphaned (and we clean those
-            #          in Phase 3 on the next run).
-            # Phase 3: Schedule any remaining .old files for boot-time deletion via
-            #          MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT).
+            # Locked cache files stay in place until Windows removes them at boot.
+            # Renaming does not free disk space and must not be reported as deletion.
             import ctypes
             _kernel32 = ctypes.windll.kernel32
             MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
 
             deleted = 0
+            removed = 0
+            delayed = 0
+            delayed_bytes = 0
+            r.rollback = []
             for f in existing:
                 try:
                     sz = f.stat().st_size
                     try:
                         f.unlink()   # Phase 1: direct delete
                         deleted += sz
+                        removed += 1
                         r.rollback.append({
                             'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                             'type': 'font_cache', 'path': str(f),
                             'size': sz, 'note': 'auto-rebuilds on next boot',
                         })
                     except (PermissionError, OSError):
-                        # Phase 2: rename to .old (permitted even on locked files)
-                        old_path = Path(str(f) + '.old')
-                        try:
-                            f.rename(old_path)
-                            # Phase 3: schedule the .old for deletion at next boot
-                            _kernel32.MoveFileExW(str(old_path), None, MOVEFILE_DELAY_UNTIL_REBOOT)
-                            deleted += sz
+                        if _kernel32.MoveFileExW(str(f), None, MOVEFILE_DELAY_UNTIL_REBOOT):
+                            delayed += 1
+                            delayed_bytes += sz
                             r.rollback.append({
                                 'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
                                 'type': 'font_cache', 'path': str(f),
-                                'size': sz, 'note': 'renamed to .old; auto-removed on next boot',
+                                'size': 0, 'note': 'scheduled for deletion on next boot',
                             })
-                        except OSError:
-                            pass
-                except OSError:
-                    pass
-            # Also clean up any leftover .old files from a previous run
-            for stale in list(existing[0].parent.glob('*.old')) if existing else []:
-                try:
-                    stale.unlink(missing_ok=True)
                 except OSError:
                     pass
             r.freed_bytes   = deleted
-            r.files_removed = len([f for f in existing if not f.exists()])
+            r.files_removed = removed
+            if delayed:
+                r.notes.append(f'{delayed} font cache file(s) ({delayed_bytes} bytes) are scheduled for '
+                               'deletion on next boot — that space is NOT freed yet.')
         elif not dry and not is_admin():
             r.error = 'Needs admin'
+            r.freed_bytes = 0
+            r.files_removed = 0
         return r
 
     # ── GPU Shader Cache (NEW) ────────────────────────────────
@@ -862,7 +929,8 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
     # ── DNS ───────────────────────────────────────────────────
     def _win_dns(self, dry):
         r = CleanResult('win_dns')
-        r.files_removed = 1
+        r.files_removed = 0
+        r.notes.append('DNS resolver flush is an operation, not file deletion; no disk bytes claimed.')
         if not dry:
             _, code = run_win('ipconfig /flushdns')
             if code != 0:
@@ -967,7 +1035,8 @@ class WindowsCleaner(PlanCleanerMixin, BaseCleaner):
         r = CleanResult('win_eventlog')
         evtx_dir = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'System32/winevt/Logs'
         size_before = _dir_size_safe(evtx_dir) if evtx_dir.exists() else 0
-        r.freed_bytes = size_before
+        r.planned_bytes = size_before
+        r.freed_bytes = size_before if dry else 0
         if not dry and is_admin():
             out, _ = run_win('wevtutil el', timeout=15)
             all_logs = [l.strip() for l in out.splitlines() if l.strip()]

@@ -87,8 +87,11 @@ def _timer_resolution_set(log) -> bool:
         log("  ~ Timer resolution: skipped on ARM64 (winmm unavailable)", "warn")
         return False
     try:
-        ctypes.windll.winmm.timeBeginPeriod(1)
-        log("  + Timer resolution: 1ms (default 15.6ms) — smoother frame timing", "ok")
+        rc = ctypes.windll.winmm.timeBeginPeriod(1)
+        if rc != 0:
+            log(f"  ~ timeBeginPeriod failed: {rc}", "warn")
+            return False
+        log("  + App requested 1ms timer resolution; game timing/FPS benefit has not been measured", "ok")
         return True
     except OSError:
         # Handles AttributeError / DLL not found on unusual Windows editions
@@ -142,25 +145,14 @@ def _set_ecoqos(pid: int, enable: bool) -> bool:
     """Apply or remove EcoQoS (power efficiency mode) for a process."""
     if not IS_WINDOWS or not hasattr(ctypes, "windll"):
         return False
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.OpenProcess(0x0200 | 0x0400, False, pid)
-    if not handle:
-        return False
+    from utils.windows_process_state import ProcessAPI
+    api = ProcessAPI()
     try:
-        state = _PROCESS_POWER_THROTTLING_STATE(
-            Version=_PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            ControlMask=_PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-            StateMask=_PROCESS_POWER_THROTTLING_EXECUTION_SPEED if enable else 0,
-        )
-        ok = kernel32.SetProcessInformation(
-            handle,
-            _PROCESS_INFORMATION_CLASS_POWER,
-            ctypes.byref(state),
-            ctypes.sizeof(state),
-        )
-        return bool(ok)
-    finally:
-        kernel32.CloseHandle(handle)  # ALWAYS close handle to prevent leak
+        with api.handle(pid) as handle:
+            control, state = api.read(handle, 'power')
+            return api.write(handle, 'power', [control | 1, state | 1 if enable else state & ~1])
+    except OSError:
+        return False
 
 
 def _is_windows_11() -> bool:
@@ -920,26 +912,48 @@ def _trim_working_sets(log) -> int:
 
     trimmed = 0
     fg_pid = _get_foreground_pid()
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    # HANDLE and SIZE_T are pointer-sized on 64-bit Windows. The default ctypes
+    # int return type truncates OpenProcess handles before they reach the trim.
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.SetProcessWorkingSetSizeEx.argtypes = [
+        ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint32]
+    kernel32.SetProcessWorkingSetSizeEx.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
 
+    candidates = []
     for p in psutil.process_iter(["pid", "name"]):
         try:
             nm = (p.info["name"] or "").lower()
-            if nm in _TRIM_SKIP or p.pid == fg_pid:
+            if (nm in _TRIM_SKIP or nm in _WIN_RAM_SKIP or
+                    nm.removesuffix('.exe') in _BLOAT_SKIP_ALWAYS or _is_protected(nm) or
+                    p.pid <= 10 or p.pid in (fg_pid, os.getpid())):
                 continue
-            cpu = p.cpu_percent(interval=0)
-            if cpu > 1.0:
+            created = p.create_time()
+            p.cpu_percent(interval=0)  # Prime; a first sample of 0 means unknown.
+            candidates.append((p, created))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    if candidates:
+        import time as _time
+        _time.sleep(.2)  # One shared interval, never a blocking sample per process.
+    for p, created in candidates:
+        try:
+            if (p.create_time() != created or p.pid == _get_foreground_pid() or
+                    p.cpu_percent(interval=0) > 1.0):
                 continue   # skip active processes
-            # Open process with VM_OPERATION rights
-            handle = kernel32.OpenProcess(0x0008 | 0x0400, False, p.pid)
+            # SetProcessWorkingSetSizeEx requires PROCESS_SET_QUOTA, not VM_OPERATION.
+            handle = kernel32.OpenProcess(0x0100 | 0x0400, False, p.pid)
             if not handle:
                 continue
             try:
                 # SetProcessWorkingSetSizeEx(-1, -1, 0) = trim to minimum
                 ok = kernel32.SetProcessWorkingSetSizeEx(
                     handle,
-                    ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),   # SIZE_MAX = trim
-                    ctypes.c_size_t(0xFFFFFFFFFFFFFFFF),
+                    ctypes.c_size_t(-1),   # SIZE_MAX = trim on either architecture
+                    ctypes.c_size_t(-1),
                     ctypes.c_ulong(0)
                 )
                 if ok:
@@ -1107,7 +1121,7 @@ def _unregister_cleanup(fn: Callable):
         pass
 
 def _run_all_cleanups():
-    for fn in _CLEANUP_REGISTRY:
+    for fn in list(_CLEANUP_REGISTRY):
         try:
             fn()
         except Exception:
@@ -1169,6 +1183,11 @@ def _same_process_identity(p, rec) -> bool:
     exp_name = (rec.get("name") or "").lower()
     exp_ctime = rec.get("create_time")
     cur_name, cur_ctime = _proc_identity(p)
+    if IS_WINDOWS:
+        # PID reuse can happen within two seconds, even for the same executable.
+        # Unknown identity must never authorize restoring another process.
+        return bool(exp_name and cur_name == exp_name and exp_ctime and cur_ctime and
+                    cur_ctime == float(exp_ctime))
     if exp_name and cur_name and exp_name != cur_name:
         return False
     if exp_ctime and cur_ctime and abs(cur_ctime - float(exp_ctime)) > 2.0:
@@ -1243,7 +1262,7 @@ def _run_helper(action, timeout=30):
 # WINDOWS MEMORY PRIORITY API
 # ══════════════════════════════════════════════════════════════
 
-_PROCESS_MEMORY_PRIORITY_INFO_CLASS = 1
+_PROCESS_MEMORY_PRIORITY_INFO_CLASS = 0
 MEMORY_PRIORITY_VERY_LOW  = 1
 MEMORY_PRIORITY_LOW       = 2
 MEMORY_PRIORITY_MEDIUM    = 3
@@ -1260,24 +1279,13 @@ class _MEMORY_PRIORITY_INFO(ctypes.Structure):
 def _set_process_memory_priority(pid: int, priority: int) -> bool:
     if not IS_WINDOWS or not hasattr(ctypes, "windll"):
         return False
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.OpenProcess(
-        _PROCESS_SET_INFORMATION | _PROCESS_QUERY_INFORMATION,
-        False, pid
-    )
-    if not handle:
-        return False
+    from utils.windows_process_state import ProcessAPI
+    api = ProcessAPI()
     try:
-        info = _MEMORY_PRIORITY_INFO(MemoryPriority=priority)
-        ok = kernel32.SetProcessInformation(
-            handle,
-            _PROCESS_MEMORY_PRIORITY_INFO_CLASS,
-            ctypes.byref(info),
-            ctypes.sizeof(info)
-        )
-        return bool(ok)
-    finally:
-        kernel32.CloseHandle(handle)  # ALWAYS close handle to prevent leak
+        with api.handle(pid) as handle:
+            return api.write(handle, 'memory', priority)
+    except OSError:
+        return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2019,36 +2027,37 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
                     # which would destroy unsaved work in creative/office apps. Apply EcoQoS +
                     # BELOW_NORMAL priority + low memory priority so Windows evicts their pages first.
                     try:
-                        orig_nice = p.nice()
-                        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-                        _set_ecoqos(p.pid, True)
-                        _set_process_memory_priority(p.pid, MEMORY_PRIORITY_LOW)
-                        pname, pctime = _proc_identity(p)
+                        from utils.windows_process_state import capture, apply
+                        state = capture(p, eco=_is_windows_11())
                         frozen_pids[p.pid] = {
-                            "name": pname or p.name(),
-                            "create_time": pctime,
-                            "mode": "win_eco",
-                            "orig_nice": orig_nice,
+                            "name": state['name'], "create_time": state['create_time'],
+                            "mode": "win_eco", "win_state": state,
                         }
+                        if not apply(p, state, priority=psutil.BELOW_NORMAL_PRIORITY_CLASS):
+                            log(f"  ~ Windows process change unverified: {p.pid}; original state retained for restore", "warn")
+                            continue
                         acted += 1
                         result.mb_affected += mem_mb
                         log(f"  ⏸ Eco-Throttled [{tag}] {p.name()} → EcoQoS + Low Mem Priority (~{mem_mb:.0f} MB deprioritized)", "warn")
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, ValueError):
-                        pass
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, ValueError, OSError) as exc:
+                        log(f"  ~ Windows process change skipped or restore pending: {p.pid}: {exc}", "warn")
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
     try:
         ram_after_mb = psutil.virtual_memory().available / (1024 * 1024)
-        result.mb_freed = max(0.0, ram_after_mb - ram_before_mb)
+        result.mb_freed = (ram_after_mb - ram_before_mb if IS_WINDOWS else
+                           max(0.0, ram_after_mb - ram_before_mb))
     except Exception:
         result.mb_freed = 0.0
 
     result.count    = acted
     result.rollback = [{"frozen_pids": frozen_pids}]
 
-    if acted == 0:
+    if IS_WINDOWS and acted == 0 and frozen_pids:
+        log("  ~ Process changes could not be verified; original state retained for restore", "warn")
+    elif acted == 0:
         try:
             top3 = sorted(
                 [(p.name(), p.memory_info().rss // 1024 // 1024)
@@ -2065,7 +2074,8 @@ def kill_bloat(log, use_sigstop: bool = True, cpu_cache: Optional[dict] = None, 
     else:
         log(
             f"✓ Done — {acted} processes throttled (~{result.mb_affected:.0f} MB deprioritized, "
-            f"{result.mb_freed:.0f} MB RAM freed)",
+            + (f"{result.mb_freed:+.0f} MB observed system available RAM change)" if IS_WINDOWS else
+             f"{result.mb_freed:.0f} MB RAM freed)"),
             "ok",
         )
         if frozen_pids and IS_LINUX:
@@ -2111,9 +2121,12 @@ def restore_bloat(frozen_pids: dict, log) -> bool:
                     if not _same_process_identity(proc, info):
                         frozen_pids.pop(pid_raw, None)
                         continue
-                    _set_ecoqos(pid, False)
-                    if orig_nice is not None:
-                        proc.nice(int(orig_nice))
+                    state = info.get('win_state')
+                    if state is None:
+                        raise OSError('Legacy Windows rollback lacks original masks; manual review needed')
+                    from utils.windows_process_state import restore
+                    if not restore(proc, state):
+                        raise OSError('Windows process restore pending verification')
                 elif IS_LINUX:
                     if HAS_PSUTIL:
                         proc = psutil.Process(pid)
@@ -2204,34 +2217,17 @@ def free_ram(log) -> BoostResult:
         else:
             log(f"  i RAM pressure is healthy ({ram_pct:.0f}%) — skipping forced working-set flush to prevent page-fault stutter", "ok")
 
-        # Step 2: Memory priority hints — guides future eviction order
-        lowered = 0
-        fg_pid  = _get_foreground_pid()
-
-        for p in psutil.process_iter(["pid", "name", "status"]):
-            try:
-                nm = (p.info["name"] or "").lower()
-                if nm in _WIN_RAM_SKIP:
-                    continue
-                if p.pid == fg_pid:
-                    continue
-                cpu = p.cpu_percent(interval=0)
-                if cpu > 2.0:
-                    continue
-                if _set_process_memory_priority(p.pid, MEMORY_PRIORITY_LOW):
-                    lowered += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                pass
-
-        log(f"  + Memory priority hints: {lowered} idle processes marked for eviction first", "ok")
+        log("  i Memory priority hints are owned by Eco Mode with captured rollback state", "ok")
 
     import gc; gc.collect()
 
     after = psutil.virtual_memory().available // 1024 // 1024
-    freed = max(0, after - before)
+    freed = after - before if IS_WINDOWS else max(0, after - before)
     result.mb_freed = freed
 
-    if freed > 10:
+    if IS_WINDOWS:
+        log(f"  i Observed system available RAM delta: {freed:+} MB (all workloads; not attributable to Boost)", "ok")
+    elif freed > 10:
         log(f"  + RAM freed: +{freed} MB  (now {after} MB available)", "ok")
     else:
         # FIX UX: explain why 0 MB is expected and not a bug
@@ -2526,44 +2522,9 @@ def _enable_kernel_performance(log):
         return None
 
     elif IS_WINDOWS:
-        if _is_on_battery():
-            log("  ~ Power Plan: on battery — keeping current plan (plug in for best perf)", "warn")
-            try:
-                out = subprocess.run(
-                    "powercfg /getactivescheme", shell=True,
-                    capture_output=True, text=True,
-                    creationflags=0x08000000, timeout=5
-                ).stdout
-                orig_guid = POWER_BALANCED
-                if "GUID:" in out:
-                    orig_guid = out.split("GUID:")[1].split()[0].strip()
-                return orig_guid
-            except Exception:
-                return POWER_BALANCED
-
-        orig_guid = POWER_BALANCED
-        try:
-            out = subprocess.run(
-                "powercfg /getactivescheme", shell=True,
-                capture_output=True, text=True,
-                creationflags=0x08000000, timeout=5
-            ).stdout
-            if "GUID:" in out:
-                orig_guid = out.split("GUID:")[1].split()[0].strip()
-        except (subprocess.TimeoutExpired, OSError, IndexError):
-            pass
-
-        for guid, name in [(POWER_ULTIMATE, "Ultimate"), (POWER_HIGH_PERF, "High Performance")]:
-            r = subprocess.run(
-                ["powercfg", "/setactive", _safe_guid(guid)],
-                capture_output=True, creationflags=0x08000000, timeout=5
-            )
-            if r.returncode == 0:
-                log(f"  + Windows Power Plan: {name}", "ok")
-                return orig_guid
-
-        log("  ~ Could not switch power plan", "warn")
-        return orig_guid
+        # No automatic thermal/power escalation. Keep the user's current plan.
+        log("  i Windows power plan unchanged; Balanced recommended. No verified thermal opt-in is configured.", "warn")
+        return None
 
 
 def _restore_kernel_performance(method, log) -> bool:
@@ -2665,7 +2626,13 @@ def _restore_kernel_performance(method, log) -> bool:
             if getattr(r, "returncode", 1) != 0:
                 log("  ⚠ Windows Power Plan restore failed", "warn")
                 return False
-            log("  + Windows Power Plan: original restored", "ok")
+            check = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
+                                   text=True, creationflags=0x08000000, timeout=5)
+            actual = re.search(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', check.stdout or '')
+            if check.returncode != 0 or actual is None or actual.group(0).lower() != str(method).lower():
+                log("  ~ Windows Power Plan restore not verified; pending retry", "warn")
+                return False
+            log("  + Windows Power Plan: original restored and verified", "ok")
             return True
         except Exception as e:
             log(f"  ⚠ Windows Power Plan restore error: {e}", "warn")
@@ -4119,11 +4086,18 @@ def game_mode_on(log) -> dict:
                     if nm in TRASH_APPS:
                         # Hard jail bloat regardless of activity — these should never
                         # be doing useful work during gaming
-                        saved["affinity"][p.pid] = p.cpu_affinity()
+                        original_affinity = p.cpu_affinity()
+                        saved["affinity"][p.pid] = ({
+                            "original": original_affinity, "name": p.name(),
+                            "create_time": p.create_time(),
+                        } if IS_WINDOWS else original_affinity)
                         p.cpu_affinity(trash_cores)
                         orig_n = p.nice()
                         if IS_WINDOWS:
-                            saved["nice"][p.pid] = orig_n
+                            saved["nice"][p.pid] = {
+                                "orig_nice": orig_n, "name": p.name(),
+                                "create_time": p.create_time(),
+                            }
                             p.nice(psutil.IDLE_PRIORITY_CLASS)
                         elif IS_LINUX and _can_restore_linux_nice(orig_n):
                             try:
@@ -4197,7 +4171,11 @@ def game_mode_on(log) -> dict:
             for game_pid, game_name in running_games:
                 try:
                     gp = psutil.Process(game_pid)
-                    saved["game_priority"][game_pid] = gp.nice()
+                    original_priority = gp.nice()
+                    saved["game_priority"][game_pid] = ({
+                        "orig_nice": original_priority, "name": gp.name(),
+                        "create_time": gp.create_time(),
+                    } if IS_WINDOWS else original_priority)
                     if IS_WINDOWS:
                         gp.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
                     elif IS_LINUX and os.geteuid() == 0:
@@ -4230,43 +4208,6 @@ def game_mode_on(log) -> dict:
 
             # 4. Transparent Huge Pages: reduce TLB misses → faster memory access
             _set_thp_game(all_game_pids, log, saved)
-
-        elif has_game and IS_WINDOWS:
-            all_game_pids = []
-            for game_pid, _ in running_games:
-                all_game_pids.append(game_pid)
-
-            # Windows: HIGH priority class for game.
-            # FIX (critical): REALTIME_PRIORITY_CLASS (0x100) sits ABOVE audio,
-            # input, and GPU driver worker threads in the Windows scheduler.
-            # If any game thread ever busy-loops or blocks briefly (extremely
-            # common — asset streaming, GC pause, network hitch), it starves
-            # mouse/keyboard input, WASAPI audio, and DWM composition system-wide.
-            # Symptom reported by users: CPU usage spikes, fans ramp, but FPS
-            # feels WORSE/stuttery rather than better — this is exactly that,
-            # because the "boost" was actively fighting the OS for scheduling
-            # slots the driver/input stack needs to run smoothly.
-            # HIGH_PRIORITY_CLASS (0x80) still beats every normal/background
-            # process for CPU contention, without pre-empting system-critical
-            # threads. This is also what Task Manager's "High" option uses,
-            # and what most legitimate game-boost tools use.
-            import ctypes as _wct
-            for pid in all_game_pids:
-                try:
-                    PROCESS_ALL_ACCESS = 0x1F0FFF
-                    HIGH_PRIORITY_CLASS = 0x00000080
-                    h = _wct.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-                    if h:
-                        if pid not in saved["game_priority"] and HAS_PSUTIL:
-                            try:
-                                saved["game_priority"][pid] = psutil.Process(pid).nice()
-                            except Exception:
-                                saved["game_priority"][pid] = psutil.NORMAL_PRIORITY_CLASS
-                        _wct.windll.kernel32.SetPriorityClass(h, HIGH_PRIORITY_CLASS)
-                        _wct.windll.kernel32.CloseHandle(h)
-                        log(f"  ↑ Windows: game process set to HIGH priority class", "ok")
-                except Exception:
-                    pass
 
         # Kill bloat — reuse cpu_samples to skip 0.6s warm-up
         log("  . Scanning for idle background processes...", "text")
@@ -4303,6 +4244,10 @@ def game_mode_on(log) -> dict:
     # this runs from atexit/a signal handler.
     def _game_mode_crash_cleanup():
         _noop = lambda *_a, **_kw: None
+        if IS_WINDOWS:
+            # Use the same identity checks and exact rollback as normal exit.
+            game_mode_off(saved, _noop)
+            return
         if saved.get("frozen") and IS_LINUX:
             restore_bloat(saved["frozen"], _noop)
         if IS_LINUX:
@@ -4412,10 +4357,17 @@ def game_mode_off(saved: dict, log) -> bool:
         gp_restored = 0
         for pid, orig_nice in list(gp_map.items()):
             try:
-                target_nice = orig_nice
+                proc = psutil.Process(int(pid))
+                if isinstance(orig_nice, dict):
+                    if not _same_process_identity(proc, orig_nice):
+                        gp_map.pop(pid, None)
+                        continue
+                    target_nice = orig_nice["orig_nice"]
+                else:
+                    target_nice = orig_nice
                 if target_nice == "high" and IS_WINDOWS:
                     target_nice = psutil.NORMAL_PRIORITY_CLASS
-                psutil.Process(int(pid)).nice(target_nice)
+                proc.nice(target_nice)
                 gp_map.pop(pid, None)
                 gp_restored += 1
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
@@ -4454,7 +4406,14 @@ def game_mode_off(saved: dict, log) -> bool:
         restored = 0
         for pid, orig in list(aff_map.items()):
             try:
-                psutil.Process(int(pid)).cpu_affinity(orig)
+                proc = psutil.Process(int(pid))
+                if isinstance(orig, dict):
+                    if not _same_process_identity(proc, orig):
+                        aff_map.pop(pid, None)
+                        continue
+                    proc.cpu_affinity(orig["original"])
+                else:
+                    proc.cpu_affinity(orig)
                 aff_map.pop(pid, None)
                 restored += 1
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
@@ -4530,30 +4489,26 @@ def eco_mode_on(log) -> dict:
         else:
             log("ECO MODE ON — memory hints (Windows 10)", "head")
 
-        lowered = 0
-        eco_pids = []
+        from utils.windows_process_state import capture, apply
+        states = saved['win_states'] = {}
+        saved["mode"] = "windows_memprio"
+        def _windows_eco_cleanup():
+            eco_mode_off(saved, lambda *_a, **_k: None)
+        saved['_crash_cleanup_fn'] = _windows_eco_cleanup
+        _register_cleanup(_windows_eco_cleanup)
         protected = get_de_protected()
         for p in psutil.process_iter(["pid", "name"]):
             try:
-                nm = (p.info["name"] or "").lower().replace(".exe", "")
+                nm = (p.info["name"] or "").lower().removesuffix(".exe")
                 if nm in _ECO_SKIP or nm in protected or _is_protected(nm):
                     continue
-                # Memory priority hint (works on all Windows)
-                if _set_process_memory_priority(p.pid, MEMORY_PRIORITY_LOW):
-                    saved["mem_lowered"].append(p.pid)
-                    lowered += 1
-                # EcoQoS: hardware power efficiency mode (Windows 11 only)
-                if win11:
-                    _set_ecoqos(p.pid, True)
-                    eco_pids.append(p.pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-
+                state = capture(p, eco=win11)
+                states[p.pid] = state  # Always store before any mutation.
+                apply(p, state)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as exc:
+                log(f"  ~ Eco Mode PID {p.pid}: {exc}; any applied state remains pending restore", "warn")
         saved["mode"] = "windows_memprio"
-        saved["eco_pids"] = eco_pids
-        log(f"  + Memory priority: {lowered} background processes marked for eviction", "ok")
-        if win11 and eco_pids:
-            log(f"  + EcoQoS: {len(eco_pids)} processes set to hardware efficiency mode", "ok")
+        log(f"  i Eco Mode: {len(states)} captured processes; applied/verified/pending recorded separately", "ok")
 
     elif IS_LINUX:
         cg_path = _cgroup_create(log)
@@ -4639,35 +4594,29 @@ def eco_mode_off(saved: dict, log) -> bool:
 
     if mode == "windows_memprio":
         log("ECO MODE OFF — restoring background processes...", "head")
-        eco_pids = list(saved.get("eco_pids") or [])
-        failed_eco = []
-        for pid in eco_pids:
-            if not _set_ecoqos(pid, False):
-                if HAS_PSUTIL and psutil.pid_exists(int(pid)):
-                    failed_eco.append(pid)
+        from utils.windows_process_state import restore
+        states = saved.get('win_states', {})
+        for pid, state in list(states.items()):
+            try:
+                if restore(psutil.Process(int(pid)), state):
+                    states.pop(pid, None)
+                else:
                     all_ok = False
-        if failed_eco:
-            saved["eco_pids"] = failed_eco
-        else:
-            saved.pop("eco_pids", None)
-        if eco_pids and not failed_eco:
-            log(f"  + EcoQoS restored for {len(eco_pids)} processes", "ok")
-
-        restored = 0
-        failed_mem = []
-        for pid in list(saved.get("mem_lowered") or []):
-            if _set_process_memory_priority(pid, MEMORY_PRIORITY_NORMAL):
-                restored += 1
-            elif HAS_PSUTIL and psutil.pid_exists(int(pid)):
-                failed_mem.append(pid)
+            except psutil.NoSuchProcess:
+                states.pop(pid, None)
+            except (psutil.AccessDenied, OSError) as exc:
                 all_ok = False
-        if failed_mem:
-            saved["mem_lowered"] = failed_mem
-        else:
-            saved.pop("mem_lowered", None)
-        log(f"  + Memory priority restored for {restored} processes", "ok")
+                log(f"  ~ Eco restore PID {pid}: {exc}; pending for retry", "warn")
+        if saved.get('eco_pids') or saved.get('mem_lowered'):
+            # Old records contain no identity/original masks; do not guess defaults.
+            log('  ~ Legacy Windows rollback lacks originals; manual review needed', 'warn')
+            all_ok = False
         if all_ok:
-            saved.pop("mode", None)
+            saved.pop('win_states', None)
+            saved.pop('mode', None)
+            cleanup = saved.pop('_crash_cleanup_fn', None)
+            if cleanup:
+                _unregister_cleanup(cleanup)
         return all_ok
 
     elif mode == "linux_cgroup":

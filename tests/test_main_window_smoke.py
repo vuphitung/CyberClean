@@ -66,5 +66,6 @@ def test_main_window_has_three_tier_pages_and_clean_is_auto_only(tmp_path):
     assert d["clean_has_review_button"] is False
     assert len(d["clean_more_ways_buttons"]) == 2
     assert d["deep_via_hint"] == "DeepCleanPage" and d["advisor_page"] == "AdvisorPage"
-    assert "empty_trash" in d["deep_cards"] and "dev_cache" in d["deep_cards"]
+    assert ("win_recycle" if sys.platform == 'win32' else "empty_trash") in d["deep_cards"]
+    assert "dev_cache" in d["deep_cards"]
     assert d["deep_scanned_on_open"] is False, "mở trang Dọn sâu không được tự quét đĩa"

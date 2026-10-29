@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def helper_globs():
-    text = (ROOT / "packaging" / "cyber-clean-helper").read_text()
+    text = (ROOT / "packaging" / "cyber-clean-helper").read_text(encoding='utf-8')
     block = re.search(r"PROTECTED_GLOBS=\((.*?)\n\)", text, re.S).group(1)
     out = []
     for tok in re.findall(r"'([^']+)'|(\S+)", block):

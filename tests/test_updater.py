@@ -56,7 +56,7 @@ def test_old_update_replace_is_never_called(worker, monkeypatch):
     monkeypatch.setattr(P, "run_helper", rec)
     worker._update_linux()
     assert all(c[0] != "update-replace" for c in rec.calls)
-    assert "update-replace" not in Path(U.__file__).read_text().replace("`update-replace`", "")
+    assert "update-replace" not in Path(U.__file__).read_text(encoding='utf-8').replace("`update-replace`", "")
 
 
 def test_outdated_helper_blocks_update_with_clear_message(worker, monkeypatch):

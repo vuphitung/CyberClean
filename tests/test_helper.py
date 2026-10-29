@@ -1,3 +1,4 @@
+import sys
 """
 Test cho packaging/cyber-clean-helper.
 
@@ -23,7 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 HELPER_SRC = ROOT / "packaging" / "cyber-clean-helper"
 
-pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="helper tests need root")
+pytestmark = pytest.mark.skipif(sys.platform != "linux" or getattr(os, "geteuid", lambda: -1)() != 0, reason="helper tests need root")
 
 
 # ── fixture: một "hệ thống" giả ──────────────────────────────────────────────

@@ -10,7 +10,14 @@ DAY = 86400
 
 def age(path, days):
     t = time.time() - days * DAY
-    os.utime(path, (t, t), follow_symlinks=False)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, (t, t), follow_symlinks=False)
+    else:
+        # Windows does not implement utime(follow_symlinks=False). Fixtures
+        # only age ordinary files/directories, never a symlink target.
+        if Path(path).is_symlink() or getattr(Path(path), 'is_junction', lambda: False)():
+            raise ValueError('cannot age a link fixture on this platform')
+        os.utime(path, (t, t))
 
 
 def tree(base: Path, spec: dict, days=30):

@@ -1,0 +1,29 @@
+{
+  "release": "v0.9.6",
+  "framework": "net472",
+  "source": "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip",
+  "archive_sha256": "086d9f1b5a99e643edc2cfaaac16051685b551e4c5ac0b32a57c58c0e529c001",
+  "driver_backend": "PawnIO (separately installed; no bundled kernel driver)",
+  "load_order": [
+    "System.Numerics.Vectors.dll",
+    "System.Runtime.CompilerServices.Unsafe.dll",
+    "System.Buffers.dll",
+    "System.Memory.dll",
+    "BlackSharp.Core.dll",
+    "RAMSPDToolkit-NDD.dll",
+    "HidSharp.dll",
+    "DiskInfoToolkit.dll",
+    "LibreHardwareMonitorLib.dll"
+  ],
+  "sha256": {
+    "System.Numerics.Vectors.dll": "20c2fa81b8c70d651099d762954f285fd4f942e63b2d7217c145dab8d4b2f4c9",
+    "System.Runtime.CompilerServices.Unsafe.dll": "08cbd7278b66f1e68425a82d4b97181a4130d93e3dd91831407aba7212ccdacf",
+    "System.Buffers.dll": "2d78d770c9cb997199154ae8c018b9f1d1efbc86729f7264dde6dbad2a12cac3",
+    "System.Memory.dll": "d5e8e4866f9cfa66f7765660f84b210198893e55335487afe5ebda342c0e913d",
+    "BlackSharp.Core.dll": "cafb93afcc8d8a367e21f619673d05c06887d8964867fed1371f02ded1cd3e23",
+    "RAMSPDToolkit-NDD.dll": "b6882354c7c8ec186617e421507743dbfae09c5c1fc24cef76a1d0c0c26651de",
+    "HidSharp.dll": "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54",
+    "DiskInfoToolkit.dll": "1acbf51b3c10c51c986cf43021680d34a2e38d9a5ba652bcfa9a1b5f7fc09800",
+    "LibreHardwareMonitorLib.dll": "6ebc194316536ba61af5be24508ad9fcbb2ecc685e716c12e787c79530f66bf0"
+  }
+}

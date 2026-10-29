@@ -108,7 +108,11 @@ def test_win_temp_guards(wc, temp_dir):
     target = temp_dir.parent / "precious"
     target.mkdir()
     (target / "keep.txt").write_bytes(b"k" * 999)
-    (temp_dir / "junction").symlink_to(target)                                    # junction/symlink
+    if os.name == 'nt':
+        import _winapi
+        _winapi.CreateJunction(str(target), str(temp_dir / 'junction'))
+    else:
+        (temp_dir / "junction").symlink_to(target)
     d = wc.clean("win_temp", dry=True)
     assert d.freed_bytes == 600 + 40, d
     r = wc.clean("win_temp", dry=False, plan=d.plan)
