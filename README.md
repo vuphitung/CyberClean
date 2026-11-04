@@ -34,13 +34,9 @@
 
 </div>
 
-<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
-
 ## Quick Installation
 
-<table>
-<tr>
-<td width="52%" valign="top">
+Choose your platform and follow the steps below.
 
 ### <img src="https://cdn.simpleicons.org/linux/00E5FF" width="18" height="18" align="absmiddle" /> &nbsp;Linux
 
@@ -52,38 +48,35 @@
   <img src="https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white" alt="openSUSE">
 </p>
 
+Install with one command:
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
-Installs to `/opt/CyberClean` · registers `cyberclean` command · sets up scoped privilege helper.
 
-**Uninstall:**
+Installs to `/opt/CyberClean`, registers the `cyberclean` command, and sets up a scoped privilege helper.
+
+<details>
+<summary>Uninstall CyberClean</summary>
+
 ```bash
 sudo cyberclean --uninstall
 ```
+</details>
 
-</td>
-<td width="48%" valign="top">
+---
 
 ### <img src="https://img.shields.io/badge/-Windows_10_%2F_11-0078D6?style=flat-square&logo=windows&logoColor=white" height="22" align="absmiddle" />
 
-<div align="center">
-<br>
-<a href="https://github.com/vuphitung/CyberClean/releases/latest">
-  <img src="https://img.shields.io/badge/DOWNLOAD_INSTALLER-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Download CyberClean for Windows" />
-</a>
-<br><br>
-</div>
+<p>
+  <a href="https://github.com/vuphitung/CyberClean/releases/latest">
+    <img src="https://img.shields.io/badge/DOWNLOAD_INSTALLER-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Download CyberClean for Windows" />
+  </a>
+</p>
 
 **[Download CyberClean for Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-UAC prompt on first install only. Uninstall via **Settings → Apps → CyberClean**.
-
-</td>
-</tr>
-</table>
-
-<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+The UAC prompt appears only during the first installation. Uninstall via **Settings → Apps → CyberClean**.
 
 ## Overview
 
