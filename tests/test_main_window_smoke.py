@@ -30,9 +30,6 @@ clean_page = win.stack.currentWidget()
 out["clean_checkboxes"] = sorted(win.target_checks)
 out["clean_selected"] = sorted(win.selected)
 out["clean_has_review_button"] = any(b.text().strip().startswith(("REVIEW", "XEM LẠI")) for b in clean_page.findChildren(QPushButton))
-out["clean_more_ways_buttons"] = [win._more_deep_btn.text(), win._more_adv_btn.text()]
-win._more_deep_btn.click(); pump()
-out["deep_via_hint"] = win.stack.currentWidget().__class__.__name__
 win._nav("advisor"); pump()
 out["advisor_page"] = win.stack.currentWidget().__class__.__name__
 win._nav("deep"); pump()
@@ -64,7 +61,7 @@ def test_main_window_has_three_tier_pages_and_clean_is_auto_only(tmp_path):
     assert not {"empty_trash", "dev_cache", "app_cache", "docker", "flatpak", "orphaned_pkgs"} & set(d["clean_checkboxes"])
     assert d["clean_selected"] == d["clean_checkboxes"]
     assert d["clean_has_review_button"] is False
-    assert len(d["clean_more_ways_buttons"]) == 2
-    assert d["deep_via_hint"] == "DeepCleanPage" and d["advisor_page"] == "AdvisorPage"
-    assert "empty_trash" in d["deep_cards"] and "dev_cache" in d["deep_cards"]
+    assert d["advisor_page"] == "AdvisorPage"
+    assert ("win_recycle" if sys.platform == 'win32' else "empty_trash") in d["deep_cards"]
+    assert "dev_cache" in d["deep_cards"]
     assert d["deep_scanned_on_open"] is False, "mở trang Dọn sâu không được tự quét đĩa"

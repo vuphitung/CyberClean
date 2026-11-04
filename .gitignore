@@ -34,6 +34,7 @@ desktop.ini
 *.swo
 .env
 .venv/
+.pytest_tmp/
 venv/
 env/
 
@@ -44,3 +45,7 @@ secrets.py
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Local validation output (keep only the small, reusable probe scripts)
+validation/*
+!validation/*.py

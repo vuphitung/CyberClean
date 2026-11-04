@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui_widgets import (
-    C, MONO, UI, _btn, _t, is_dark_theme,
+    C, MONO, UI, _btn, _t, is_dark_theme, priv_tag,
     EmptyStateBinder, ElevatedCard, apply_elevation_shadow, _global_check_icon_path,
 )
 from utils.sysinfo import fmt_size
@@ -38,11 +38,21 @@ from core.engine import fmt_age
 RISK_COLOR = {'low': 'green', 'medium': 'yellow', 'high': 'red'}
 
 # Màu theo danh mục của Advisor (đủ khác nhau để thanh tỷ lệ đọc được)
-CAT_COLORS = {
-    'vm': C['purple'], 'games': '#10B981', 'containers': C['cyan'], 'wsl': C['cyan2'],
-    'windows': C['yellow'], 'projects': '#F59E0B', 'packages': '#3B82F6', 'opt': '#EC4899',
-    'downloads': '#84CC16', 'large': '#F43F5E', 'info': C['dim'],
-}
+def _mix(a: str, b: str, t: float = 0.5) -> str:
+    """Blend two '#RRGGBB' theme colours so derived category colours stay inside the palette."""
+    a, b = a.lstrip('#'), b.lstrip('#')
+    return '#' + ''.join(f'{round(int(a[i:i+2], 16) * (1 - t) + int(b[i:i+2], 16) * t):02X}' for i in (0, 2, 4))
+
+
+def cat_color(cat: str) -> str:
+    """Disk Advisor category colour, derived from the active theme (follows dark/light switches)."""
+    table = {
+        'vm': C['purple'], 'games': C['green'], 'containers': C['cyan'], 'wsl': C['cyan2'],
+        'windows': C['yellow'], 'projects': _mix(C['yellow'], C['red'], 0.45),
+        'packages': _mix(C['cyan2'], C['purple'], 0.5), 'opt': C['magenta'],
+        'downloads': _mix(C['green'], C['yellow'], 0.5), 'large': C['red'], 'info': C['dim'],
+    }
+    return table.get(cat, C['text3'])
 
 
 def cat_title(cat: str) -> str:
@@ -55,7 +65,7 @@ def advice_text(f) -> str:
     if not f.advice_key:
         return f.advice
     tpl = _t(f'adv_{f.advice_key}', '')
-    if not tpl:
+    if not tpl or tpl == f'adv_{f.advice_key}':   # Translator.get() returns the key itself when missing
         return f.advice
     try:
         return tpl.format(**f.advice_args)
@@ -67,7 +77,7 @@ def finding_title(f) -> str:
     if not f.title_key:
         return f.title
     tpl = _t(f'adv_{f.title_key}', '')
-    if not tpl:
+    if not tpl or tpl == f'adv_{f.title_key}':
         return f.title
     try:
         return tpl.format(**f.title_args)
@@ -317,7 +327,7 @@ class TargetCard(QFrame):
         lay.setSpacing(10)
         txt = QVBoxLayout()
         txt.setSpacing(2)
-        self._name = QLabel(_t(f'tgt_{target.id}_name', target.name) + (' [ROOT]' if target.needs_root else ''))
+        self._name = QLabel(_t(f'tgt_{target.id}_name', target.name) + priv_tag(target.needs_root))
         self._name.setWordWrap(True)
         self._name.setStyleSheet(_plain(f'color:{C["text"]};font-size:13px;font-weight:700;font-family:{UI};'))
         self._desc = QLabel(_t(f'tgt_{target.id}_desc', target.desc))
@@ -341,7 +351,7 @@ class TargetCard(QFrame):
 
     def retranslate(self):
         t = self.target
-        self._name.setText(_t(f'tgt_{t.id}_name', t.name) + (' [ROOT]' if t.needs_root else ''))
+        self._name.setText(_t(f'tgt_{t.id}_name', t.name) + priv_tag(t.needs_root))
         self._desc.setText(_t(f'tgt_{t.id}_desc', t.desc))
         self.set_state(self._kind, self._total, self._count)
 
@@ -508,7 +518,7 @@ class ReviewPanel(ElevatedCard):
         foot.setSpacing(8)
         self._status = QLabel('')
         self._status.setWordWrap(True)
-        self._status.setStyleSheet(_plain(f'color:{C["text3"]};font-size:11px;font-family:{MONO};'))
+        self._status.setStyleSheet(_plain(f'color:{C["text3"]};font-size:12px;font-family:{UI};'))
         self._rescan_btn = _btn(_t('btn_rescan', 'RESCAN'), small=True)
         self._rescan_btn.clicked.connect(self.rescan)
         self._del_btn = _btn(f"✕  {_t('btn_delete_selected', 'DELETE SELECTED')}", 'red')
@@ -548,7 +558,7 @@ class ReviewPanel(ElevatedCard):
                 _t('review_nothing', 'Không có mục nào cần xem lại ở đây.'),
             )
         if self._t is not None:
-            self._title.setText(_t(f'tgt_{self._t.id}_name', self._t.name) + (' [ROOT]' if self._t.needs_root else ''))
+            self._title.setText(_t(f'tgt_{self._t.id}_name', self._t.name) + priv_tag(self._t.needs_root))
             self._desc.setText(_t(f'tgt_{self._t.id}_desc', self._t.desc))
             if self._scan is not None and not self._busy:
                 if self._scan.target_id in ('empty_trash', 'win_recycle') and self._scan.warning:
@@ -568,12 +578,14 @@ class ReviewPanel(ElevatedCard):
 
     def set_target(self, target, scan=None):
         """Chuyển sang một danh mục. `scan` (nếu có) là kết quả quét còn mới → hiện ngay, khỏi quét lại."""
+        if getattr(self, '_shutting_down', False):
+            return
         self._t = target
         self._scan = None
         self._result.setVisible(False)
         self._warn.setVisible(False)
         self._table.setRowCount(0)
-        self._title.setText(_t(f'tgt_{target.id}_name', target.name) + (' [ROOT]' if target.needs_root else ''))
+        self._title.setText(_t(f'tgt_{target.id}_name', target.name) + priv_tag(target.needs_root))
         self._desc.setText(_t(f'tgt_{target.id}_desc', target.desc))
         self._stack.setCurrentIndex(1)
         if scan is not None:
@@ -582,15 +594,27 @@ class ReviewPanel(ElevatedCard):
             self.rescan()
 
     def rescan(self):
-        if self._t is None or self._deleting:
+        if getattr(self, '_shutting_down', False) or self._t is None or self._deleting:
             return
         self._set_busy(True, _t('review_scanning', 'Scanning…'))
         self._worker = _ScanWorker(self._cl, self._t.id)
+        if sys.platform == 'win32':
+            from utils.windows_workers import track_thread
+            track_thread(self, self._worker)
         self._worker.done.connect(self._on_scan)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def shutdown(self):
+        self._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads, tracked_threads
+            workers = tracked_threads(self) + [self._worker]
+            for worker in workers:
+                if worker is not None:
+                    worker.requestInterruption()
+            drain_threads(workers)
+            return
         w = self._worker
         if w is not None and w.isRunning():
             w.wait(20000 if self._deleting else 5000)
@@ -602,7 +626,7 @@ class ReviewPanel(ElevatedCard):
         self._bar.setVisible(busy)
         for b in (self._sel_safe_btn, self._sel_none_btn, self._rescan_btn, self._del_btn):
             b.setEnabled(not busy)
-        self._status.setStyleSheet(_plain(f'color:{C["cyan"] if busy else C["text3"]};font-size:11px;font-family:{MONO};'))
+        self._status.setStyleSheet(_plain(f'color:{C["cyan"] if busy else C["text3"]};font-size:12px;font-family:{UI};'))
         if msg or busy:
             self._status.setText(msg)
         if busy != was:
@@ -615,7 +639,7 @@ class ReviewPanel(ElevatedCard):
             return
         self._deleting = False
         self._set_busy(False, f'✗ {msg}')
-        self._status.setStyleSheet(_plain(f'color:{C["red"]};font-size:11px;font-family:{MONO};'))
+        self._status.setStyleSheet(_plain(f'color:{C["red"]};font-size:12px;font-family:{UI};'))
         self.scanned.emit(tid, None, msg)
 
     def _on_scan(self, tid: str, scan):
@@ -749,6 +773,8 @@ class ReviewPanel(ElevatedCard):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def _delete(self):
+        if getattr(self, '_shutting_down', False):
+            return
         sel = self._checked()
         if not sel or self._busy or self._t is None:
             return
@@ -757,6 +783,9 @@ class ReviewPanel(ElevatedCard):
         self._deleting = True
         self._set_busy(True, _t('review_deleting', 'Deleting…'))
         self._worker = _CleanWorker(self._cl, self._t.id, [i.id for i in sel])
+        if sys.platform == 'win32':
+            from utils.windows_workers import track_thread
+            track_thread(self, self._worker)
         tgt = self._t
         self._worker.done.connect(lambda res, t=tgt: self._on_cleaned(t, res))
         self._worker.failed.connect(lambda msg, t=tgt: self._on_failed(t.id, msg))
@@ -806,12 +835,6 @@ class DeepCleanPage(QWidget):
         self._sub.setStyleSheet(f'color:{C["text3"]};font-size:13px;font-family:{UI};')
         root.addWidget(self._title)
         root.addWidget(self._sub)
-        self._callout = Callout(_t(
-            'deep_callout',
-            'Nothing here is ticked for you and nothing runs in the background. High-risk rows must be ticked '
-            'by hand, deletions are permanent, and every delete asks first (default answer: Cancel).'), 'cyan')
-        root.addWidget(self._callout)
-
         body = QHBoxLayout()
         body.setSpacing(14)
         root.addLayout(body, 1)
@@ -915,6 +938,8 @@ class DeepCleanPage(QWidget):
         self._total.setText(_t('deep_total', '{size} to review across {n} categories').format(size=fmt_size(total), n=n))
 
     def _toggle_scan_all(self):
+        if getattr(self, '_shutting_down', False):
+            return
         w = self._all_worker
         if w is not None and w.isRunning():
             w.stop()
@@ -940,6 +965,8 @@ class DeepCleanPage(QWidget):
         self._record(tid, scan)
 
     def _on_scan_all_done(self):
+        if getattr(self, '_shutting_down', False):
+            return
         self._scan_all_btn.setText(_t('btn_scan_all', 'SCAN ALL'))
         for tid, card in self._cards.items():
             if tid not in self._scans and card._kind == 'scanning':
@@ -950,10 +977,6 @@ class DeepCleanPage(QWidget):
     def retranslate(self):
         self._title.setText(_t('deep_title', 'DEEP CLEAN'))
         self._sub.setText(_t('deep_sub', 'Things that might matter — you choose every item.'))
-        self._callout.setText(_t(
-            'deep_callout',
-            'Nothing here is ticked for you and nothing runs in the background. High-risk rows must be ticked '
-            'by hand, deletions are permanent, and every delete asks first (default answer: Cancel).'))
         self._cat_lbl.setText(_t('deep_categories', 'CATEGORIES'))
         running = self._all_worker is not None and self._all_worker.isRunning()
         self._scan_all_btn.setText(_t('btn_stop', 'STOP') if running else _t('btn_scan_all', 'SCAN ALL'))
@@ -969,6 +992,15 @@ class DeepCleanPage(QWidget):
             self._left_col.setFixedWidth(250 if w < 860 else (290 if w < 1020 else 330))
 
     def shutdown(self):
+        self._shutting_down = True
+        self._panel._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads
+            if self._all_worker is not None and self._all_worker.isRunning():
+                self._all_worker.stop()
+            drain_threads([self._all_worker])
+            self._panel.shutdown()
+            return
         if self._all_worker is not None and self._all_worker.isRunning():
             self._all_worker.stop()
             self._all_worker.wait(8000)
@@ -1027,9 +1059,11 @@ class _Tile(ElevatedCard):
         for w in (self._lbl, self._val, self._sub):
             lay.addWidget(w)
 
-    def set(self, value: str, sub: str = ''):
+    def set(self, value: str, sub: str = '', color: str = ''):
         self._val.setText(value)
         self._sub.setText(sub)
+        if color:   # a '#RRGGBB' value, e.g. the colour of the category it names
+            self._val.setStyleSheet(_plain(f'color:{color};font-size:22px;font-weight:700;font-family:{MONO};'))
 
     def set_label(self, text: str):
         self._lbl.setText(text)
@@ -1099,6 +1133,13 @@ class _FindingRow(QFrame):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._folder))
 
 
+def _adv_note_t(note: str) -> str:
+    """Ghi chú của core/advisor.py là chuỗi tiếng Anh; dịch riêng ghi chú đã biết, còn lại giữ nguyên."""
+    if note.startswith('Totals count each Windows path once'):
+        return _t('adv_note_win_totals', note)
+    return note
+
+
 class AdvisorPage(QWidget):
     def __init__(self, home: str, pm: str = '', parent=None):
         super().__init__(parent)
@@ -1116,11 +1157,6 @@ class AdvisorPage(QWidget):
         self._sub.setStyleSheet(f'color:{C["text3"]};font-size:13px;font-family:{UI};')
         root.addWidget(self._title)
         root.addWidget(self._sub)
-        self._callout = Callout(_t(
-            'adv_callout', 'Read-only. This page only reads names and sizes — CyberClean never changes or deletes '
-                           'anything here. You decide what to do with what it finds.'), 'purple')
-        root.addWidget(self._callout)
-
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self._scan_btn = _btn(f"◎  {_t('btn_scan_disk', 'SCAN DISK')}", 'cyan')
@@ -1129,7 +1165,7 @@ class AdvisorPage(QWidget):
         self._copy_btn.clicked.connect(self.copy_report)
         self._copy_btn.setEnabled(False)
         self._status = QLabel('')
-        self._status.setStyleSheet(f'color:{C["cyan"]};font-size:11px;font-family:{MONO};')
+        self._status.setStyleSheet(f'color:{C["cyan"]};font-size:12px;font-family:{UI};')
         bar.addWidget(self._scan_btn)
         bar.addWidget(self._copy_btn)
         bar.addSpacing(8)
@@ -1208,12 +1244,12 @@ class AdvisorPage(QWidget):
             self.start()
 
     def start(self):
-        if self.scanning:
+        if getattr(self, '_shutting_down', False) or self.scanning:
             return
         self._scan_btn.setText(f"■  {_t('btn_stop', 'STOP')}")
         self._prog.setVisible(True)
         self._copy_btn.setEnabled(False)
-        self._status.setStyleSheet(f'color:{C["cyan"]};font-size:11px;font-family:{MONO};')
+        self._status.setStyleSheet(f'color:{C["cyan"]};font-size:12px;font-family:{UI};')
         self._status.setText(_t('advisor_scanning', 'Scanning your disk…'))
         self._worker = _AdvisorWorker(self._home, self._pm)
         self._worker.progress.connect(lambda m: self._status.setText(f'⟳  {m}'))
@@ -1221,6 +1257,13 @@ class AdvisorPage(QWidget):
         self._worker.start()
 
     def shutdown(self):
+        self._shutting_down = True
+        if sys.platform == 'win32':
+            from utils.windows_workers import drain_threads
+            if self.scanning:
+                self._worker.stop()
+            drain_threads([self._worker])
+            return
         if self.scanning:
             self._worker.stop()
             self._worker.wait(5000)
@@ -1228,9 +1271,6 @@ class AdvisorPage(QWidget):
     def retranslate(self):
         self._title.setText(_t('adv_title', 'DISK ADVISOR'))
         self._sub.setText(_t('adv_sub', 'Where your disk space really went.'))
-        self._callout.setText(_t(
-            'adv_callout', 'Read-only. This page only reads names and sizes — CyberClean never changes or deletes '
-                           'anything here. You decide what to do with what it finds.'))
         self._scan_btn.setText(f"■  {_t('btn_stop', 'STOP')}" if self.scanning
                                else f"◎  {_t('btn_scan_disk', 'SCAN DISK')}")
         self._copy_btn.setText(_t('btn_copy_report', 'COPY REPORT'))
@@ -1256,8 +1296,8 @@ class AdvisorPage(QWidget):
         self._last_scan = datetime.now()
         self._prog.setVisible(False)
         self._scan_btn.setText(f"◎  {_t('btn_rescan', 'RESCAN')}")
-        self._status.setStyleSheet(f'color:{C["text3"]};font-size:11px;font-family:{MONO};')
-        self._status.setText('  ·  '.join(rep.notes))
+        self._status.setStyleSheet(f'color:{C["text3"]};font-size:12px;font-family:{UI};')
+        self._status.setText('  ·  '.join(_adv_note_t(n) for n in rep.notes))
         self._copy_btn.setEnabled(bool(rep.findings))
         self._render(rep)
 
@@ -1265,13 +1305,14 @@ class AdvisorPage(QWidget):
         from core import advisor
         self._clear_results()
         groups = rep.by_category()
+        category_totals = rep.category_totals()
         if not rep.findings:
             self._status.setText(_t('advisor_nothing', 'Nothing large found — your disk looks tidy.'))
             self._stack.setCurrentIndex(0)
             return
         self._stack.setCurrentIndex(1)
 
-        cats = [(c, sum(f.size for f in fs), fs) for c, fs in groups.items() if c != 'info']
+        cats = [(c, category_totals.get(c, 0), fs) for c, fs in groups.items() if c != 'info']
         cats.sort(key=lambda x: -x[1])
         n_items = sum(len(fs) for _, _, fs in cats)
 
@@ -1284,7 +1325,7 @@ class AdvisorPage(QWidget):
         if cats:
             c0, s0, _ = cats[0]
             share = int(100 * s0 / rep.total) if rep.total else 0
-            t2.set(re.split(r'\s(?:&|và)\s', cat_title(c0))[0], f'{fmt_size(s0)} · {share}%')
+            t2.set(re.split(r'\s(?:&|và)\s', cat_title(c0))[0], f'{fmt_size(s0)} · {share}%', cat_color(c0))
         t3 = _Tile(_t('adv_tile_scan', 'SCAN'), 'green' if not rep.truncated else 'yellow')
         t3.set(('<1 s' if rep.seconds < 1 else f'{rep.seconds:.0f} s'), _t('adv_tile_partial', 'partial — hit the time limit') if rep.truncated
                else (self._last_scan.strftime('%H:%M') if self._last_scan else ''))
@@ -1302,13 +1343,13 @@ class AdvisorPage(QWidget):
             sl.setContentsMargins(16, 14, 16, 14)
             sl.setSpacing(10)
             bar = ShareBar()
-            bar.set_data([(CAT_COLORS.get(c, C['text3']), s) for c, s, _ in cats])
+            bar.set_data([(cat_color(c), s) for c, s, _ in cats])
             sl.addWidget(bar)
             grid = QGridLayout()
             grid.setHorizontalSpacing(18)
             grid.setVerticalSpacing(5)
             for i, (c, s, _) in enumerate(cats):
-                lab = QLabel(f'<span style="color:{CAT_COLORS.get(c, C["text3"])}">●</span>&nbsp; '
+                lab = QLabel(f'<span style="color:{cat_color(c)}">●</span>&nbsp; '
                              f'{cat_title(c)} <b style="color:{C["text"]}">{fmt_size(s)}</b>')
                 lab.setTextFormat(Qt.TextFormat.RichText)
                 lab.setStyleSheet(_plain(f'color:{C["text3"]};font-size:11px;font-family:{UI};'))
@@ -1317,8 +1358,8 @@ class AdvisorPage(QWidget):
             self._rl.addWidget(share_card)
 
         # ── thẻ danh mục ──
-        for cat, total, findings in [(c, sum(f.size for f in fs), fs) for c, fs in groups.items()]:
-            color = CAT_COLORS.get(cat, C['text3'])
+        for cat, total, findings in [(c, category_totals.get(c, 0), fs) for c, fs in groups.items()]:
+            color = cat_color(cat)
             card = ElevatedCard(accent_color=color, shadow=False)
             card.setObjectName('cat')
             cl = QVBoxLayout(card)
@@ -1348,6 +1389,6 @@ class AdvisorPage(QWidget):
         from core import advisor
         QApplication.clipboard().setText(advisor.report_to_text(self.report, self._home, cat_title=cat_title,
                                                                   advice=advice_text, title=finding_title))
-        self._status.setStyleSheet(f'color:{C["green"]};font-size:11px;font-family:{MONO};')
+        self._status.setStyleSheet(f'color:{C["green"]};font-size:12px;font-family:{UI};')
         self._status.setText('✓ ' + _t('adv_copied', 'Report copied to the clipboard'))
-        QTimer.singleShot(2500, lambda: self._status.setText('  ·  '.join(self.report.notes) if self.report else ''))
+        QTimer.singleShot(2500, lambda: self._status.setText('  ·  '.join(_adv_note_t(n) for n in self.report.notes) if self.report else ''))

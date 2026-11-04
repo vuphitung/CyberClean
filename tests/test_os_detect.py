@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,7 @@ def test_parse_os_release_quotes_comments_and_garbage():
     assert O.parse_os_release("") == {} and O.parse_os_release(None) == {}
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX UID behavior")
 def test_real_home_resolves_invoking_user_when_root_via_sudo(monkeypatch):
     import pwd
     monkeypatch.setattr(O.os, "geteuid", lambda: 0)

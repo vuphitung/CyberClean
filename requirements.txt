@@ -6,3 +6,5 @@ send2trash>=1.8.0
 # distro>=1.8.0
 # rules/*.toml được nạp bằng tomllib (stdlib từ Python 3.11); Python cũ hơn cần gói tomli
 tomli>=2.0.0; python_version < "3.11"
+
+pythonnet==3.0.5; sys_platform == "win32"

@@ -149,11 +149,17 @@ def request_windows_admin():
     if not IS_WINDOWS or is_windows_admin():
         return
     import ctypes, subprocess as _sp
-    # subprocess.list2cmdline escapes args correctly for Windows
-    args = _sp.list2cmdline(sys.argv)
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, args, None, 1
-    )
+    import logging
+    argv = sys.argv[1:] if getattr(sys, 'frozen', False) else sys.argv
+    args = _sp.list2cmdline(argv)
+    shell = ctypes.windll.shell32.ShellExecuteW
+    shell.restype = ctypes.c_ssize_t
+    result = shell(None, "runas", sys.executable, args, os.getcwd(), 1)
+    if result <= 32:
+        logging.getLogger('cyberclean').error('UAC relaunch failed: ShellExecuteW=%s', result)
+        return False
+    from utils.windows_diagnostics import normal_exit
+    normal_exit(0, 'UAC relaunch accepted by shell (child startup not yet verified)')
     sys.exit(0)
 
 

@@ -214,7 +214,7 @@ def test_execute_readonly_tree_like_go_modcache(tmp_path):
         p.chmod(0o444 if p.is_file() else 0o555)
     d.chmod(0o555)
     it = plan_one(d)
-    if os.geteuid() == 0:
+    if getattr(os, "geteuid", lambda: -1)() == 0:
         pytest.skip("root bỏ qua quyền ghi nên không tái hiện được")
     res = E.execute_plan([it])
     assert not d.exists() and res.freed == 200
@@ -354,6 +354,7 @@ def test_mount_point_is_detected_without_needing_mount_privileges(tmp_path, monk
     assert it is None and "mount" in why
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX UID behavior")
 def test_foreign_owned_items_are_skipped(tmp_path):
     d = tree(tmp_path / "c", {"a": 10})
     E.set_owner_uid(os.getuid() + 4242)                  # coi như mọi file thuộc người khác

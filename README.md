@@ -1,6 +1,11 @@
 <div align="center">
 
-```
+<!-- Animated Cyber Wave Banner -->
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:060911,50:00c8e0,100:c060f0&height=120&section=header&animation=fadeIn" width="100%" alt="header" />
+
+<img src="assets/logo.png" width="96" alt="CyberClean logo">
+
+```text
  ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗
 ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║
 ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝    ██║     ██║     █████╗  ███████║██╔██╗ ██║
@@ -9,26 +14,47 @@
  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝
 ```
 
-**Smart System Cleaner & Performance Optimizer**
+<!-- Animated Typing SVG (No emojis, pure terminal style) -->
+<a href="https://github.com/vuphitung/CyberClean">
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=18&duration=3000&pause=1000&color=00E5FF&center=true&vCenter=true&width=750&lines=Smart+System+Cleaner+%26+Performance+Optimizer;Desktop+Utility+for+Windows+10%2F11+%26+Linux;Live+Telemetry+%C2%B7+3-Tier+Safe+Cleaner+%C2%B7+System+Booster;Rule-Driven+Engine+%C2%B7+Reversible+State+%C2%B7+Zero+Telemetry" alt="Typing SVG" />
+</a>
+
+**Desktop utility for Windows and Linux: system monitoring, disk cleanup, disk-usage report, app uninstaller and an optional performance booster.**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41CD52?style=flat-square&logo=qt&logoColor=white)](https://pypi.org/project/PyQt6/)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-00c8e0?style=flat-square)](https://github.com/vuphitung/CyberClean/releases/latest)
-[![License](https://img.shields.io/badge/License-MIT-f0c040?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/vuphitung/CyberClean?style=flat-square&color=c060f0)](https://github.com/vuphitung/CyberClean/releases/latest)
+[![Platform](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-00c8e0?style=flat-square&logo=linux&logoColor=white)](#platform-support)
+[![License](https://img.shields.io/badge/License-GPL--3.0-f0c040?style=flat-square&logo=gnu&logoColor=white)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/vuphitung/CyberClean?style=flat-square&color=c060f0&logo=github)](https://github.com/vuphitung/CyberClean/releases/latest)
+[![Version](https://img.shields.io/badge/version-3.1.0-A47DFF?style=flat-square)](CHANGELOG.md)
 
-🌐 **Ngôn ngữ / Language:** **English** · [Tiếng Việt](README_vi.md)
+<br>
+
+<a href="README.md"><img src="https://img.shields.io/badge/LANG-ENGLISH-00E5FF?style=for-the-badge&labelColor=0E1626" alt="English"></a>&nbsp;&nbsp;<a href="README_vi.md"><img src="https://img.shields.io/badge/LANG-TI%E1%BA%BENG_VI%E1%BB%86T-334155?style=for-the-badge&labelColor=0E1626" alt="Tiếng Việt"></a>
 
 </div>
 
-## Installation
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
 
-### Linux
+## Quick Installation
+
+<table>
+<tr>
+<td width="52%" valign="top">
+
+### <img src="https://cdn.simpleicons.org/linux/00E5FF" width="18" height="18" align="absmiddle" /> &nbsp;Linux
+
+<p>
+  <img src="https://img.shields.io/badge/Arch-1793D1?style=flat-square&logo=archlinux&logoColor=white" alt="Arch">
+  <img src="https://img.shields.io/badge/Ubuntu-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu">
+  <img src="https://img.shields.io/badge/Debian-A81D33?style=flat-square&logo=debian&logoColor=white" alt="Debian">
+  <img src="https://img.shields.io/badge/Fedora-51A2DA?style=flat-square&logo=fedora&logoColor=white" alt="Fedora">
+  <img src="https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white" alt="openSUSE">
+</p>
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
-
 Installs to `/opt/CyberClean` · registers `cyberclean` command · sets up scoped privilege helper.
 
 **Uninstall:**
@@ -36,244 +62,210 @@ Installs to `/opt/CyberClean` · registers `cyberclean` command · sets up scope
 sudo cyberclean --uninstall
 ```
 
-### Windows
+</td>
+<td width="48%" valign="top">
 
-**[⬇ Download CyberClean for Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+### <img src="https://img.shields.io/badge/-Windows_10_%2F_11-0078D6?style=flat-square&logo=windows&logoColor=white" height="22" align="absmiddle" />
 
-UAC prompt on first install only. Uninstall via `Settings → Apps → CyberClean`.
+<div align="center">
+<br>
+<a href="https://github.com/vuphitung/CyberClean/releases/latest">
+  <img src="https://img.shields.io/badge/DOWNLOAD_INSTALLER-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Download CyberClean for Windows" />
+</a>
+<br><br>
+</div>
 
----
+**[Download CyberClean for Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+
+UAC prompt on first install only. Uninstall via **Settings → Apps → CyberClean**.
+
+</td>
+</tr>
+</table>
+
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+
+## Overview
+
+CyberClean shows live system metrics, finds files that can be cleaned, reports where disk space went, uninstalls applications, and can apply a reversible set of performance tweaks while you play or work. It is a PyQt6 application with a dark and a light theme and an English and a Vietnamese interface.
+
+Cleanup targets are files and caches only. CyberClean is not an antivirus and does not clean the registry. Performance results depend on the machine and workload; the app does not promise a speed-up.
 
 ## Screenshots
 
-<p align="center">
-  <img src="screenshots/dashboard.png" width="100%">
-</p>
----
+*Windows 10, dark theme.*
 
-<p align="center">
-  <img src="screenshots/clean.png" width="100%">
-</p>
----
+**Dashboard** — live metrics, one-click maintenance, top processes, per-volume usage
+<img src="screenshots/dashboard.png" alt="Dashboard" width="100%">
 
-<p align="center">
-  <img src="screenshots/uninstaller.png" width="100%">
-</p>
----
+**Clean** — regenerable caches, dry-run preview, estimated free space
+<img src="screenshots/clean.png" alt="Clean" width="100%">
 
-<p align="center">
-  <img src="screenshots/history.png" width="100%">
-</p>
----
+**Deep Clean** — items you choose one by one
+<img src="screenshots/deep-clean.png" alt="Deep Clean" width="100%">
 
-<p align="center">
-  <img src="screenshots/booster.png" width="100%">
-</p>
----
+**Disk Advisor** — where the space went (report only)
+<img src="screenshots/disk-advisor.png" alt="Disk Advisor" width="100%">
+
+**Uninstaller**
+<img src="screenshots/uninstaller.png" alt="Uninstaller" width="100%">
+
+**History** and **Audit log**
+<img src="screenshots/history.png" alt="History" width="100%">
+<img src="screenshots/audit-log.png" alt="Audit log" width="100%">
+
+**System Booster**
+<img src="screenshots/booster.png" alt="System Booster" width="100%">
+
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
 
 ## Features
 
-### [◈] Dashboard
-Live system stats, auto-refreshes every 4 seconds.
+### Dashboard
+- CPU, RAM, temperature (when a sensor is available), commit memory (Windows) or swap (Linux), network throughput, CPU/RAM history graphs and uptime; refreshed every few seconds.
+- Top processes with a Kill button, and used/free space for every mounted volume.
+- **One-click optimize** — Windows: flush DNS cache, clear temp files, trim working sets, TRIM SSD. Linux: drop caches, tune `vm.swappiness`, `fstrim`, vacuum old journal logs.
+- *Load index* is a heuristic built from CPU, RAM, disk, temperature and swap. It is not CPU usage, SMART data or a disk-health diagnosis.
 
-- CPU / RAM / Swap / Temperature / Network I/O
-- Top processes with one-click kill
-- Disk usage per mount point
-- System uptime
+### Clean
+Targets that can be regenerated, ticked by default. *Dry-run* shows exactly what would be removed before you run *Clean now*.
 
----
+| OS | Targets |
+|---|---|
+| Windows | Windows Temp, Chromium-based browser and Electron app caches (Chrome, Edge, Brave, Opera, Vivaldi, Cốc Cốc, VS Code, Discord, Slack…), Firefox cache, thumbnail cache, Windows Error Reports, DNS cache |
+| Linux | Package-manager caches (apt, pacman, dnf, zypper, xbps, apk, rpm-ostree), journal and old system logs, crash reports, browser and Electron caches, thumbnails, pip cache, temp files |
 
-### [✦] Smart Clean — three tiers, three pages
-CyberClean never guesses what is safe to delete. Every target belongs to one of three tiers, and each tier has **its own page** in the sidebar:
+Browser caches are skipped, with a note, while the browser is running.
 
-| Tier | Page | What | Behaviour |
-|------|------|------|-----------|
-| **AUTO** | **CLEAN** | Always regenerable: browser & Electron caches, thumbnails, rotated logs, package-manager caches, journal, old temp files, crash dumps | Ticked by default · the only tier the idle scheduler may run |
-| **REVIEW** | **DEEP CLEAN** | Things that *might* matter: orphaned packages, dev caches, Docker images/volumes, Flatpak/Snap leftovers, other `~/.cache` folders, the Trash | Categories on the left, every item on the right — **nothing is pre-ticked**, "select all" skips high-risk rows (their full warning is shown), every delete asks first (default: Cancel) · never runs in the background |
-| **ADVISOR** | **DISK ADVISOR** | Where the space *really* went: VMs, game libraries, `/opt`, heaviest packages, large files, old `node_modules`/`target`/venvs, Downloads, WSL disks | **Report only** — summary tiles, a share-of-disk bar, per-category cards, "open folder" and "copy report"; there is no delete button |
+### Deep Clean
+Items that might matter. **Nothing is pre-selected**, "select all" skips high-risk rows, and every delete asks for confirmation (default answer: Cancel). Deep Clean never runs in the background.
 
-How a clean works (Linux + Windows share the same engine, `core/engine.py`):
+- Windows: Recycle Bin, Prefetch, Windows Update cache, Delivery Optimization, font cache, GPU shader cache, WinSxS cleanup, Event Logs, crash dumps, developer caches (npm, yarn, pnpm, pip, NuGet, Gradle, Maven, Cargo, Go, JetBrains…).
+- Linux: orphaned/unused packages (apt, pacman, dnf, xbps), Nix garbage collection, developer caches, other `~/.cache` folders, Trash, and — when installed — Docker/Podman, Flatpak unused runtimes, Snap old revisions.
 
-1. **Plan** — one scan produces a concrete list of items (real sizes, hard-links counted correctly).
-2. **Preview** — Dry-run shows exactly that plan.
-3. **Execute** — runs *that* plan, but re-checks every item right before deleting it: replaced? modified since the scan? the owning app started again? Anything that changed is skipped, never deleted.
+### Disk Advisor
+Report only — there is no delete button. Groups the largest consumers: Windows system files (`Windows.old`, `pagefile.sys`, `hiberfil.sys`, Installer cache), Downloads, large files, virtual machines and WSL disks, game libraries, old `node_modules` / `target` / virtualenv folders, containers, `/opt`, heaviest packages. Rows can be opened in the file manager and the report can be copied.
 
-Guards applied to everything: age (untouched for N days + never anything modified in the last 10 min) · owning app must be closed (process list, Chromium `SingletonLock`, `--user-data-dir`) · file/dir not open by any process · symlinks and junctions never followed · mount points never crossed · directories containing sockets/FIFOs (live runtime state like `/tmp/.X11-unix`, `tmux-*`, `ssh-*`) are skipped · files of other users are skipped.
+### Uninstaller
+- Windows: installed programs from the Registry, enriched with `winget` data.
+- Linux: pacman, apt, dnf, zypper, xbps and Flatpak; core system packages are protected.
+- Multi-select with live progress log. On Windows the list is not filtered, so check entries (drivers, runtimes) before removing them.
 
-Free space is measured with `shutil.disk_usage` before/after. If the filesystem is Btrfs/ZFS the app warns that snapshots may keep the space allocated.
+### History and Audit log
+*History* records each session's disk usage before/after and the space freed. *Audit log* records what was removed (path, type, size). Both are local files; removed files are not kept for restore.
 
-**Linux** — pacman / apt / dnf / zypper / xbps / apk / rpm-ostree (Fedora Atomic, Bazzite) / Nix · AUR build cache · Flatpak (user + system) · Docker/Podman · Snap · journal · browsers (every Chromium-based browser and Electron app via one rule — Chrome, Brave, Edge, Vivaldi, Opera, VS Code, Cursor, Discord, Slack…; Firefox incl. Snap/Flatpak) · pip · thumbnails · temp files.
+### System Booster
+Applies tweaks on demand and **captures the original state first**. The state is restored when you turn Boost off or close the app, and recovered on the next start if the app was killed.
 
-**Windows** — Temp, Thumbnail DB, WER reports, DNS flush (auto) · Recycle Bin, Prefetch, Windows Update / Delivery Optimization, Font & GPU shader cache, WinSxS, Event logs, crash dumps (review, one explicit item each) · browser caches via the same Chromium/Firefox rules · developer caches (npm, NuGet, Gradle, Maven, Cargo, Go, JetBrains…).
+- Windows: 1 ms timer-resolution request, GameDVR off, DirectX/DWM fullscreen setting, priority for a detected game, background-process throttling (EcoQoS on Windows 11), browser GPU-cache cleanup.
+- Linux: CPU governor / power profile, memory tuning, process priority, Hyprland options when it is running.
+- A game watcher raises priority only while a game is running. The log states when a benefit has not been measured.
 
-> **Windows note** — this build's Windows-only calls (DISM, services, `wevtutil`) were not changed and could not be run in the CI sandbox; the engine, tiers, rules and guards are unit-tested.
+### Tray and Auto-clean
+Auto-clean is **off by default**. When enabled it runs only `AUTO` targets flagged as scheduled, only when the machine is idle, at most every 6 hours, and only while the app is open or in the tray. It never touches the Recycle Bin or Trash. If Auto-clean is off, closing the window quits the app.
 
-#### Rules, not code
-Path-based targets live in [`rules/linux.toml`](rules/linux.toml) and [`rules/windows.toml`](rules/windows.toml). A rule is data (`paths`, `mode`, `min_age_days`, `closed`, `keep`, `tier`…) — adding an app is a 6-line pull request that is easy to review. Personal rules go in `~/.config/cyber-clean/rules.d/*.toml`; they are forced into the **REVIEW** tier, limited to paths inside your home, and can never run unattended.
+### Updates and privacy
+The app checks GitHub Releases for a new version and installs nothing without your click. Downloads are verified against an Ed25519 signature built into the app. There is no telemetry or analytics; the update check is the only network access.
 
-```toml
-[[rule]]
-id     = "my-app-cache"
-target = "my_stuff"          # a target defined in the same file
-mode   = "children"          # each sub-folder becomes one item you can tick
-paths  = ["~/.cache/myapp"]
-```
+## How cleaning stays predictable
 
----
+| Tier | Page | Behaviour |
+|---|---|---|
+| `AUTO` | Clean | Regenerable caches. Ticked by default. The only tier the scheduler may run. |
+| `REVIEW` | Deep Clean | Needs an explicit choice for every item. |
+| `ADVISOR` | Disk Advisor | Report only. |
 
-### [⚡] System Booster
-Performance tweaks without crashes. Every change is fully reversible.
+A clean is **planned, previewed, then executed**. Immediately before each deletion the engine re-checks the item and skips it if it changed since the scan, is in use, or its owning app started again. Symlinks and junctions are not followed and mount points are not crossed. **Deletion is permanent** — nothing is moved to the Recycle Bin.
 
-- **Free RAM** — compact memory without evicting page cache
-- **Memory Tune** — swappiness / vm params (Linux) · trim idle process working sets (Windows)
-- **Kill Bloat** — zombie + idle high-RAM processes
-- **Clear GPU / Shader Cache** — mesa, NVIDIA, Chrome, Edge
-- **[◈] Game Mode** — 3-tier activity-aware CPU jail, gives foreground app full resources
-- **[~] Eco Mode** — cgroups v2 (Linux) · EcoQoS + memory priority (Windows 11)
-- **[★] Smart Boost** — auto-detects PC tier (High / Mid / Low) by RAM + cores + GPU VRAM
-- **TCP Nagle Disable** — lower online game latency (Windows)
-- **Timer Resolution 1ms** — smoother frames (Windows)
+## Platform support
 
----
+| Environment | Status |
+|---|---|
+| Windows 10 (build 19044), Python 3.12 | Run and used on a real machine: all pages, metric comparison against Windows counters, Windows-specific tests pass. |
+| Windows 11 | Code paths exist (for example EcoQoS); not verified on hardware. |
+| Linux, apt-based (Ubuntu / Debian family) | Automated tests pass headless on Ubuntu with Python 3.12 (628 passed, 17 skipped). |
+| Other Linux distributions | Package-manager detection for pacman, dnf, zypper, xbps, apk, rpm-ostree and Nix; not individually tested. |
 
-### [≡] App Uninstaller
-- **Windows** — reads from Add/Remove Programs registry (no `wmic`)
-- **Linux** — pacman / apt / dnf integration
-- Shows installed size, version, source
-- Background uninstall with live progress log
+CPU temperature on Windows is optional and needs the installed sensor helper (LibreHardwareMonitor + PawnIO); when no sensor is available the dashboard shows `N/A`. Running `main.py` directly from source does not include that helper.
 
----
+## Installation
 
-### [↺] History & Deletion Log
-- Every session logged to `~/.local/share/cyber-clean/history.jsonl`
-- Full audit trail: path, size, type of every deleted item
-- View freed space per session
+**Requirements:** Python 3.10+ (PyQt6, psutil, cryptography, send2trash; `tomli` on Python 3.10; `pythonnet` on Windows). Administrator/root is not needed to open the app; items marked `[ADMIN]` need elevated rights.
 
----
-
-### [↑] Auto-Updater
-Checks GitHub Releases on startup (background thread, non-blocking) — only shows a badge, never downloads or installs without you clicking. Update requires an explicit click; download is verified against an Ed25519 signature baked into the app before anything is installed.
-
----
-
-### [♪] System Tray & Auto-clean
-Minimize to tray. Auto-clean runs **only AUTO-tier targets flagged `scheduled`** every 6 hours when idle (CPU < 20%, network < 500 KB/s) and uses a stricter age policy than a manual clean (e.g. browser caches only if the browser has not been used for 7 days). It never touches the Trash, orphaned packages, dev caches, Docker or anything in the REVIEW tier, never shows a password prompt, and pauses automatically when Game Mode is active.
-
----
-
-## Compatibility
-
-| OS | Version | Notes |
-|----|---------|-------|
-| Linux | Arch · Manjaro · EndeavourOS · CachyOS | pacman |
-| Linux | Ubuntu · Debian · Pop!_OS · Mint · Kali | apt |
-| Linux | Fedora · CentOS · Rocky · Nobara | dnf |
-| Linux | openSUSE Leap / Tumbleweed | zypper |
-| Linux | Void Linux | xbps |
-| Linux | Alpine | apk (source install) |
-| Linux | Fedora Atomic · Silverblue · Kinoite · Bazzite | rpm-ostree |
-| Linux | NixOS | nix-collect-garbage (user profile) |
-| Linux | Any derivative (Zorin, MX, Nobara, Garuda, KDE neon…) | detected through `ID_LIKE` in `/etc/os-release` |
-| Windows | 10 (1903+) | Full support |
-| Windows | 11 | Full support + EcoQoS |
-| Windows | ARM64 (Surface Pro X, Snapdragon) | Supported |
-
----
-
-## Security & Privacy
-
-- **No telemetry** — zero data collection, zero network calls during normal operation
-- **No background service** — only runs when you open it
-- **Signed releases** — since v3.0.2, every release is signed with Ed25519; the public key ships inside the app, the private key never touches this repo. The updater refuses to install anything that isn't validly signed.
-- **Scoped privilege** — Linux sudoers rule grants access only to `/usr/local/bin/cyber-clean-helper`, not blanket sudo. The helper is a readable shell script ([`packaging/cyber-clean-helper`](packaging/cyber-clean-helper)) you can audit. Because the rule is `NOPASSWD`, **every** argument is treated as hostile: package names must match a strict pattern and can never become an option (`--`), core packages (kernel, bootloader, init, sudo, network…) are refused, deletion paths must be canonical, symlink-free, inside `/var/log` / `/var/crash` / coredump and under root-owned directories, and the helper offers no arbitrary copy/move/delete/stop-service primitive.
-- **Updates are verified twice** — the app checks the Ed25519 signature, then the root helper (`update-apply`) copies the package into a root-owned directory, **verifies the signature again**, rejects symlinks that escape the archive, requires a newer `VERSION` than the installed one (no downgrade/replay) and swaps the install atomically with rollback. `install.sh` verifies the same signature before unpacking.
-- **What is deleted permanently** — AUTO-tier caches are regenerable and are removed permanently (the confirmation says so). Anything that could be your data (Trash, packages, Docker volumes…) is only removed from the REVIEW dialog, item by item.
-
----
-
-## Build from source
+### Run from source (Windows and Linux)
 
 ```bash
 git clone https://github.com/vuphitung/CyberClean.git
 cd CyberClean
-
-# Arch/Debian 12+/other PEP 668 distros block system-wide pip installs —
-# use a venv (works everywhere, doesn't touch system Python):
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-pip install pyinstaller
 
-# Run directly
-python main.py
+# Linux
+source .venv/bin/activate
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
-# Build Linux binary
-python3 build.py --linux
-
-# Build Windows installer
-python build.py --inno
+python -m pip install -r requirements.txt
+python -X utf8 main.py
 ```
 
-**Requirements:** Python 3.10+ · PyQt6 · psutil · cryptography · PyInstaller
+### Linux installer (from a published release)
 
-## Project Structure
-
+```bash
+curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
+
+Verifies the release signature, installs to `/opt/CyberClean`, registers the `cyberclean` command and a desktop entry, and sets up a restricted privilege helper. Uninstall with `sudo cyberclean --uninstall`.
+
+### Windows package
+
+Build it yourself (below). Packaged builds are attached to [GitHub Releases](https://github.com/vuphitung/CyberClean/releases) when a release is published.
+
+## Build
+
+```bash
+python -m pip install pyinstaller
+python build.py --linux      # Linux tar.gz
+python build.py --windows    # Windows onedir folder in dist/CyberClean
+python build.py --inno       # Windows onedir + Inno Setup script (compile it with Inno Setup)
+```
+
+## Development
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m pyflakes main.py ui_widgets.py ui_pages.py core utils
+```
+
+On Windows the full suite currently reports 49 failures that come from POSIX-only fixtures (symlinks that need a privilege, Unix sockets, Linux-only targets); the Windows-specific tests pass. Details: [Windows report](docs/WINDOWS_NATIVE_REPORT_VI.md) (Vietnamese). Use a dedicated test folder when you try deletion.
+
+```text
 CyberClean/
-├── main.py                 # Main GUI (PyQt6)
-├── ui_widgets.py           # Custom widgets, icons, background QThread workers
-├── ui_pages.py             # DEEP CLEAN page (tier 2: review item by item) + DISK ADVISOR page (tier 3: report only)
-├── version.py              # Single source of truth for version
-├── rules/
-│   ├── linux.toml          # Declarative clean rules (paths · age · closed-app · tier)
-│   └── windows.toml
-├── packaging/
-│   └── cyber-clean-helper  # Privileged helper (root) — shipped inside the signed release
-├── tests/                  # pytest: helper, engine, rules, cleaners, installer, UI
-├── core/
-│   ├── engine.py           # plan → preview → guarded execute (age / process / open files / symlink / mount)
-│   ├── rules.py            # TOML rule loader + validator + plan builders (chromium / firefox / paths)
-│   ├── privileged.py       # the only door to the root helper (argv, error classification)
-│   ├── advisor.py          # report-only scanners (VMs, /opt, big files, old projects…)
-│   ├── base_cleaner.py     # Cleaner interface, tiers, Review types, plan mixin
-│   ├── linux_cleaner.py    # Linux code-driven targets (package managers, journal, Docker…)
-│   ├── windows_cleaner.py  # Windows code-driven targets
-│   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost
-│   ├── game_boost_widget.py # Game Mode UI panel (GPU/game-process monitor threads)
-│   ├── analyzer.py         # Idle scheduler for auto-clean
-│   ├── uninstaller.py      # App uninstaller
-│   └── os_detect.py        # OS / distro / package manager detection
-├── utils/
-│   ├── sysinfo.py          # psutil system snapshot
-│   ├── i18n.py             # English / Tiếng Việt translations
-│   └── updater.py          # In-app OTA updater
-├── assets/
-│   ├── logo.png
-│   └── logo.ico
-├── LibreHardwareMonitorLib.dll  # Windows temperature sensor
-└── install.sh              # Linux one-line installer
+├── main.py                 # application entry, window and tray
+├── ui_widgets.py, ui_pages.py
+├── core/                   # engine, cleaners, booster, advisor, uninstaller
+├── utils/                  # telemetry, translations, updater
+├── rules/                  # per-OS cleanup rules (TOML)
+├── packaging/              # Linux privilege helper
+├── vendor/lhm/             # Windows sensor library
+├── tests/                  # pytest
+├── build.py, install.sh
+└── assets/, screenshots/
 ```
 
----
+## Known limitations
 
-## Languages
+- Interactive testing on real Linux desktops is limited; please report distribution-specific problems.
+- Windows 11, ARM64 and other DPI/driver combinations have not been verified.
+- Booster effects are not benchmarked by the app.
+- Size estimates for logs and WinSxS can differ from the space actually freed (volume, permissions, snapshots).
 
-English · Tiếng Việt 
+## Contributing and issues
 
----
+Open an issue with your OS and version, the CyberClean version, what you did, and the text shown in the app.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
----
-
-<div align="center">
-
-Made with ☕ by [vuphitung](https://github.com/vuphitung) — a Vietnamese student 🇻🇳
-
-*If CyberClean helped you, consider giving it a ⭐*
-
-🌐 [Xem README tiếng Việt](README_vi.md)
-
-</div>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:c060f0,50:00c8e0,100:060911&height=100&section=footer" width="100%" alt="footer" />

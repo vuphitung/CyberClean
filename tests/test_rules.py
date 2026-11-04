@@ -379,7 +379,7 @@ def test_dev_cache_items_per_toolchain_with_risk(builtin, tmp_path):
 
 
 def test_go_modcache_readonly_is_really_removed(builtin, tmp_path):
-    if os.geteuid() == 0:
+    if getattr(os, "geteuid", lambda: -1)() == 0:
         pytest.skip("root bỏ qua quyền ghi")
     m = tree(tmp_path / "go/pkg/mod/cache", {"download/x/@v/v1.zip": 500, "download/y/@v/v2.zip": 500})
     for p in sorted(m.rglob("*"), key=lambda q: -len(q.parts)):

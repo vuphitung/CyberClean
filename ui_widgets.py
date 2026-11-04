@@ -1,22 +1,16 @@
-"""
-CyberClean — Commercial-Grade UI Widgets & 3D Dual-Theme Engine (v4.0)
-══════════════════════════════════════════════════════════════════════
-100% Pure Python / PyQt6 — Zero external icon/image dependencies.
-Inspired by Linear, Raycast, Apple macOS, Stripe, and Vercel Geist Design Systems:
-  • Multi-Tier Surface Hierarchy & Specular Rim Lighting (ElevatedCard)
-  • True Tonal Light Mode (Cool Slate Canvas #EAEEF5 + Recessed Sidebar #F3F6FA +
-    Elevated Pure White Cards #FFFFFF with soft ambient shadows & rich semantic pills)
-  • Deep Obsidian Cyber Dark Mode (#060911 Canvas + #0B101C Sidebar + #0F172A Cards
-    with top 1px specular highlight & neon telemetry accents)
-  • Collision-Free 3D Perspective Hologram Core (Cyber3DDiskCore) & Sleek Sidebar Gauge (DiskRing)
-  • Crisp Procedural Checkmark Generator (_global_check_icon_path)
+"""Native PyQt widgets and visual tokens for CyberClean.
+
+The interface uses a calm cyber palette: layered slate surfaces, restrained
+teal accents, clear typography, and lightweight custom-painted indicators.
 """
 
 import math
 import os
 import platform
 import tempfile
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 from PyQt6.QtCore import (
@@ -55,87 +49,89 @@ def _t(key: str, default: str = '') -> str:
 IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX   = platform.system() == 'Linux'
 
+
+def priv_tag(needs_root: bool) -> str:
+    """Nhãn quyền cho tên mục: Windows = [ADMIN], Linux/macOS = [ROOT]; rỗng nếu không cần quyền."""
+    if not needs_root:
+        return ''
+    return ' [ADMIN]' if IS_WINDOWS else ' [ROOT]'
+
 # ═════════════════════════════════════════════════════════════════════════
-# MULTI-TIER DESIGN TOKENS (Linear/Raycast Dark vs Apple/Stripe Daylight)
+# Shared dark and light visual tokens
 # ═════════════════════════════════════════════════════════════════════════
 
 THEME_DARK = {
     'mode':        'dark',
-    # 5-Tier Surface Ladder
-    'bg':          '#060911',   # Deepest obsidian canvas (Linear #010102 / Raycast #07080a inspired)
-    'sidebar_bg':  '#090E1A',   # Recessed navigation shell
-    'header_bg':   '#0A101D',   # Top bar surface
-    'bg2':         '#0E1626',   # Primary elevated card surface
-    'bg2_grad':    '#0B111E',   # Card bottom gradient stop for subtle 3D depth
-    'bg3':         '#152036',   # Hover / secondary interactive surface
-    'bg4':         '#1E2D4A',   # Active / pressed surface
-    'well_bg':     '#05080F',   # Recessed inset well for tables & terminals
-    # Specular & Hairline Borders
-    'specular':    'rgba(255, 255, 255, 0.09)',
-    'border':      '#152033',
-    'border2':     '#1E2D47',
-    'border3':     '#2E446B',
-    # Chromatic Accents
-    'cyan':        '#00E5FF',
-    'cyan2':       '#38BDF8',
-    'cyan_dim':    '#062838',
-    'red':         '#FF2E63',
-    'red_dim':     '#3B0A19',
-    'yellow':      '#FFB300',
-    'yel_dim':     '#382405',
-    'green':       '#00E676',
-    'grn_dim':     '#05331E',
-    'purple':      '#A855F7',
-    'pur_dim':     '#261042',
-    'magenta':     '#EC4899',
-    # Typography Hierarchy
-    'text':        '#F8FAFC',
-    'text2':       '#CBD5E1',
-    'text3':       '#94A3B8',
-    'dim':         '#64748B',
-    'accent':      '#00E5FF',
-    'ring':        '#00E5FF',
-    'radius':      '10px',
+    'bg':          '#050810',
+    'sidebar_bg':  '#080C17',
+    'header_bg':   '#070B14',
+    'bg2':         '#0C1322',
+    'bg2_grad':    '#0B1120',
+    'bg3':         '#131D33',
+    'bg4':         '#1C2A47',
+    'well_bg':     '#060A13',
+    'specular':    'rgba(255, 255, 255, 0.06)',
+    'border':      '#15203A',
+    'border2':     '#22345A',
+    'border3':     '#3B5489',
+    'cyan':        '#19F0DC',
+    'cyan2':       '#4FA8FF',
+    'cyan_dim':    '#08333A',
+    'red':         '#FF4D6D',
+    'red_dim':     '#3A101F',
+    'yellow':      '#FFC247',
+    'yel_dim':     '#38280B',
+    'green':       '#3DF5A2',
+    'grn_dim':     '#0B3425',
+    'purple':      '#A47DFF',
+    'pur_dim':     '#251848',
+    'magenta':     '#FF52BC',
+    'text':        '#EAF1FF',
+    'text2':       '#BDCBE6',
+    'text3':       '#8DA2C6',
+    'dim':         '#6E86AD',
+    'accent':      '#19F0DC',
+    'ring':        '#19F0DC',
+    'radius':      '12px',
 }
 
 THEME_LIGHT = {
     'mode':        'light',
-    # 5-Tier Daylight Surface Ladder (Apple macOS / Stripe / Vercel Geist)
-    # Canvas is a cool architectural slate-alabaster (#EAEEF5) so #FFFFFF cards pop with real depth!
-    'bg':          '#EAEEF5',   # Cool architectural canvas (never glaring flat white)
-    'sidebar_bg':  '#F2F5FA',   # Soft frosted pearl sidebar
-    'header_bg':   '#F7F9FC',   # Crisp top bar
-    'bg2':         '#FFFFFF',   # Pure elevated card surface
-    'bg2_grad':    '#F9FBFF',   # Subtle bottom card tint
-    'bg3':         '#EDF2F9',   # Hover / secondary surface / table header
-    'bg4':         '#E2E8F3',   # Active / pressed control surface
-    'well_bg':     '#F4F7FB',   # Recessed inset well for logs & tables
-    # Specular & Hairline Borders
-    'specular':    'rgba(255, 255, 255, 0.95)',
-    'border':      '#E2E8F0',
-    'border2':     '#CBD5E1',
-    'border3':     '#94A3B8',
-    # Deep High-Contrast Chromatic Accents (WCAG AAA/AA on white/tinted pills)
-    'cyan':        '#0284C7',   # Deep Ocean Blue
-    'cyan2':       '#0369A1',
-    'cyan_dim':    '#E0F2FE',   # Soft sky pill fill
-    'red':         '#E11D48',   # Crimson Rose
-    'red_dim':     '#FFE4E6',   # Soft rose pill fill
-    'yellow':      '#D97706',   # Rich Amber
-    'yel_dim':     '#FEF3C7',   # Warm amber pill fill
-    'green':       '#059669',   # Deep Emerald
-    'grn_dim':     '#D1FAE5',   # Mint pill fill
-    'purple':      '#6D28D9',   # Stripe Indigo/Violet
-    'pur_dim':     '#EDE9FE',   # Lavender pill fill
-    'magenta':     '#DB2777',
-    # Typography Hierarchy (Deep Navy-Slate Ink like Stripe #0d253d)
-    'text':        '#0F172A',
-    'text2':       '#1E293B',
-    'text3':       '#475569',
-    'dim':         '#64748B',
-    'accent':      '#0284C7',
-    'ring':        '#0284C7',
-    'radius':      '10px',
+    # Cool neutral surfaces keep cards distinct without heavy shadows.
+    'bg':          '#F5F0E5',
+    'sidebar_bg':  '#ECE5D4',
+    'header_bg':   '#FBF8F0',
+    'bg2':         '#FFFDF8',   # Pure elevated card surface
+    'bg2_grad':    '#FAF6EA',
+    'bg3':         '#EFE8D8',
+    'bg4':         '#E3D9C4',
+    'well_bg':     '#F8F3E7',
+    # Fine borders and restrained accents
+    'specular':    'rgba(255, 255, 255, 0.80)',
+    'border':      '#E2D8C3',
+    'border2':     '#D0C3A9',
+    'border3':     '#9C8F73',
+    # Semantic accents
+    'cyan':        '#1D5C70',
+    'cyan2':       '#3B5B8C',
+    'cyan_dim':    '#DCE8EA',
+    'red':         '#9B2C3B',
+    'red_dim':     '#F4DFE0',
+    'yellow':      '#8F6410',
+    'yel_dim':     '#F6ECD2',
+    'green':       '#2D6A4C',
+    'grn_dim':     '#DCEADF',
+    'purple':      '#5C4887',
+    'pur_dim':     '#E9E3EF',
+    'magenta':     '#8A3C5F',
+    # Text hierarchy
+    'text':        '#231D15',
+    'text2':       '#493F32',
+    'text3':       '#665A48',
+    'dim':         '#72665A',
+    'accent':      '#1D5C70',
+    'ring':        '#1D5C70',
+    'radius':      '12px',
 }
 
 # Active token dictionary mutated in-place so all importing modules stay synced
@@ -159,7 +155,7 @@ def _rgba(hexcolor: str, alpha: float) -> str:
 
 
 def set_theme_mode(mode: str) -> dict:
-    """Switch global design tokens between 'dark' (Cyber) and 'light' (Harmonious)."""
+    """Switch global design tokens between 'dark' (Cyber / futuristic) and 'light' (Classic / elegant)."""
     target = THEME_LIGHT if str(mode).lower() == 'light' else THEME_DARK
     C.clear()
     C.update(target)
@@ -168,7 +164,35 @@ def set_theme_mode(mode: str) -> dict:
 
 UI      = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
 MONO    = "'JetBrains Mono','Cascadia Code','Fira Code','Consolas','Share Tech Mono',monospace"
-DISPLAY = "'Orbitron','Rajdhani','Oxanium','Exo 2','Inter',sans-serif"
+DISPLAY = "'Segoe UI Semibold','Segoe UI','Noto Sans',sans-serif"
+
+# Painter-drawn text (gauges, pills, nav) must resolve to the same fonts as the style sheets above.
+# QFont('Cascadia Code') alone silently falls back to the default UI font on machines without it
+# (Windows 10 ships Consolas, not Cascadia), so numbers looked different from the QSS-styled ones.
+_MONO_FAMILIES = ['JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', 'DejaVu Sans Mono', 'Menlo']
+_UI_FAMILIES = ['Inter', 'Segoe UI', 'Noto Sans', 'Ubuntu', 'Cantarell', 'Helvetica Neue']
+
+
+def mono_font(px: int = 0, bold: bool = False, pt: int = 0) -> QFont:
+    f = QFont()
+    f.setFamilies(_MONO_FAMILIES)
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    if px:
+        f.setPixelSize(px)
+    elif pt:
+        f.setPointSize(pt)
+    f.setBold(bold)
+    return f
+
+
+def ui_font(px: int = 0, bold: bool = False) -> QFont:
+    f = QFont()
+    f.setFamilies(_UI_FAMILIES)
+    f.setStyleHint(QFont.StyleHint.SansSerif)
+    if px:
+        f.setPixelSize(px)
+    f.setBold(bold)
+    return f
 
 
 def _global_check_icon_path() -> str:
@@ -196,6 +220,10 @@ def _global_check_icon_path() -> str:
 
 def apply_elevation_shadow(widget: QWidget, blur: int = 20, y_offset: int = 4, alpha: int = -1):
     """Attach a subtle commercial drop shadow (soft ambient shadow in Light Mode, deep shadow in Dark Mode)."""
+    if IS_WINDOWS:
+        # Qt's software shadow re-rasterizes the complete card when a live
+        # child changes. Borders/gradients already provide card separation.
+        return
     try:
         eff = QGraphicsDropShadowEffect(widget)
         dark = is_dark_theme()
@@ -463,17 +491,12 @@ def _theme_icon(is_dark: bool, size=18) -> QIcon:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# ELEVATED CARD — Linear/Raycast Specular Rim + Apple/Stripe Surface Depth
+# CARD SURFACE
 # ═════════════════════════════════════════════════════════════════════════
 
 class ElevatedCard(QFrame):
     """
-    Commercial-grade surface card with:
-      • Multi-stop vertical surface gradient (bg2 -> bg2_grad)
-      • Top 1px specular rim highlight (Linear/Raycast glass edge in Dark Mode;
-        crisp inner sheen in Light Mode)
-      • Optional left or top chromatic accent bar with soft glow
-      • Soft ambient drop shadow in Light Mode & deep elevation in Dark Mode
+    Quiet flat card surface with an optional restrained top accent.
     """
 
     def __init__(self, border_color=None, accent_color=None, top_accent=None, shadow=True, parent=None):
@@ -482,92 +505,50 @@ class ElevatedCard(QFrame):
         self._border_color = border_color
         self._accent_color = accent_color
         self._top_accent   = top_accent
-        self._hovered      = False
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setStyleSheet(f'QFrame#cyberCard QLabel{{border:none;background:transparent;}}')
         if shadow:
             apply_elevation_shadow(self, blur=18, y_offset=3)
 
-    def enterEvent(self, ev):
-        self._hovered = True
-        self.update()
-        super().enterEvent(ev)
-
-    def leaveEvent(self, ev):
-        self._hovered = False
-        self.update()
-        super().leaveEvent(ev)
-
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = float(self.width()), float(self.height())
-        r = 10.0
+        r = 12.0
         dark = is_dark_theme()
 
         rect = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
         path = QPainterPath()
         path.addRoundedRect(rect, r, r)
 
-        # 1. Multi-stop vertical surface gradient
-        grad = QLinearGradient(0, 0, 0, h)
-        if dark:
-            top_c = QColor('#131E35' if self._hovered else C['bg2'])
-            bot_c = QColor('#0D1526' if self._hovered else C.get('bg2_grad', '#0A101D'))
-        else:
-            top_c = QColor('#FFFFFF')
-            bot_c = QColor('#F8FAFF' if self._hovered else C.get('bg2_grad', '#F9FBFF'))
-        grad.setColorAt(0.0, top_c)
-        grad.setColorAt(1.0, bot_c)
-        p.fillPath(path, QBrush(grad))
+        p.fillPath(path, QBrush(QColor(C['bg2'])))
 
-        # 2. Subtle radial top-left ambient sheen when accent is present
+        # A fine top rule carries accent without a bright full-height stripe.
         accent_hex = self._accent_color or self._top_accent
         if accent_hex:
             ac = QColor(accent_hex)
-            sheen = QRadialGradient(w * 0.15, 0, max(w, h) * 0.65)
-            ac_start = QColor(ac)
-            ac_start.setAlphaF(0.09 if dark else 0.05)
-            ac_end = QColor(ac)
-            ac_end.setAlphaF(0.0)
-            sheen.setColorAt(0.0, ac_start)
-            sheen.setColorAt(1.0, ac_end)
-            p.fillPath(path, QBrush(sheen))
+            ac.setAlpha(145 if dark else 120)
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(QRectF(r, 0.5, max(0.0, w - 2.0*r), 1.5), QBrush(ac))
+            p.restore()
 
         # 3. Crisp outer border
-        bc_hex = self._border_color or (C['border3'] if self._hovered else C['border2'])
+        bc_hex = self._border_color or C['border2']
         p.setPen(QPen(QColor(bc_hex), 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
 
-        # 4. Top 1px Specular Highlight (Linear/Raycast signature depth cue)
-        spec_col = QColor(255, 255, 255, 26 if dark else 220)
+        # A barely visible edge keeps the surface crisp without a glass effect.
+        spec_col = QColor(255, 255, 255, 12 if dark else 170)
         p.setPen(QPen(spec_col, 1.0))
         p.drawLine(QPointF(r, 1.5), QPointF(w - r, 1.5))
-
-        # 5. Left or Top Accent Bar (clipped cleanly inside the rounded rect)
-        if self._accent_color:
-            p.save()
-            p.setClipPath(path)
-            ac = QColor(self._accent_color)
-            p.fillRect(QRectF(0, 0, 3.5, h), QBrush(ac))
-            p.restore()
-        elif self._top_accent:
-            p.save()
-            p.setClipPath(path)
-            ac = QColor(self._top_accent)
-            tgrad = QLinearGradient(0, 0, w, 0)
-            tgrad.setColorAt(0.0, ac)
-            ac2 = QColor(ac); ac2.setAlphaF(0.35)
-            tgrad.setColorAt(1.0, ac2)
-            p.fillRect(QRectF(0, 0, w, 2.5), QBrush(tgrad))
-            p.restore()
 
         p.end()
 
 
 # ═════════════════════════════════════════════════════════════
-# SPARKLINE CHART (Cubic Bézier + Neon Glow + Live Beacon)
+# SPARKLINE CHART
 # ═════════════════════════════════════════════════════════════
 class SparklineChart(QWidget):
     def __init__(self, color=None, max_points=50, parent=None):
@@ -576,7 +557,7 @@ class SparklineChart(QWidget):
         self.color   = QColor(C.get(color, color) if color else C['cyan'])
         self.max_pts = max_points
         self.data    = []
-        self.setMinimumHeight(76)
+        self.setMinimumHeight(68)
         self.setMaximumHeight(76)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet('background:transparent;')
@@ -678,31 +659,39 @@ class Point3D:
         return self.x * factor + cx, self.y * factor + cy, factor
 
 
+# Ring and particle speeds include 0.4x and 1.4x phases. 1800 degrees is the
+# first shared cycle boundary, so wrapping there does not make a layer jump.
+_DISK_CORE_ROTATION_PERIOD = 1800.0
+
+
 class Cyber3DDiskCore(QWidget):
     """
-    Interactive 3D Holographic Disk Core (Dashboard Hero):
+    3D Holographic Disk Core (Dashboard Hero; can run as a static decoration):
       • 3D perspective-projected orbital gyroscope rings
       • Depth-occluded stroke shading (near segments thicker & brighter)
       • 3D floating quantum particle field
-      • Interactive mouse-tilt (tilts in 3D toward cursor)
+      • Optional cursor tilt and continuous animation for interactive instances
       • COLLISION-FREE READOUT: Percentage sits inside the 3D sphere, while
         the "Used / Total GB" badge sits in a sleek HUD pill BELOW the 3D sphere
         so text NEVER collides with the sphere rim or rotating 3D rings!
     """
 
-    def __init__(self, compact: bool = False, parent=None):
+    def __init__(self, compact: bool = False, parent=None, *, animate: bool = True,
+                 cursor_tilt: bool = True):
         super().__init__(parent)
         self.percent = 0.0
         self.used_str = ''
         self.total_str = ''
         self._compact = compact
+        self._animate = bool(animate)
+        self._cursor_tilt = bool(cursor_tilt)
         if compact:
             self.setFixedSize(112, 112)
         else:
             self.setMinimumSize(196, 152)
             self.setMaximumHeight(184)
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setMouseTracking(True)
+        self.setMouseTracking(self._animate and self._cursor_tilt)
 
         self._rot_x = 24.0
         self._rot_y = 0.0
@@ -730,24 +719,47 @@ class Cyber3DDiskCore(QWidget):
             self._particles.append(Point3D(pr * math.cos(theta), py, pr * math.sin(theta)))
 
         self._hover = False
+        self._last_motion = 0.
+        self._frame_time = time.monotonic()
+        self._tilt_y = 0.
+        self._static_key = None
+        self._static_builds = 0
+        self._ring_geometry = []
+        for points, tilt in ((self._ring3, 32.), (self._ring2, -18.), (self._ring1, 8.)):
+            cosine, sine = math.cos(math.radians(tilt)), math.sin(math.radians(tilt))
+            self._ring_geometry.append([(pt.x*cosine-pt.y*sine, pt.x*sine+pt.y*cosine, pt.z)
+                                        for pt in points])
         self._intro_ticks = 0
         self._timer = QTimer(self)
+        if IS_WINDOWS:
+            self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # Adaptive: 33ms (~30 FPS) on intro/hover, throttles to 120ms (~8 FPS) when idle
+        if self._animate:
+            self._timer.start(33)  # Animated instances pause while hidden or minimized.
 
     def set_percent(self, v: float):
-        self.percent = float(v)
+        value = float(v)
+        if self.percent == value:
+            return
+        self.percent = value
         self.update()
 
     def set_usage_detail(self, pct: float, used_str: str = '', total_str: str = ''):
-        self.percent = float(pct)
+        value = float(pct)
+        if self.percent == value and self.used_str == used_str and self.total_str == total_str:
+            return
+        self.percent = value
         self.used_str = used_str
         self.total_str = total_str
         self.update()
 
     def showEvent(self, ev):
-        self._intro_ticks = 0
-        self._timer.start(33)
+        if self._animate:
+            self._intro_ticks = 0
+            self._frame_time = time.monotonic()
+            self._timer.start(33)
+        else:
+            self._timer.stop()
         super().showEvent(ev)
 
     def hideEvent(self, ev):
@@ -756,11 +768,21 @@ class Cyber3DDiskCore(QWidget):
 
     def enterEvent(self, event):
         self._hover = True
-        if self.isVisible():
+        if self._animate and self._cursor_tilt:
+            self._last_motion = time.monotonic()
+        if self._animate and self._cursor_tilt and self.isVisible():
             self._timer.setInterval(33)
+        else:
+            self.update()
         super().enterEvent(event)
 
     def mouseMoveEvent(self, event):
+        if not self._animate or not self._cursor_tilt:
+            super().mouseMoveEvent(event)
+            return
+        self._last_motion = time.monotonic()
+        if IS_WINDOWS and self._timer.isActive():
+            self._timer.setInterval(33)
         w, h = max(1.0, float(self.width())), max(1.0, float(self.height()))
         rx = (event.position().x() - w / 2.0) / (w / 2.0)
         ry = (event.position().y() - h / 2.0) / (h / 2.0)
@@ -770,13 +792,19 @@ class Cyber3DDiskCore(QWidget):
 
     def leaveEvent(self, event):
         self._hover = False
-        self._target_rot_x = 24.0
-        self._target_rot_y = 0.0
-        if self._timer.isActive():
-            self._timer.setInterval(120)
+        if self._animate and self._cursor_tilt:
+            self._target_rot_x = 24.0
+            self._target_rot_y = 0.0
+        if self._animate and self._cursor_tilt and self._timer.isActive():
+            self._timer.setInterval(33 if IS_WINDOWS else 120)
+        else:
+            self.update()
         super().leaveEvent(event)
 
     def _tick(self):
+        if not self._animate:
+            self._timer.stop()
+            return
         if not self.isVisible():
             self._timer.stop()
             return
@@ -785,15 +813,37 @@ class Cyber3DDiskCore(QWidget):
             self._timer.stop()
             return
         self._intro_ticks += 1
-        if self._intro_ticks > 60 and not self._hover and self._timer.interval() != 120:
-            self._timer.setInterval(120)
+        idle_interval = 33 if IS_WINDOWS else 120
+        interactive = (self._cursor_tilt and self._hover and
+                       (not IS_WINDOWS or time.monotonic()-self._last_motion < .75))
+        if IS_WINDOWS:
+            now = time.monotonic()
+            elapsed = min(.1, max(0., now-self._frame_time))
+            self._frame_time = now
+            # Clipped by a scroll viewport: keep a cheap visibility check so
+            # scrolling back resumes without a new showEvent.
+            if self.visibleRegion().isEmpty():
+                self._timer.setInterval(200)
+                return
+            self._timer.setInterval(33 if interactive else idle_interval)
+            self._rot_y = (self._rot_y + elapsed*(42. if interactive else 32.)) % _DISK_CORE_ROTATION_PERIOD
+            blend = 1.-math.exp(-8.*elapsed)
+            self._rot_x += (self._target_rot_x-self._rot_x)*blend
+            self._tilt_y += (self._target_rot_y-self._tilt_y)*blend
+            self.update()
+            return
+        if self._intro_ticks > 60 and not interactive and self._timer.interval() != idle_interval:
+            self._timer.setInterval(idle_interval)
         step = 1.35 if self._timer.interval() <= 40 else 2.2
-        self._rot_y = (self._rot_y + step) % 360.0
+        self._rot_y = (self._rot_y + step) % _DISK_CORE_ROTATION_PERIOD
         self._rot_x += (self._target_rot_x - self._rot_x) * 0.16
         self._pulse = (self._pulse + 0.07) % (math.pi * 2.0)
         self.update()
 
     def paintEvent(self, _):
+        if IS_WINDOWS:
+            self._paint_windows()
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = float(self.width()), float(self.height())
@@ -810,8 +860,8 @@ class Cyber3DDiskCore(QWidget):
         # Ambient radial glow
         glow_r = min(w, h) * 0.44
         glow = QRadialGradient(cx, cy, glow_r)
-        g1 = QColor(col_primary); g1.setAlphaF(0.20 if dark else 0.12)
-        g2 = QColor(col_secondary); g2.setAlphaF(0.07 if dark else 0.04)
+        g1 = QColor(col_primary); g1.setAlphaF((0.26 if self._hover else 0.20) if dark else (0.17 if self._hover else 0.12))
+        g2 = QColor(col_secondary); g2.setAlphaF((0.10 if self._hover else 0.07) if dark else (0.06 if self._hover else 0.04))
         g3 = QColor(col_primary); g3.setAlphaF(0.0)
         glow.setColorAt(0.0, g1)
         glow.setColorAt(0.65, g2)
@@ -867,12 +917,12 @@ class Cyber3DDiskCore(QWidget):
         if dark:
             sphere.setColorAt(0.0, QColor(24, 38, 64, 242))
             sphere.setColorAt(0.72, QColor(9, 14, 26, 248))
-            rim = QColor(col_primary); rim.setAlpha(165)
+            rim = QColor(col_primary); rim.setAlpha(180 if self._hover else 165)
             sphere.setColorAt(1.0, rim)
         else:
             sphere.setColorAt(0.0, QColor(255, 255, 255, 252))
             sphere.setColorAt(0.75, QColor(238, 244, 252, 250))
-            rim = QColor(col_primary); rim.setAlpha(135)
+            rim = QColor(col_primary); rim.setAlpha(150 if self._hover else 135)
             sphere.setColorAt(1.0, rim)
 
         p.setBrush(QBrush(sphere))
@@ -880,9 +930,9 @@ class Cyber3DDiskCore(QWidget):
         p.drawEllipse(QPointF(cx, cy), core_r, core_r)
 
         # Crisp Percentage Readout centered inside the sphere (NEVER collides with used_str!)
-        pct_txt = f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%'
+        pct_txt = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
         font_sz = 10 if self._compact else 12
-        p.setFont(QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code', font_sz, QFont.Weight.Bold))
+        p.setFont(mono_font(pt=font_sz, bold=True))
         p.setPen(QColor(C['text']))
         p.drawText(QRectF(cx - core_r, cy - 10, core_r * 2.0, 20), Qt.AlignmentFlag.AlignCenter, pct_txt)
 
@@ -901,7 +951,7 @@ class Cyber3DDiskCore(QWidget):
             p.setPen(QPen(b_col, 1.0))
             p.drawRoundedRect(pill_rect, 6.0, 6.0)
 
-            f_pill = QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code')
+            f_pill = mono_font()
             f_pill.setPixelSize(10)
             f_pill.setBold(True)
             p.setFont(f_pill)
@@ -909,6 +959,123 @@ class Cyber3DDiskCore(QWidget):
             p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, self.used_str)
 
         p.end()
+
+    def _windows_static_layers(self, width, height, cx, cy, has_pill, primary, secondary):
+        """Rasterize gradients and text only when their actual inputs change."""
+        dark = is_dark_theme()
+        dpr = self.devicePixelRatioF()
+        pct = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
+        key = (width, height, dpr, dark, self._hover, primary.name(), secondary.name(), C['text'],
+               C['cyan_dim'], C['yel_dim'], C['red_dim'], pct, self.used_str, has_pill)
+        if key == self._static_key:
+            return
+        self._static_key = key
+        self._static_builds += 1
+        def layer():
+            pixmap = QPixmap(max(1, round(width*dpr)), max(1, round(height*dpr)))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            return pixmap, painter
+        self._glow_layer, painter = layer()
+        radius = min(width, height)*.44
+        glow = QRadialGradient(cx, cy, radius)
+        for position, color, alpha in ((0., primary, (.26 if self._hover else .20) if dark else (.17 if self._hover else .12)),
+                                       (.65, secondary, (.10 if self._hover else .07) if dark else (.06 if self._hover else .04)),
+                                       (1., primary, 0.)):
+            shade = QColor(color); shade.setAlphaF(alpha)
+            glow.setColorAt(position, shade)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.end()
+        self._readout_layer, painter = layer()
+        radius = 24. if self._compact else 31.
+        sphere = QRadialGradient(cx-radius*.25, cy-radius*.25, radius*1.2)
+        sphere.setColorAt(0., QColor(24,38,64,242) if dark else QColor(255,255,255,252))
+        sphere.setColorAt(.72 if dark else .75, QColor(9,14,26,248) if dark else QColor(238,244,252,250))
+        rim = QColor(primary); rim.setAlpha((180 if self._hover else 165) if dark else (150 if self._hover else 135))
+        sphere.setColorAt(1., rim)
+        painter.setBrush(sphere)
+        painter.setPen(QPen(primary, 1.6))
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.setFont(mono_font(pt=10 if self._compact else 12, bold=True))
+        painter.setPen(QColor(C['text']))
+        painter.drawText(QRectF(cx-radius,cy-10,radius*2.,20.),Qt.AlignmentFlag.AlignCenter,pct)
+        if has_pill:
+            pill_width = min(width-12.,146.)
+            rect = QRectF(cx-pill_width/2.,height-22.,pill_width,20.)
+            color = QColor(C['cyan_dim'] if self.percent <= 75 else C['yel_dim'] if self.percent <= 90 else C['red_dim'])
+            if dark: color.setAlpha(190)
+            border = QColor(primary); border.setAlpha(110)
+            painter.setBrush(color); painter.setPen(QPen(border,1.))
+            painter.drawRoundedRect(rect,6.,6.)
+            font=mono_font(px=10, bold=True)
+            painter.setFont(font); painter.setPen(primary if dark else QColor(C['text']))
+            painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,self.used_str)
+        painter.end()
+
+    def _paint_windows(self):
+        """Cheap animated geometry over cached, DPI-aware static layers."""
+        width, height = float(self.width()), float(self.height())
+        has_pill = bool(self.used_str and not self._compact)
+        cx, cy = width/2., (height-24.)/2. if has_pill else height/2.
+        dark = is_dark_theme()
+        primary = QColor(C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan'])
+        secondary = QColor(C.get('purple','#A855F7'))
+        self._windows_static_layers(width,height,cx,cy,has_pill,primary,secondary)
+        painter=QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0,0,self._glow_layer)
+        angle=math.radians(self._rot_x+self._tilt_y*.15)
+        cosine_x,sine_x=math.cos(angle),math.sin(angle)
+        specs=((-self._rot_y*.4,QColor(C['cyan2']),1.,1.2),
+               (self._rot_y+55.,secondary,.82,1.6),
+               (self._rot_y,primary,min(1.,max(0.,self.percent/100.)),2.6))
+        for points,(angle,color,ratio,base_width) in zip(self._ring_geometry,specs):
+            cosine_y,sine_y=math.cos(math.radians(angle)),math.sin(math.radians(angle))
+            projected=[]
+            for x,y,z in points:
+                rotated_x=x*cosine_y+z*sine_y
+                rotated_z=-x*sine_y+z*cosine_y
+                rotated_y=y*cosine_x-rotated_z*sine_x
+                depth=y*sine_x+rotated_z*cosine_x
+                factor=215./(255.+depth)
+                projected.append((rotated_x*factor+cx,rotated_y*factor+cy,depth))
+            active=max(1,int(len(points)*min(1.,max(.02,ratio))))
+            paths={}
+            for index,first in enumerate(projected):
+                second=projected[(index+1)%len(projected)]
+                bucket=max(0,min(7,int(((first[2]+second[2])*.5+60.)/15.))) if index < active else -1
+                if bucket not in paths:
+                    paths[bucket]=QPainterPath()
+                path=paths[bucket]
+                path.moveTo(first[0],first[1]); path.lineTo(second[0],second[1])
+            for bucket,path in sorted(paths.items(),reverse=True):
+                if bucket < 0:
+                    shade=QColor(C['border3']); shade.setAlpha(60 if dark else 85); thickness=1.
+                else:
+                    depth=bucket*15.-52.5
+                    shade=QColor(color); shade.setAlpha(int(max(50,min(255,(175 if dark else 200)-depth*1.6))))
+                    thickness=max(1.1,min(3.6,base_width-depth*.02))
+                painter.setPen(QPen(shade,thickness,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap))
+                painter.drawPath(path)
+        cosine_y,sine_y=math.cos(math.radians(self._rot_y*1.4)),math.sin(math.radians(self._rot_y*1.4))
+        cosine_x,sine_x=math.cos(math.radians(self._rot_x)),math.sin(math.radians(self._rot_x))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for point in self._particles:
+            x=point.x*cosine_y+point.z*sine_y
+            z=-point.x*sine_y+point.z*cosine_y
+            y=point.y*cosine_x-z*sine_x
+            depth=point.y*sine_x+z*cosine_x
+            factor=215./(255.+depth)
+            shade=QColor(primary); shade.setAlpha(int(max(30,min(210,130-depth*1.5))))
+            painter.setBrush(shade)
+            radius=max(1.,min(2.8,1.8*factor))
+            painter.drawEllipse(QPointF(x*factor+cx,y*factor+cy),radius,radius)
+        painter.drawPixmap(0,0,self._readout_layer)
+        painter.end()
 
 
 class DiskRing(QWidget):
@@ -972,8 +1139,8 @@ class DiskRing(QWidget):
             )
 
         # Center percentage text
-        pct_txt = f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%'
-        f_val = QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code')
+        pct_txt = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
+        f_val = mono_font()
         f_val.setPixelSize(13)
         f_val.setBold(True)
         p.setFont(f_val)
@@ -981,7 +1148,7 @@ class DiskRing(QWidget):
         p.drawText(QRectF(cx - 34, cy - 11, 68, 20), Qt.AlignmentFlag.AlignCenter, pct_txt)
 
         # Sub-caption "USED"
-        f_sub = QFont('Inter')
+        f_sub = ui_font()
         f_sub.setPixelSize(8)
         f_sub.setBold(True)
         p.setFont(f_sub)
@@ -993,7 +1160,65 @@ class DiskRing(QWidget):
 # ═════════════════════════════════════════════════════════════
 # HEX LOGO WIDGET (Animated 3D Cyber Hex Emblem)
 # ═════════════════════════════════════════════════════════════
+def paint_logo_mark(p: QPainter, size: float, c1: str, c2: str, c3: str, glow: float = 0.0, fill: float = 0.08,
+                    spark: str = '#FFFFFF'):
+    """CyberClean mark in a 256-unit box: hex shield + a "C" arc interlocked with an "L" whose foot is a
+    wipe stroke, plus a 4-point spark (= clean). Used by the header widget and to render assets/logo.*"""
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(size / 256.0, size / 256.0)
+    def col(h, a=1.0):
+        q = QColor(h); q.setAlphaF(a); return q
+    def lin(x0, y0, x1, y1, stops):
+        g = QLinearGradient(x0, y0, x1, y1)
+        for t, c in stops: g.setColorAt(t, QColor(c))
+        return g
+    if glow > 0:
+        g = QRadialGradient(128, 128, 120); g.setColorAt(0, col(c1, glow)); g.setColorAt(1, col(c1, 0))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g)); p.drawEllipse(QPointF(128, 128), 120, 120)
+    # hex shield (pointy-top)
+    hexp = QPolygonF([QPointF(128 + 92 * math.cos(math.radians(-90 + 60 * i)), 128 + 92 * math.sin(math.radians(-90 + 60 * i))) for i in range(6)])
+    rim = lin(40, 30, 216, 226, [(0, c1), (0.55, c2), (1, c3)])
+    p.setBrush(col(c1, fill))
+    small = size < 48                      # heavier strokes keep the mark legible at icon sizes
+    pen = QPen(QBrush(rim), 13 if small else 10); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin); p.setPen(pen)
+    p.drawPolygon(hexp)
+    # monogram — geometry is derived so the whole "CL" ink box is centred in the hex (no scale/translate drift)
+    sw   = 19.0 if small else 16.0             # stroke
+    r    = 28.0                                # C radius (centre-line)
+    gap  = 13.0 if small else 14.0             # clear space between the C terminals and the L stem
+    foot = 24.0                                # L foot length
+    k45  = math.cos(math.radians(45))
+    cxr  = r + sw / 2                          # C centre, measured from the ink's left edge
+    c_right = cxr + r * k45 + sw / 2
+    xs   = c_right + gap + sw / 2              # L stem centre
+    span = xs + foot + sw / 2                  # total ink width
+    x0   = 128.0 - span / 2                    # ink left edge  -> centred horizontally
+    ccx, ccy = x0 + cxr, 128.0
+    cpen = QPen(QBrush(lin(x0, 128 - r, x0 + c_right, 128 + r, [(0, c1), (1, c2)])), sw)
+    cpen.setCapStyle(Qt.PenCapStyle.RoundCap); p.setPen(cpen); p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawArc(QRectF(ccx - r, ccy - r, 2 * r, 2 * r), int(45 * 16), int(270 * 16))
+    L = QPainterPath(); L.moveTo(x0 + xs, 128 - r); L.lineTo(x0 + xs, 128 + r); L.lineTo(x0 + xs + foot, 128 + r)
+    lpen = QPen(QBrush(lin(x0 + xs, 128 - r, x0 + xs + foot, 128 + r, [(0, c2), (1, c3)])), sw)
+    lpen.setCapStyle(Qt.PenCapStyle.RoundCap); lpen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(lpen); p.drawPath(L)
+    # spark (4-point star) = "clean": sits in the empty corner above the L foot, inside the ink box,
+    # top tip level with the top of the L stem so it never adds width or weight to one side
+    R, rr0 = (10.0 if small else 9.0), 3.0
+    cx = x0 + xs + sw / 2 + R + 5.0
+    cy = 128 - r - sw / 2 + R
+    star = QPainterPath()
+    for i in range(8):
+        a_ = math.radians(-90 + 45 * i); rr = R if i % 2 == 0 else rr0
+        pt = QPointF(cx + rr * math.cos(a_), cy + rr * math.sin(a_))
+        star.moveTo(pt) if i == 0 else star.lineTo(pt)
+    star.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(spark)); p.drawPath(star)
+    p.restore()
+
+
 class HexLogoWidget(QWidget):
+    """Header logo — pure QPainter (theme-aware, crisp at any DPI)."""
     def __init__(self, size=32, parent=None):
         super().__init__(parent)
         self.s = size
@@ -1003,34 +1228,10 @@ class HexLogoWidget(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx, cy, s = self.s / 2.0, self.s / 2.0, self.s / 2.0 - 2.0
-
-        def hex_pts(cx_, cy_, r_, offset_deg=0.0):
-            return [
-                QPointF(cx_ + r_ * math.cos(math.radians(60 * i - 30 + offset_deg)),
-                        cy_ + r_ * math.sin(math.radians(60 * i - 30 + offset_deg)))
-                for i in range(6)
-            ]
-
-        outer_col = QColor(C['cyan']); outer_col.setAlphaF(0.92)
-        p.setPen(QPen(outer_col, 1.6))
-        grad = QRadialGradient(cx, cy, s)
-        g0 = QColor(C['cyan']); g0.setAlphaF(0.24 if is_dark_theme() else 0.16)
-        g1 = QColor(C['cyan']); g1.setAlphaF(0.02)
-        grad.setColorAt(0.0, g0)
-        grad.setColorAt(1.0, g1)
-        p.setBrush(QBrush(grad))
-        p.drawPolygon(QPolygonF(hex_pts(cx, cy, s)))
-
-        border_col = QColor(C.get('purple', '#A855F7')); border_col.setAlphaF(0.55)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(border_col, 1.0))
-        p.drawPolygon(QPolygonF(hex_pts(cx, cy, s * 0.68, offset_deg=30.0)))
-
-        p.setPen(QPen(QColor(C['cyan'])))
-        p.setFont(QFont('Share Tech Mono', max(7, int(self.s * 0.28)), QFont.Weight.Bold))
-        p.drawText(QRectF(0, 0, self.s, self.s), Qt.AlignmentFlag.AlignCenter, 'CC')
+        dark = is_dark_theme()
+        paint_logo_mark(p, self.s, C['cyan'], C['cyan2'], C['purple'],
+                        glow=0.20 if dark else 0.0, fill=0.08 if dark else 0.06,
+                        spark='#FFFFFF' if dark else C['yellow'])   # white spark would vanish on parchment
         p.end()
 
 
@@ -1041,25 +1242,25 @@ class HexLogoWidget(QWidget):
 def _btn(text, color='cyan', small=False, icon_only=False):
     col     = C.get(color, C['cyan'])
     col_dim = C.get(color + '_dim', C['bg3'])
-    pad     = '6px 14px' if small else '8px 18px'
+    pad     = '5px 12px' if small else '7px 16px'
     sz      = '12px'     if small else '13px'
-    minh    = '30px'     if small else '36px'
+    minh    = '28px'     if small else '34px'
     dark    = is_dark_theme()
-    border_col   = _rgba(col, 0.42 if dark else 0.55)
-    hover_bg     = _rgba(col, 0.16 if dark else 0.13)
-    press_bg     = _rgba(col, 0.25 if dark else 0.22)
+    border_col   = _rgba(col, 0.30 if dark else 0.42)
+    hover_bg     = _rgba(col, 0.13 if dark else 0.10)
+    press_bg     = _rgba(col, 0.20 if dark else 0.17)
 
     btn = QPushButton(text)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setMinimumHeight(30 if small else 36)
+    btn.setMinimumHeight(28 if small else 34)
     btn.setStyleSheet(f"""
         QPushButton {{
             color:{col};
             border:1px solid {border_col};
             background:{col_dim};
             font-family:{UI}; font-size:{sz};
-            letter-spacing:0.5px; padding:{pad};
-            border-radius:8px; font-weight:700;
+            letter-spacing:0.2px; padding:{pad};
+            border-radius:9px; font-weight:600;
             min-height:{minh};
         }}
         QPushButton:hover   {{ background:{hover_bg}; border-color:{col}; color:{col}; }}
@@ -1074,8 +1275,8 @@ def _btn(text, color='cyan', small=False, icon_only=False):
 def _lbl_section(text):
     l = QLabel(text)
     l.setStyleSheet(
-        f'color:{C["text3"]};font-size:11px;letter-spacing:1.5px;'
-        f'font-family:{UI};padding:4px 0 2px 0;font-weight:700;border:none;background:transparent;'
+        f'color:{C["text3"]};font-size:10px;letter-spacing:1px;'
+        f'font-family:{UI};padding:3px 0 2px 0;font-weight:700;border:none;background:transparent;'
     )
     return l
 
@@ -1090,7 +1291,7 @@ def _lbl_val(text, color='cyan', size=20):
 
 
 def _card(border_color=None, accent_color=None, top_accent=None, shadow=True):
-    """Return an ElevatedCard with multi-stop surface gradient, specular rim, and elevation shadow."""
+    """Create a restrained card surface using the active theme tokens."""
     f = ElevatedCard(
         border_color=border_color,
         accent_color=accent_color,
@@ -1120,11 +1321,11 @@ class StatCard(ElevatedCard):
         self.setObjectName('statCard')
         self.setStyleSheet(f'QFrame#statCard QLabel{{border:none;background:transparent;}}')
         self.color = color
-        self.setMinimumHeight(76)
+        self.setMinimumHeight(68)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(4)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(3)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -1134,7 +1335,9 @@ class StatCard(ElevatedCard):
             f'font-family:{UI};font-weight:700;border:none;background:transparent;'
         )
         self._dot = QLabel('●')
-        self._dot.setStyleSheet(f'color:{col};font-size:8px;border:none;background:transparent;')
+        dot_style = f'color:{col};font-size:8px;border:none;background:transparent;'
+        if self._dot.styleSheet() != dot_style:
+            self._dot.setStyleSheet(dot_style)
         top_row.addWidget(self.lbl_name)
         top_row.addStretch()
         top_row.addWidget(self._dot)
@@ -1151,13 +1354,35 @@ class StatCard(ElevatedCard):
         self.lbl_val.setText(text)
         col = C.get(color or self.color, C.get(self.color, C['cyan']))
         self._top_accent = col
-        self._dot.setStyleSheet(f'color:{col};font-size:8px;border:none;background:transparent;')
+        dot_style = f'color:{col};font-size:8px;border:none;background:transparent;'
+        if self._dot.styleSheet() != dot_style:
+            self._dot.setStyleSheet(dot_style)
         val_col = col if is_dark_theme() else (col if color in ('red', 'yellow') else C['text'])
-        self.lbl_val.setStyleSheet(
+        value_style = (
             f'color:{val_col};font-size:22px;font-weight:700;'
             f'font-family:{MONO};letter-spacing:0.4px;border:none;background:transparent;'
         )
+        if self.lbl_val.styleSheet() != value_style:
+            self.lbl_val.setStyleSheet(value_style)
         self.update()
+
+
+class TemperatureStatCard(StatCard):
+    """Clickable temperature-only card for the optional Windows sensor helper."""
+    accessRequested = pyqtSignal()
+
+    def __init__(self, label, init_val, color='green', parent=None):
+        super().__init__(label, init_val, color, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for child in (self.lbl_name, self.lbl_val, self._dot):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton and
+                self.rect().contains(event.position().toPoint())):
+            self.accessRequested.emit()
+        super().mouseReleaseEvent(event)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1226,7 +1451,7 @@ class EmptyStateBinder(QObject):
 
 
 # ═════════════════════════════════════════════════════════════
-# NAV BUTTON (Fluid Pill Hover & Procedural Vector Icon)
+# NAV BUTTON
 # ═════════════════════════════════════════════════════════════
 class NavButton(QWidget):
     """
@@ -1244,7 +1469,7 @@ class NavButton(QWidget):
         self._icon_name = icon_name
         self._label_str = label
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(42)
+        self.setFixedHeight(40)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setToolTip(label)
@@ -1283,12 +1508,12 @@ class NavButton(QWidget):
         w, h = float(self.width()), float(self.height())
         dark = is_dark_theme()
 
-        # 1. Outer rounded pill container (inset 8px horizontally, 2px vertically)
-        pill_rect = QRectF(8.0, 2.0, max(10.0, w - 16.0), max(10.0, h - 4.0))
+        # Quiet navigation row with a clear active state.
+        pill_rect = QRectF(8.0, 1.0, max(10.0, w - 16.0), max(10.0, h - 2.0))
         if self._active:
             if dark:
-                bg_c = QColor(C['cyan']); bg_c.setAlphaF(0.13)
-                bd_c = QColor(C['cyan']); bd_c.setAlphaF(0.38)
+                bg_c = QColor(C['cyan']); bg_c.setAlphaF(0.10)
+                bd_c = QColor(C['cyan']); bd_c.setAlphaF(0.26)
             else:
                 bg_c = QColor(C['cyan_dim'])
                 bd_c = QColor(C['cyan']); bd_c.setAlphaF(0.45)
@@ -1297,14 +1522,14 @@ class NavButton(QWidget):
             p.drawRoundedRect(pill_rect, 8.0, 8.0)
 
             # Left active indicator bar
-            bar_h = 20.0
-            bar_rect = QRectF(12.0, (h - bar_h) / 2.0, 3.2, bar_h)
+            bar_h = 18.0
+            bar_rect = QRectF(12.0, (h - bar_h) / 2.0, 2.5, bar_h)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(QColor(C['cyan'])))
             p.drawRoundedRect(bar_rect, 1.6, 1.6)
         elif self._hovered:
             if dark:
-                bg_c = QColor(C['cyan']); bg_c.setAlphaF(0.07)
+                bg_c = QColor(C['cyan']); bg_c.setAlphaF(0.045)
             else:
                 bg_c = QColor(C['bg3'])
             p.setBrush(QBrush(bg_c))
@@ -1347,7 +1572,7 @@ class NavButton(QWidget):
             else:
                 txt_col = QColor(C['text3'] if dark else C['text2'])
 
-            f = QFont('Inter' if not IS_WINDOWS else 'Segoe UI')
+            f = ui_font()
             f.setPixelSize(12)
             f.setWeight(QFont.Weight.Bold if self._active else QFont.Weight.DemiBold)
             f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
@@ -1530,7 +1755,12 @@ class SysInfoWorker(QThread):
                 try:
                     self.snapshot.emit(get_snapshot(interval=iv))
                 except Exception:
-                    pass
+                    if IS_WINDOWS:
+                        import logging
+                        logging.getLogger('cyberclean').exception('SysInfoWorker snapshot failed')
+            # Windows counters keep sampling at 1 s in their own service. The
+            # dashboard renders every 4 s (the documented UI cadence); manual
+            # refresh still wakes this consumer immediately.
             self._wake.wait(4.0)
             self._wake.clear()
 
@@ -1580,6 +1810,23 @@ class CleanWorker(QThread):
         total_planned = 0; measured_sum = 0; has_measured = False
         steps = max(len(self.targets), 1)
         out_plans = {}
+        volume_meter = None
+        volume_deltas = {}
+        if IS_WINDOWS and not self.dry:
+            try:
+                from utils.windows_cleanup_measurement import VolumeMeter
+                paths = [str(Path.home())]
+                paths.extend(os.environ[k] for k in ('TEMP', 'LOCALAPPDATA', 'SystemRoot') if os.environ.get(k))
+                for tid in self.targets:
+                    plan = self._plans.get(tid)
+                    if plan is None and hasattr(CLEANER, 'get_approved_plan'):
+                        plan, _expired = CLEANER.get_approved_plan(tid)
+                    paths.extend(item.path for item in getattr(plan, 'items', []))
+                volume_meter = VolumeMeter(paths)
+                volume_meter.begin()
+            except Exception as exc:
+                self.log.emit(f'  ~ Whole-operation volume measurement unavailable: {exc}', 'warn')
+
 
         def _report_extras(result):
             notes = getattr(result, 'notes', []) or []
@@ -1587,6 +1834,11 @@ class CleanWorker(QThread):
                 self.log.emit(_tlog(f'  ⚠  {n}'), 'warn')
             sk = getattr(result, 'skipped', []) or []
             if sk and not self.dry:
+                if IS_WINDOWS:
+                    from collections import Counter
+                    reasons = Counter(str(reason) for _path, reason in sk)
+                    for reason, count in reasons.items():
+                        self.log.emit(f'  – Skipped {count}: {reason}', 'dry')
                 self.log.emit(_tlog(f'  –  {len(sk)} item(s) skipped (in use / changed since the scan)'), 'dry')
             blk = int(getattr(result, 'blocked', 0) or 0)
             lock_note = next((n for n in notes if 'running' in n.lower() or 'close' in n.lower()), '')
@@ -1735,14 +1987,18 @@ class CleanWorker(QThread):
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} items'), 'dry')
                     else:
-                        self.log.emit(_tlog(f'  ✓  {fmt_size(result.freed_bytes)} freed'), 'ok')
+                        if IS_WINDOWS and tid == 'win_dns':
+                            self.log.emit('  ✓ DNS resolver flush completed (operation; no files removed)', 'ok')
+                        else:
+                            label = 'logical removed' if IS_WINDOWS else 'freed'
+                            self.log.emit(_tlog(f'  ✓  {fmt_size(result.freed_bytes)} {label}'), 'ok')
                         if result.files_removed:
                             self.log.emit(_tlog(f'     {result.files_removed} removed'), 'ok')
 
                     _report_extras(result)
                     total_freed += result.freed_bytes
                     total_planned += getattr(result, 'planned_bytes', 0) or result.freed_bytes
-                    if getattr(result, 'measured_bytes', None) is not None:
+                    if not IS_WINDOWS and getattr(result, 'measured_bytes', None) is not None:
                         measured_sum += max(result.measured_bytes, 0)
                         has_measured = True
                     rollback    += result.rollback
@@ -1767,15 +2023,24 @@ class CleanWorker(QThread):
                 except Exception:
                     pass
 
+        if volume_meter is not None:
+            measured_sum = volume_meter.end()
+            has_measured = measured_sum is not None
+            volume_deltas = volume_meter.observations
+            for entry in volume_deltas.values():
+                self.log.emit(f"  i {entry['root']} observed free-space delta: {entry['delta']:+d} bytes (all disk activity)", 'ok')
+            for error in volume_meter.errors:
+                self.log.emit(f'  ~ Volume measurement: {error}', 'warn')
         self.progress.emit(100, 'done')
         self.log.emit('\n' + '─' * 44, 'head')
-        label = 'ESTIMATED' if self.dry else 'FREED'
+        label = 'ESTIMATED' if self.dry else ('LOGICAL REMOVED' if IS_WINDOWS else 'FREED')
         self.log.emit(_tlog(f'TOTAL {label}: {fmt_size(total_freed)}'), 'ok')
         self.done.emit({'freed': total_freed, 'dry': self.dry,
                         'interrupted': bool(self._stop_requested),
                         'summary': ' | '.join(summary), 'rollback': rollback,
                         'planned': total_planned,
                         'measured': measured_sum if has_measured else None,
+                        **({'measured_by_volume': volume_deltas} if IS_WINDOWS else {}),
                         'plans': out_plans})
         self._finished_event.set()
 
@@ -1816,10 +2081,11 @@ class _SmartOffWorker(QThread):
     def run(self):
         try:
             from core.booster import smart_boost_off
-            smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(_tlog(m), l))
+            outcome = smart_boost_off(self._saved_state, lambda m, l='text': self.log_signal.emit(_tlog(m), l))
         except Exception as e:
             self.log_signal.emit(f'  x Smart Boost restore error: {e}', 'err')
-        self.done.emit(None)
+            outcome = False
+        self.done.emit(outcome)
 
 
 class _OneClickWorker(QThread):
@@ -1856,28 +2122,40 @@ class _OneClickWorker(QThread):
             except Exception:
                 pass
         elif platform.system() == 'Windows':
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 r = _sp.run(['ipconfig', '/flushdns'], capture_output=True, text=True, timeout=30,
                             creationflags=0x08000000)
                 results.append(('Flush DNS', r.returncode == 0))
             except Exception:
                 results.append(('Flush DNS', False))
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             if self._cleaner is not None:
                 try:
                     res = self._cleaner.clean('win_temp', dry=False)
                     results.append(('Clear TEMP', res.error is None))
                 except Exception:
                     results.append(('Clear TEMP', False))
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 from core.booster import free_ram
                 free_ram(lambda m, l='text': None)
                 results.append(('Smart RAM Free', True))
             except Exception:
                 pass
+            if self._stop_requested:
+                self.done.emit('Cancelled', False)
+                return
             try:
                 r_trim = _sp.run(
                     ['powershell', '-NoProfile', '-NonInteractive', '-Command',
-                     'Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue'],
+                     'Optimize-Volume -DriveLetter C -ReTrim -ErrorAction Stop'],
                     capture_output=True, text=True, timeout=60, creationflags=0x08000000,
                 )
                 results.append(('SSD TRIM', r_trim.returncode == 0))
@@ -2146,7 +2424,7 @@ class DiskDeltaWidget(QWidget):
             p, lx, 12, self._COL_W,
             _t('lbl_before', 'BEFORE'),
             self._fmt(self._free_bef),
-            f'{self._used_pct_b:.1f}% {_t("lbl_pct_used","used")}',
+            _t('lbl_free_used_fmt', 'free · {pct:.1f}% used').format(pct=self._used_pct_b),
             col_cyan, col_text, col_text3,
             align_right=False,
         )
@@ -2157,7 +2435,7 @@ class DiskDeltaWidget(QWidget):
                 p, rx, 12, self._COL_W,
                 _t('lbl_after_est', 'AFTER (EST)') if self._is_dry else _t('lbl_after', 'AFTER'),
                 self._fmt(self._free_aft),
-                f'{self._used_pct_a:.1f}% {_t("lbl_pct_used","used")}',
+                _t('lbl_free_used_fmt', 'free · {pct:.1f}% used').format(pct=self._used_pct_a),
                 col_green, col_text, col_text3,
                 align_right=True,
             )
@@ -2213,7 +2491,7 @@ class DiskDeltaWidget(QWidget):
         p.setPen(col_tag)
         p.drawText(QRectF(x, y, w, 14), flag | Qt.AlignmentFlag.AlignTop, tag)
 
-        font_val = QFont('JetBrains Mono' if not IS_WINDOWS else 'Cascadia Code')
+        font_val = mono_font()
         font_val.setPixelSize(19)
         font_val.setBold(True)
         p.setFont(font_val)

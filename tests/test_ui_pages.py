@@ -14,6 +14,12 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def test_language_does_not_depend_on_user_preferences(monkeypatch):
+    from utils.i18n import T
+    monkeypatch.setattr(T, 'lang', 'en')
+
+
 class FakeCleaner:
     def __init__(self):
         self.cleaned = []

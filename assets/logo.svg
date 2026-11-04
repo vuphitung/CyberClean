@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="CyberClean">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#0C1530"/><stop offset="1" stop-color="#050810"/></linearGradient>
+    <radialGradient id="glow" cx="128" cy="128" r="120" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#19F0DC" stop-opacity=".22"/><stop offset="1" stop-color="#19F0DC" stop-opacity="0"/></radialGradient>
+    <linearGradient id="rim" x1="40" y1="30" x2="216" y2="226" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#19F0DC"/><stop offset=".55" stop-color="#4FA8FF"/><stop offset="1" stop-color="#A47DFF"/></linearGradient>
+    <linearGradient id="gc" x1="69.1" y1="100" x2="132.9" y2="156" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#19F0DC"/><stop offset="1" stop-color="#4FA8FF"/></linearGradient>
+    <linearGradient id="gl" x1="154.9" y1="100" x2="178.9" y2="156" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4FA8FF"/><stop offset="1" stop-color="#A47DFF"/></linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <circle cx="128" cy="128" r="120" fill="url(#glow)"/>
+  <!-- hex shield -->
+  <polygon points="128,36 207.7,82 207.7,174 128,220 48.3,174 48.3,82" fill="#19F0DC" fill-opacity=".10" stroke="url(#rim)" stroke-width="10" stroke-linejoin="round"/>
+  <!-- C + L monogram: ink box centred on the hex (15 units clear space each side), 14 units between C and L -->
+  <g fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M124.9 108.2 A28 28 0 1 0 124.9 147.8" stroke="url(#gc)"/>
+    <path d="M154.9 100 V156 H178.9" stroke="url(#gl)"/>
+  </g>
+  <!-- spark = clean -->
+  <path d="M176.9 92 L179 98.9 L185.9 101 L179 103.1 L176.9 110 L174.8 103.1 L167.9 101 L174.8 98.9 Z" fill="#fff"/>
+</svg>

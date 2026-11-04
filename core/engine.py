@@ -61,6 +61,17 @@ def is_special(mode: int) -> bool:
             or stat.S_ISBLK(mode) or stat.S_ISCHR(mode))
 
 
+def _entry_lstat(entry):
+    """Read identity and link count without following reparse points.
+
+    Windows DirEntry.stat() caches directory enumeration data and returns zero
+    for st_dev/st_ino/st_nlink. A path lstat is required for hard-link accounting
+    and for manifests that will later be compared with os.lstat during removal.
+    POSIX keeps the cached scandir fast path.
+    """
+    return os.lstat(entry.path) if IS_WINDOWS else entry.stat(follow_symlinks=False)
+
+
 def is_elf_core_file(path: str) -> bool:
     """
     Xác minh file thực sự là ELF core dump (ET_CORE, e_type == 4).
@@ -258,6 +269,10 @@ def set_owner_uid(uid: Optional[int]) -> None:
 
 
 def _euid() -> Optional[int]:
+    if IS_WINDOWS:
+        # Windows st_uid is a dummy value, not a SID. A POSIX owner override
+        # (or a compatibility shim supplying geteuid) cannot describe it.
+        return None
     if _OWNER_UID is not None:
         return _OWNER_UID
     return os.geteuid() if hasattr(os, "geteuid") else None
@@ -375,7 +390,7 @@ def tree_stats(path, basis: str = "mtime", *, deadline: Optional[float] = None) 
                     stack.clear()
                     break
                 try:
-                    st = e.stat(follow_symlinks=False)
+                    st = _entry_lstat(e)
                 except OSError:
                     ts.errors += 1
                     continue
@@ -931,7 +946,7 @@ def plan_old_files(root, policy: Policy, *, guards: Optional[Guards] = None, now
         with it:
             for e in it:
                 try:
-                    st = e.stat(follow_symlinks=False)
+                    st = _entry_lstat(e)
                 except OSError:
                     continue
                 if is_link_like(st):
@@ -1176,6 +1191,9 @@ def _remove_tree_windows_verified(path: str, *,
                                   allowed_root: Optional[str] = None,
                                   exp_dev: Optional[int] = None,
                                   exp_ino: Optional[int] = None,
+                                  exp_size: Optional[int] = None,
+                                  exp_mtime_ns: Optional[int] = None,
+                                  exp_ctime_ns: Optional[int] = None,
                                   is_dir: bool = False,
                                   keep_root: bool = False,
                                   keep_names: Set[str] = frozenset(),
@@ -1197,7 +1215,15 @@ def _remove_tree_windows_verified(path: str, *,
         raise PermissionError("target is a symlink / reparse point")
     if exp_dev is not None and exp_ino is not None and (st0.st_dev, st0.st_ino) != (exp_dev, exp_ino):
         raise PermissionError("target replaced since the scan")
+    if is_dir and not stat.S_ISDIR(st0.st_mode):
+        raise PermissionError("target is no longer a directory")
     if not is_dir:
+        if not stat.S_ISREG(st0.st_mode):
+            raise PermissionError("target is no longer a regular file")
+        if ((exp_size is not None and st0.st_size != exp_size)
+                or (exp_mtime_ns is not None and st0.st_mtime_ns != exp_mtime_ns)
+                or (exp_ctime_ns is not None and st0.st_ctime_ns != exp_ctime_ns)):
+            raise PermissionError("target modified since the scan")
         try:
             os.unlink(path)
         except PermissionError:
@@ -1356,6 +1382,9 @@ def remove_path(path: str) -> None:
             allowed_root=ctx.get("allowed_root"),
             exp_dev=ctx["exp_dev"],
             exp_ino=ctx["exp_ino"],
+            exp_size=ctx.get("exp_size"),
+            exp_mtime_ns=ctx.get("exp_mtime_ns"),
+            exp_ctime_ns=ctx.get("exp_ctime_ns"),
             is_dir=ctx["is_dir"],
             keep_root=bool(ctx.get("keep_root")),
             keep_names=set(ctx.get("keep_names") or ()),
@@ -1598,6 +1627,18 @@ def _prune_empty_dirs(root: str, keep_root: bool = True, *,
             pass
 
 
+def windows_browser_label(path: str) -> str:
+    """Describe the browser, rather than the generic 'User Data' directory."""
+    normalized = str(path).replace('\\', '/').lower()
+    for fragment, label in [('google/chrome', 'Google Chrome'), ('microsoft/edge', 'Microsoft Edge'),
+                            ('bravesoftware/', 'Brave'), ('coccoc/', 'Cốc Cốc'),
+                            ('vivaldi/', 'Vivaldi'), ('chromium/', 'Chromium'), ('opera', 'Opera')]:
+        if fragment in normalized:
+            return label
+    parts = str(path).replace('\\', '/').rstrip('/').split('/')
+    return (parts[-2] if parts[-1].lower() == 'user data' and len(parts) > 1 else parts[-1]) or 'Browser'
+
+
 def _recheck_runtime_guards(item: PlanItem, guards: Optional[Guards]) -> str:
     """
     Kiểm tra lại mọi điều kiện runtime đã gắn vào PlanItem (browser process,
@@ -1611,7 +1652,8 @@ def _recheck_runtime_guards(item: PlanItem, guards: Optional[Guards]) -> str:
     for d in chromium_dirs:
         if chromium_profile_in_use(d) or (guards is not None and guards.user_data_dir_in_use(d)):
             cleaned_d = str(d).rstrip("/\\")
-            return f"{os.path.basename(cleaned_d)} is running — close it first"
+            label = windows_browser_label(cleaned_d) if IS_WINDOWS else os.path.basename(cleaned_d)
+            return f"{label} is running — close it first"
     sandbox_paths = item.meta.get("sandbox_paths") or ()
     if sandbox_paths and guards is not None:
         for sp in sandbox_paths:

@@ -79,12 +79,18 @@ class IdleScheduler:
         try:
             import psutil
             net1 = psutil.net_io_counters()
+            started = time.monotonic()
             cpu  = psutil.cpu_percent(interval=self.sample_seconds)   # blocks N seconds
             net2 = psutil.net_io_counters()
+            elapsed = time.monotonic() - started
             net_kbps = (
                 (net2.bytes_sent + net2.bytes_recv) -
                 (net1.bytes_sent + net1.bytes_recv)
             ) / 1024
+            if _IS_WINDOWS:
+                if elapsed <= 0 or net_kbps < 0:
+                    return False
+                net_kbps /= elapsed
             return cpu < self.cpu_threshold and net_kbps < self.net_threshold_kb
         except ImportError:
             return False

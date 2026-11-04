@@ -1,3 +1,4 @@
+import sys
 """
 Chạy install.sh THẬT trong một cây thư mục giả (mọi đường dẫn hệ thống được sed sang sandbox,
 curl/wget được thay bằng bản giả phục vụ file cục bộ). Không đụng /opt, /usr/local hay /etc thật.
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install.sh"
 HELPER = ROOT / "packaging" / "cyber-clean-helper"
 
-pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="install.sh needs root")
+pytestmark = pytest.mark.skipif(sys.platform != "linux" or getattr(os, "geteuid", lambda: -1)() != 0, reason="install.sh needs root")
 
 
 def _keypair():

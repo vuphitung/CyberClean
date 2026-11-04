@@ -46,7 +46,7 @@ except ImportError:
 try:
     from ui_widgets import (
         C, MONO, UI, _btn, _t, is_dark_theme, _rgba,
-        ElevatedCard, apply_elevation_shadow, _global_check_icon_path,
+        ElevatedCard, apply_elevation_shadow, _global_check_icon_path, mono_font,
     )
 except ImportError:
     C = {
@@ -62,6 +62,8 @@ except ImportError:
         'radius': '10px',
     }
     MONO = "'JetBrains Mono','Cascadia Code','Fira Code','Consolas',monospace"
+    def mono_font():
+        return QFont("Consolas")
     UI   = "'Inter','Noto Sans','Segoe UI','Ubuntu','Cantarell',sans-serif"
 
     def is_dark_theme() -> bool:
@@ -261,9 +263,12 @@ def _apply_game_nice(p, pid: int, saved: dict) -> bool:
         import psutil as _psu
         orig = p.nice()
         if IS_WINDOWS:
-            if orig != _psu.HIGH_PRIORITY_CLASS:
-                p.nice(_psu.HIGH_PRIORITY_CLASS)
-                saved.setdefault("game_nice", {})[pid] = _record_proc_nice_entry(p, orig)
+            if orig == _psu.NORMAL_PRIORITY_CLASS:
+                rec = _record_proc_nice_entry(p, orig)
+                if not rec['name'] or not rec['create_time']:
+                    return False
+                saved.setdefault("game_nice", {}).setdefault(pid, rec)
+                p.nice(_psu.ABOVE_NORMAL_PRIORITY_CLASS)
                 return True
         else:
             if orig > -10:
@@ -626,8 +631,20 @@ def _restore_boost_state(saved: dict, log=None) -> bool:
     return True
 
 
+# True while THIS process holds applied Boost tweaks. The state file on disk then belongs to the live
+# session, not to a crash — e.g. a theme switch rebuilds the page and must not "recover" (undo) a running Boost.
+_boost_live_in_process = False
+
+
+def _set_boost_live(flag: bool) -> None:
+    global _boost_live_in_process
+    _boost_live_in_process = bool(flag)
+
+
 def _recover_stale_boost_on_startup() -> bool:
     """If CyberClean crashed or was killed while Boost was active, restore state on next launch."""
+    if _boost_live_in_process:
+        return True
     try:
         legacy_env = Path.home() / ".config/environment.d/cyber-boost.conf"
         legacy_env.unlink(missing_ok=True)
@@ -644,12 +661,19 @@ def _recover_stale_boost_on_startup() -> bool:
     if not isinstance(data, dict) or not data:
         _clear_boost_state_disk()
         return True
+    if IS_WINDOWS:
+        # timeBeginPeriod belongs to the requesting process and expires when it
+        # exits. A previous process's request cannot be ended by this process.
+        data.pop('timer_set', None)
     return _restore_boost_state(data)
 
 
 # ══════════════════════════════════════════════════════════════
 # OrbitButton — Collision-Free 3D Orbital Gyroscope Reactor Button
 # ══════════════════════════════════════════════════════════════
+_ORBIT_ROTATION_PERIOD = 3600.0  # Shared phase for the 1.0x and -1.3x rings.
+
+
 class OrbitButton(QPushButton):
     """
     3D Orbital Gyroscope Reactor Button:
@@ -665,11 +689,12 @@ class OrbitButton(QPushButton):
         self._phase    = 0.0
         self._dir      = 1
         self._rot_y    = 0.0
+        self._spin_speed = 15.0
+        self._frame_time = time.monotonic()
         self._rot_x    = 22.0
         self._target_x = 22.0
         self._target_y = 0.0
         self._hover    = False
-        self._intro_ticks = 0
         self.setMouseTracking(True)
         self._timer    = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -681,7 +706,7 @@ class OrbitButton(QPushButton):
         self.setAccessibleName("Toggle system boost")
         self.setStyleSheet("background:transparent;border:none;")
         self._set_side(168)
-        self._timer.start(33)
+        self._timer.start(50)
 
     def _set_side(self, side: int):
         side = max(148, min(196, int(side)))
@@ -691,8 +716,8 @@ class OrbitButton(QPushButton):
         return QSize(168, 168)
 
     def showEvent(self, ev):
-        self._intro_ticks = 0
-        self._timer.start(33)
+        self._frame_time = time.monotonic()
+        self._timer.start(33 if self._active or self._hover else 50)
         super().showEvent(ev)
 
     def hideEvent(self, ev):
@@ -710,7 +735,7 @@ class OrbitButton(QPushButton):
         self._target_x = 22.0
         self._target_y = 0.0
         if self._timer.isActive() and not self._active:
-            self._timer.setInterval(120)
+            self._timer.setInterval(50)
         super().leaveEvent(ev)
 
     def mouseMoveEvent(self, ev):
@@ -724,7 +749,7 @@ class OrbitButton(QPushButton):
     def set_active(self, v: bool):
         self._active = v
         if self.isVisible():
-            self._timer.start(33 if v else 120)
+            self._timer.start(33 if v or self._hover else 50)
         self.update()
 
     def _tick(self):
@@ -735,17 +760,30 @@ class OrbitButton(QPushButton):
         if win is not None and win.isMinimized():
             self._timer.stop()
             return
-        self._intro_ticks += 1
-        if self._intro_ticks > 60 and not self._hover and not self._active and self._timer.interval() != 120:
-            self._timer.setInterval(120)
-        speed = 3.0 if self._active else (1.4 if self._hover else 1.8)
-        self._rot_y = (self._rot_y + speed) % 360.0
-        self._rot_x += (self._target_x - self._rot_x) * 0.14
-        self._phase += self._dir * (0.04 if self._active else 0.025)
-        if self._phase >= 1.0:
+        now = time.monotonic()
+        elapsed = min(0.075, max(0.0, now - self._frame_time))
+        self._frame_time = now
+        target_interval = 33 if self._active or self._hover else 50
+        if self._timer.interval() != target_interval:
+            self._timer.setInterval(target_interval)
+
+        # Drive animation by elapsed time, not frames; a delayed Qt tick no
+        # longer slows the rotation or causes it to jump on the next frame.
+        target_speed = 90.0 if self._active else (42.0 if self._hover else 15.0)
+        self._spin_speed += (target_speed - self._spin_speed) * min(1.0, elapsed * 5.0)
+        self._rot_y = (self._rot_y + elapsed * self._spin_speed) % _ORBIT_ROTATION_PERIOD
+        self._rot_x += (self._target_x - self._rot_x) * min(1.0, elapsed * 4.5)
+
+        phase_speed = 1.2 if self._active else (0.75 if self._hover else 0.2083)
+        next_phase = self._phase + self._dir * phase_speed * elapsed
+        if next_phase >= 1.0:
+            self._phase = 2.0 - next_phase
             self._dir = -1
-        elif self._phase <= 0.0:
+        elif next_phase <= 0.0:
+            self._phase = -next_phase
             self._dir = 1
+        else:
+            self._phase = next_phase
         self.update()
 
     def paintEvent(self, _):
@@ -831,7 +869,7 @@ class OrbitButton(QPushButton):
 
         # Status text cleanly in lower half of sphere (auto-sized so "ĐANG BẬT" never touches border)
         btn_txt = _t("boost_btn_active", "ACTIVE") if self._active else _t("boost_btn_idle", "BOOST")
-        f_btn = QFont("JetBrains Mono" if not IS_WINDOWS else "Cascadia Code")
+        f_btn = mono_font()
         f_btn.setPixelSize(9 if len(btn_txt) > 6 else 10)
         f_btn.setBold(True)
         p.setFont(f_btn)
@@ -843,7 +881,7 @@ class OrbitButton(QPushButton):
         )
 
         # 4 Outer Corner Telemetry Pills (GPU, CPU, RAM, NET) — completely outside the 3D rings!
-        f_tag = QFont("JetBrains Mono" if not IS_WINDOWS else "Cascadia Code")
+        f_tag = mono_font()
         f_tag.setPixelSize(9)
         f_tag.setBold(True)
         p.setFont(f_tag)
@@ -1070,7 +1108,20 @@ class CyberLog(QTextEdit):
             }}
         """)
 
+    def clear(self):
+        self.history = []
+        super().clear()
+
     def append_line(self, msg: str, level: str = "text"):
+        if not hasattr(self, "history"):
+            self.history = []
+        self.history.append((msg, level))
+        del self.history[:-self.MAX_LINES]
+        try:  # dịch các dòng log đã biết (khớp nguyên dòng); lỗi dịch không được làm mất log
+            from utils.i18n import translate_boost_log_line
+            msg = translate_boost_log_line(msg)
+        except Exception:
+            pass
         if self.document().blockCount() > self.MAX_LINES:
             cur = self.textCursor()
             cur.movePosition(QTextCursor.MoveOperation.Start)
@@ -1283,14 +1334,18 @@ class BoostWorker(QThread):
     def __init__(self, fn):
         super().__init__()
         self._fn = fn
+        self.result = None
 
     def run(self):
-        result = self._fn(
-            lambda m, l="text": self.log_sig.emit(m, l),
-            self.phase_sig,
-            self.metric_sig
-        )
-        self.done_sig.emit(result)
+        try:
+            self.result = self._fn(
+                lambda m, l="text": self.log_sig.emit(m, l),
+                self.phase_sig,
+                self.metric_sig
+            )
+        except Exception as exc:
+            self.log_sig.emit(f"  ~ Boost worker failed: {exc}", "err")
+        self.done_sig.emit(self.result)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1309,8 +1364,14 @@ class GameBoostPage(QWidget):
         self._gpu_thread     = None
         self._gpu_baseline   = -1
         self._watcher        = None
+        self._priority_worker = None
+        self._priority_events = []
+        self._shutting_down = False
+        self._inflight_saved = None
         self._status_key     = "standby"
         self._status_col     = C['dim']
+        self._metrics_seen   = {}
+        self._last_phase     = 2
 
         _recover_stale_boost_on_startup()
         atexit.register(self._atexit_cleanup)
@@ -1320,7 +1381,7 @@ class GameBoostPage(QWidget):
         self.setStyleSheet(f"background:{C['bg']};")
         self._compact = None
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 18, 24, 18)
+        root.setContentsMargins(26, 22, 26, 22)
         root.setSpacing(10)
 
         hdr = QHBoxLayout()
@@ -1334,7 +1395,7 @@ class GameBoostPage(QWidget):
         )
         self._sub_lbl = QLabel(_t("boost_hud_sub", "Tactical resource optimizer · automatic state snapshot & restore on exit"))
         self._sub_lbl.setStyleSheet(
-            f"color:{C['text3']};font-size:12px;font-family:{UI};border:none;background:transparent;"
+            f"color:{C['text3']};font-size:13px;font-family:{UI};border:none;background:transparent;"
         )
         self._sub_lbl.setWordWrap(True)
         titles.addWidget(self._title_lbl)
@@ -1385,7 +1446,7 @@ class GameBoostPage(QWidget):
         grid.setRowStretch(0, 1)
         grid.setRowStretch(1, 1)
         self._mc_gpu  = MetricCard(_t("boost_mc_gpu", "GPU BUSY"))
-        self._mc_ram  = MetricCard(_t("boost_mc_ram", "RAM FREED"))
+        self._mc_ram  = MetricCard(_t("boost_mc_ram_delta", "RAM Δ AVAILABLE") if IS_WINDOWS else _t("boost_mc_ram", "RAM FREED"))
         self._mc_bg   = MetricCard(_t("boost_mc_bg", "BACKGROUND"))
         self._mc_game = MetricCard(_t("boost_mc_game", "GAME DETECT"))
         grid.addWidget(self._mc_gpu,  0, 0)
@@ -1431,6 +1492,7 @@ class GameBoostPage(QWidget):
         chk_img_rule = f'image:url("{chk_img}");' if chk_img else ''
         for chk in (self._chk_ram, self._chk_gov, self._chk_prio, self._chk_swap, self._chk_hypr):
             chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.setToolTip(chk.text())   # full label stays readable when the row is too narrow
             chk.setStyleSheet(f"""
                 QCheckBox {{
                     color:{C['text2']}; font-size:12px; font-family:{UI}; font-weight:600;
@@ -1475,15 +1537,24 @@ class GameBoostPage(QWidget):
             self._mc_gpu.set_label(_t("boost_mc_gpu", "GPU BUSY"))
         else:
             self._mc_gpu.set_label(_t("boost_mc_cpu_proxy", "CPU LOAD"))
-        self._mc_ram.set_label(_t("boost_mc_ram", "RAM FREED"))
+        self._mc_ram.set_label(_t("boost_mc_ram_delta", "RAM Δ AVAILABLE") if IS_WINDOWS else _t("boost_mc_ram", "RAM FREED"))
         self._mc_bg.set_label(_t("boost_mc_bg", "BACKGROUND"))
         self._mc_game.set_label(_t("boost_mc_game", "GAME DETECT"))
+        if IS_WINDOWS and self._mc_ram._val.text() != "—":
+            self._mc_ram._delta.setText(_t("boost_mc_ram_observed", "observed system change"))
+            self._mc_ram.setToolTip(_t('boost_mc_ram_tip', 'Before/after available RAM across all workloads; not memory attributable to Boost.'))
+        if self._mc_bg._val.text() == "0 procs":
+            self._mc_bg._delta.setText(_t("boost_standby", "standby"))
+        if self._mc_game._val.text() == "0 PIDs":
+            self._mc_game._delta.setText(_t("boost_no_game", "no game"))
         self._lbl_profile.setText(_t("boost_profile_lbl", "ACTIVE MODULES:"))
         self._chk_ram.setText(_t("boost_mod_ram", "Compact / Free RAM"))
         self._chk_gov.setText(_t("boost_mod_gov", "CPU Performance Mode"))
         self._chk_prio.setText(_t("boost_mod_prio", "Process Priority (Nice)"))
         self._chk_swap.setText(_t("boost_mod_swap", "Low Swappiness"))
         self._chk_hypr.setText(_t("boost_mod_hypr", "Hyprland VFR / Scanout"))
+        for _chk in (self._chk_ram, self._chk_gov, self._chk_prio, self._chk_swap, self._chk_hypr):
+            _chk.setToolTip(_chk.text())
         self._btn_shader.setText(f"◈ {_t('btn_clear_cache', 'CLEAR SHADER CACHE')}")
         self._btn_bloat.setText(f"✕ {_t('btn_kill_bloat', 'SUSPEND BLOAT')}")
         self._phases.retranslate()
@@ -1530,7 +1601,7 @@ class GameBoostPage(QWidget):
 
     # ── Standalone One-Shot Tools ─────────────────────────────
     def _run_one_shot(self, fn):
-        if self._transitioning or (self._tool_worker is not None and self._tool_worker.isRunning()):
+        if self._shutting_down or self._transitioning or (self._tool_worker is not None and self._tool_worker.isRunning()):
             return
         self._btn_shader.setEnabled(False)
         self._btn_bloat.setEnabled(False)
@@ -1561,7 +1632,7 @@ class GameBoostPage(QWidget):
 
     # ── Toggle Boost ──────────────────────────────────────────
     def _toggle(self):
-        if self._transitioning:
+        if self._shutting_down or self._transitioning:
             return
         self._transitioning = True
         self._btn.setEnabled(False)
@@ -1572,6 +1643,7 @@ class GameBoostPage(QWidget):
 
     def _start(self):
         self._active = True
+        _set_boost_live(True)
         self._btn.set_active(True)
         self._phases.set_phase(0)
         self._set_status("scanning", C['yellow'])
@@ -1591,14 +1663,25 @@ class GameBoostPage(QWidget):
         self._worker = BoostWorker(lambda log, p, m: self._boost_logic(log, p, m, opts))
         self._worker.log_sig.connect(lambda m, l: self._log.append_line(m, l))
         self._worker.phase_sig.connect(self._phases.set_phase)
+        self._worker.phase_sig.connect(self._remember_phase)
         self._worker.metric_sig.connect(self._on_metric)
         self._worker.done_sig.connect(self._on_done)
         self._worker.start()
 
+    def _remember_phase(self, idx):
+        if isinstance(idx, int) and idx >= 0:
+            self._last_phase = idx
+
     def _on_done(self, saved):
         prior = _merge_unrestored_state(_load_boost_state_disk(), self._saved_state)
-        self._saved_state   = _merge_unrestored_state(prior, saved or {})
+        self._saved_state   = _merge_unrestored_state(prior, saved or self._inflight_saved or {})
+        self._inflight_saved = None
         _save_boost_state_disk(self._saved_state)
+        if self._shutting_down:
+            return
+        self._begin_monitoring()
+
+    def _begin_monitoring(self):
         self._transitioning = False
         self._btn.setEnabled(True)
         self._set_status("monitoring", C['cyan'])
@@ -1615,8 +1698,17 @@ class GameBoostPage(QWidget):
 
     # ── STOP & SHUTDOWN ───────────────────────────────────────
     def _stop(self):
+        self._transitioning = True
+        self._priority_events.clear()
         self._set_status("restoring", C['yellow'])
         self._log.append_line("├─ RESTORE ────────────────────────────────", "warn")
+        if IS_WINDOWS:
+            from utils.windows_workers import drain_threads
+            for thread in (self._gpu_thread, self._watcher):
+                if thread:
+                    thread.stop()
+            drain_threads([self._gpu_thread, self._watcher, self._priority_worker])
+            self._gpu_thread = self._watcher = self._priority_worker = None
         if self._gpu_thread:
             self._gpu_thread.stop()
             self._gpu_thread.wait(1500)
@@ -1646,8 +1738,12 @@ class GameBoostPage(QWidget):
 
     def _on_restore_done(self, ok):
         self._active        = False
+        self._inflight_saved = None
         if ok:
             self._saved_state = None
+            _set_boost_live(False)
+        if self._shutting_down:
+            return
         self._transitioning = False
         self._btn.set_active(False)
         self._btn.setEnabled(True)
@@ -1674,6 +1770,23 @@ class GameBoostPage(QWidget):
 
     def shutdown(self):
         """Synchronous teardown called by MainWindow._shutdown() on application exit."""
+        self._shutting_down = True
+        self._priority_events.clear()
+        if IS_WINDOWS:
+            from utils.windows_workers import drain_threads
+            for thread in (self._gpu_thread, self._watcher):
+                if thread:
+                    thread.stop()
+            drain_threads([self._gpu_thread, self._watcher, self._worker,
+                           self._tool_worker, self._priority_worker])
+            self._gpu_thread = self._watcher = self._priority_worker = None
+            # Queued done_sig may not have reached the page yet. The final
+            # worker state is available only after its cooperative completion.
+            result = getattr(self._worker, 'result', None)
+            if isinstance(result, dict):
+                self._saved_state = _merge_unrestored_state(self._saved_state, result)
+            if isinstance(self._inflight_saved, dict):
+                self._saved_state = _merge_unrestored_state(self._saved_state, self._inflight_saved)
         if self._gpu_thread:
             self._gpu_thread.stop()
             self._gpu_thread.wait(1500)
@@ -1693,14 +1806,85 @@ class GameBoostPage(QWidget):
             else:
                 self._saved_state = pending
             self._active = False
+        if self._saved_state is None:
+            _set_boost_live(False)
+
+    # ── Hand-over to a rebuilt page (theme switch) ────────────
+    def can_hand_over(self) -> bool:
+        """A running Boost can move to a new page only while it is idle-monitoring (not applying/restoring)."""
+        pw = self._priority_worker
+        return (self._active and not self._transitioning and not self._shutting_down
+                and not (pw is not None and pw.isRunning()))
+
+    def export_runtime(self):
+        """Detach a live Boost WITHOUT restoring anything: stop only the monitor threads and return the state
+        a freshly built page needs (adopt_runtime) to carry on. System tweaks stay applied."""
+        if not self.can_hand_over():
+            return None
+        self._priority_events.clear()
+        monitors = [t for t in (self._gpu_thread, self._watcher) if t]
+        for t in monitors:
+            t.stop()
+        if IS_WINDOWS:
+            from utils.windows_workers import drain_threads
+            drain_threads(monitors)
+        else:
+            for t in monitors:
+                t.wait(1500)
+        self._gpu_thread = self._watcher = None
+        snap = {
+            "saved_state": self._saved_state,
+            "opts": {k: c.isChecked() for k, c in (
+                ("ram", self._chk_ram), ("gov", self._chk_gov), ("prio", self._chk_prio),
+                ("swap", self._chk_swap), ("hypr", self._chk_hypr))},
+            "log": list(getattr(self._log, "history", [])),
+            "metrics": dict(self._metrics_seen),
+            "phase": self._last_phase,
+        }
+        try:
+            atexit.unregister(self._atexit_cleanup)   # the new page owns the state now
+        except Exception:
+            pass
+        self._shutting_down = True      # make this orphan inert: late signals are ignored
+        self._saved_state = None
+        self._active = False
+        return snap
+
+    def adopt_runtime(self, snap):
+        """Continue a Boost handed over by export_runtime() on this (new) page."""
+        if not snap:
+            return
+        self._active = True
+        _set_boost_live(True)
+        self._saved_state = snap.get("saved_state")
+        for key, chk in (("ram", self._chk_ram), ("gov", self._chk_gov), ("prio", self._chk_prio),
+                         ("swap", self._chk_swap), ("hypr", self._chk_hypr)):
+            chk.setChecked(bool(snap.get("opts", {}).get(key, chk.isChecked())))
+            chk.setEnabled(False)
+        self._log.clear()
+        for msg, level in snap.get("log", []):
+            self._log.append_line(msg, level)
+        self._btn.set_active(True)
+        self._last_phase = snap.get("phase", 2)
+        self._phases.set_phase(self._last_phase)
+        for key, value in snap.get("metrics", {}).items():
+            self._on_metric(key, value)
+        self._begin_monitoring()
+        self.boost_toggled.emit(True)
 
     # ── Game found / lost handlers ────────────────────────────
     def _on_game_found(self, pids: list, name: str, all_known_pids: list = None):
+        if self._shutting_down or self._transitioning or not self._active:
+            return
         all_game_pids = set(all_known_pids) if all_known_pids else set(pids)
         self._mc_game.set_value(f"{len(pids)} PIDs", name[:12], 80, C['purple'])
         self._mc_game.set_lit(True)
         if not self._chk_prio.isChecked():
             self._log.append_line(f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok")
+            return
+        if IS_WINDOWS:
+            self._priority_events.append(('found', list(pids), name, list(all_game_pids)))
+            self._start_priority_event()
             return
 
         boosted = 0
@@ -1771,7 +1955,77 @@ class GameBoostPage(QWidget):
         else:
             self._log.append_line(f"  ◈ Game detected: {name} ({len(pids)} PIDs)", "ok")
 
+    def _start_priority_event(self):
+        """Serialize native priority work outside the GUI and before restoration."""
+        if self._shutting_down or self._transitioning or not self._active or not self._priority_events:
+            return
+        if self._priority_worker is not None and self._priority_worker.isRunning():
+            return
+        kind, pids, name, all_pids = self._priority_events.pop(0)
+        saved = self._saved_state
+        if not isinstance(saved, dict):
+            return
+
+        def work(log, _phase, _metric):
+            import psutil as psu
+            if kind == 'lost':
+                restored = _restore_process_priorities(saved, log)
+                _save_boost_state_disk(saved)
+                return dict(kind=kind, restored=restored)
+            boosted = bg_count = 0
+            for pid in pids[:8]:
+                try:
+                    boosted += bool(_apply_game_nice(psu.Process(pid), pid, saved))
+                except (psu.NoSuchProcess, psu.AccessDenied, OSError, ValueError):
+                    continue
+            skip_set = _get_boost_skip_set()
+            for proc in psu.process_iter(['pid', 'name']):
+                try:
+                    if _should_skip_bg_proc(proc, skip_set, set(all_pids)):
+                        continue
+                    original = proc.nice()
+                    if original != psu.NORMAL_PRIORITY_CLASS:
+                        continue
+                    rec = _record_proc_nice_entry(proc, original)
+                    if not rec['name'] or not rec['create_time']:
+                        continue
+                    saved.setdefault('bg_nice', {}).setdefault(proc.pid, rec)
+                    proc.nice(psu.BELOW_NORMAL_PRIORITY_CLASS)
+                    bg_count += 1
+                except (psu.NoSuchProcess, psu.AccessDenied, OSError, ValueError):
+                    continue
+            _save_boost_state_disk(saved)
+            return dict(kind=kind, boosted=boosted, bg_count=bg_count, name=name)
+
+        self._priority_worker = BoostWorker(work)
+        self._priority_worker.log_sig.connect(self._log.append_line)
+        self._priority_worker.done_sig.connect(self._on_priority_done)
+        self._priority_worker.finished.connect(self._start_priority_event)
+        self._priority_worker.start()
+
+    def _on_priority_done(self, result):
+        if self._shutting_down or self._transitioning or not self._active or not result:
+            return
+        if result['kind'] == 'lost':
+            self._log.append_line('  ○ Game ended — restored process priorities', 'mute')
+            self._mc_game.set_value('0 PIDs', _t('boost_no_game', 'no game'), 0, C['text3'])
+            self._mc_game.set_lit(False)
+            self._mc_bg.set_value('0 procs', _t('boost_standby', 'standby'), 0, C['text3'])
+            self._mc_bg.set_lit(False)
+        else:
+            count = result['bg_count']
+            self._log.append_line(
+                f"  + {result['boosted']} game process(es) → ABOVE_NORMAL; {count} background → BELOW_NORMAL", 'ok')
+            self._mc_bg.set_value(f'{count} procs', 'BELOW_NORMAL', min(100, count*4), C['yellow'])
+            self._mc_bg.set_lit(bool(count))
+
     def _on_game_lost(self):
+        if self._shutting_down or self._transitioning or not self._active:
+            return
+        if IS_WINDOWS:
+            self._priority_events.append(('lost', [], '', []))
+            self._start_priority_event()
+            return
         restored = 0
         if isinstance(self._saved_state, dict):
             restored = _restore_process_priorities(
@@ -1784,12 +2038,19 @@ class GameBoostPage(QWidget):
             self._log.append_line(f"  + Restored priority for {restored} processes", "ok")
         self._mc_game.set_value("0 PIDs", _t("boost_no_game", "no game"), 0, C['text3'])
         self._mc_game.set_lit(False)
-        self._mc_bg.set_value("0 procs", "standby", 0, C['text3'])
+        self._mc_bg.set_value("0 procs", _t("boost_standby", "standby"), 0, C['text3'])
         self._mc_bg.set_lit(False)
 
     # ── Metrics / GPU ──────────────────────────────────────────
     def _on_metric(self, key, value):
+        self._metrics_seen[key] = value
         if key == "ram_freed_mb":
+            if IS_WINDOWS:
+                self._mc_ram.set_label(_t("boost_mc_ram_delta", "RAM Δ AVAILABLE"))
+                self._mc_ram.set_value(f"{value:+.0f} MB", _t("boost_mc_ram_observed", "observed system change"), 0, C['cyan'])
+                self._mc_ram.setToolTip(_t('boost_mc_ram_tip', 'Before/after available RAM across all workloads; not memory attributable to Boost.'))
+                self._mc_ram.set_lit(True)
+                return
             mb = int(value)
             if mb > 0:
                 self._mc_ram.set_value(f"{mb} MB", f"+{mb} MB", min(100, mb / 5), C['cyan'])
@@ -1798,6 +2059,10 @@ class GameBoostPage(QWidget):
             self._mc_ram.set_lit(True)
         elif key == "bg_count":
             n = int(value)
+            if n == 0:
+                self._mc_bg.set_value("0 procs", _t("boost_standby", "standby"), 0, C['text3'])
+                self._mc_bg.set_lit(False)
+                return
             bg_lbl = "BELOW_NORMAL" if IS_WINDOWS else "nice +5"
             self._mc_bg.set_value(f"{n} procs", bg_lbl, min(100, n * 4), C['yellow'])
             self._mc_bg.set_lit(True)
@@ -1806,6 +2071,9 @@ class GameBoostPage(QWidget):
             if pids:
                 self._mc_game.set_value(f"{len(pids)} PIDs", "", 80, C['purple'])
                 self._mc_game.set_lit(True)
+            else:
+                self._mc_game.set_value("0 PIDs", _t("boost_no_game", "no game"), 0, C['text3'])
+                self._mc_game.set_lit(False)
 
     def _on_gpu(self, pct: int):
         if pct < 0:
@@ -1841,6 +2109,7 @@ class GameBoostPage(QWidget):
             opts = {"ram": True, "gov": True, "prio": True, "swap": True, "hypr": True}
         prior_unrestored = _merge_unrestored_state(_load_boost_state_disk(), getattr(self, "_saved_state", None))
         saved = dict(prior_unrestored)
+        self._inflight_saved = saved
 
         # ── PHASE 0: SCAN ──────────────────────────────────────
         phase_sig.emit(0)
@@ -1922,6 +2191,7 @@ class GameBoostPage(QWidget):
             metric_sig.emit("game_pids", game_pids)
         else:
             log("│  ◈ no active game — watcher will boost on launch", "mute")
+            metric_sig.emit("game_pids", [])   # để thẻ NHẬN DIỆN GAME hiện trạng thái chờ thay vì "—"
 
         # ── PHASE 1: APPLY ─────────────────────────────────────
         phase_sig.emit(1)
@@ -1941,7 +2211,7 @@ class GameBoostPage(QWidget):
                 from core.booster import free_ram
                 res = free_ram(_tlog)
                 mb  = getattr(res, "mb_freed", 0) or 0
-                metric_sig.emit("ram_freed_mb", mb if mb > 10 else -1)
+                metric_sig.emit("ram_freed_mb", mb if IS_WINDOWS else (mb if mb > 10 else -1))
             except Exception as e:
                 log(f"│  ~ free_ram: {e}", "warn")
 
@@ -1965,8 +2235,8 @@ class GameBoostPage(QWidget):
                     if not os.environ.get("WAYLAND_DISPLAY"):
                         _bypass_compositor_on(_tlog, saved)
                 elif IS_WINDOWS:
-                    t_set = _timer_resolution_set(_tlog)
-                    saved["timer_set"] = bool(saved.get("timer_set") or t_set)
+                    if not saved.get("timer_set"):
+                        saved["timer_set"] = _timer_resolution_set(_tlog)
                     dvr_orig = _disable_gamedvr(_tlog)
                     if saved.get("gamedvr_orig") is None:
                         saved["gamedvr_orig"] = dvr_orig
@@ -2069,8 +2339,11 @@ class GameBoostPage(QWidget):
                         o = p.nice()
                         if IS_WINDOWS:
                             if o == _psu.NORMAL_PRIORITY_CLASS:
+                                rec = _record_proc_nice_entry(p, o)
+                                if not rec['name'] or not rec['create_time']:
+                                    continue
+                                saved.setdefault("bg_nice", {}).setdefault(p.pid, rec)
                                 p.nice(_psu.BELOW_NORMAL_PRIORITY_CLASS)
-                                saved.setdefault("bg_nice", {})[p.pid] = _record_proc_nice_entry(p, o)
                                 bg_count += 1
                         else:
                             if o < 5:
@@ -2088,8 +2361,10 @@ class GameBoostPage(QWidget):
                 metric_sig.emit("bg_count", bg_count)
             except ImportError:
                 pass
-        elif opts.get("prio", True):
-            log("│  i no game yet — background priority left untouched until launch", "mute")
+        else:
+            if opts.get("prio", True):
+                log("│  i no game yet — background priority left untouched until launch", "mute")
+            metric_sig.emit("bg_count", 0)     # để thẻ TIẾN TRÌNH NỀN hiện trạng thái chờ thay vì "—"
 
         saved["game_pids"] = game_pids
         _save_boost_state_disk(saved)

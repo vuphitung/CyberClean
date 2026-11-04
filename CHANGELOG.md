@@ -1,107 +1,603 @@
-# Changelog
+# CyberClean 3.2.0 --- Engineering Improvement Plan
 
-## 3.1.0 (Post-Audit Verified Fixes — Stages 1–4)
+**Document type:** Release hardening / technical roadmap\
+**Target version:** CyberClean 3.2.0\
+**Priority:** Safety, recoverability, security, release confidence\
+**Status:** Proposed plan based on the initial review of
+`CyberClean.zip`
 
-### Stage 1 — Critical Safety, Compatibility & Restoration Fixes
-- **Python 3.10 & 3.11 Startup Crash Fixed (`core/rules.py`)**: Removed PEP 701 backslash inside f-string expression in `_chromium_running()` that caused immediate `SyntaxError` on Python < 3.12.
-- **Auto-Clean Default OFF & Hard Trash Exclusion (`main.py`, `core/base_cleaner.py`)**: Background Auto-Clean now defaults to **OFF** (`False`), includes an explicit toggle on the Dashboard header and System Tray menu, and enforces `NEVER_UNATTENDED_TARGETS` so `empty_trash` and `win_recycle` can never be scheduled or run unattended.
-- **System Booster Deterministic State Capture & Crash-Safe Restore (`core/game_boost_widget.py`, `core/booster.py`, `main.py`)**:
-  - Captures exact original Linux CPU governor/profile (`powerprofilesctl get`, `tuned-adm active`, or sysfs governor including `powersave` on `intel_pstate`) and restores it via `_restore_kernel_performance()` and `smart_boost_off()`.
-  - Captures original Hyprland `misc:vfr` and `misc:no_direct_scanout` values via `hyprctl getoption` before modifying them, and restores both on stop/exit.
-  - Stopped writing persistent `~/.config/environment.d/cyber-boost.conf` (and cleans up any legacy file), preventing session-wide Mesa/RADV side effects across reboots.
-  - Persists active boost state to `boost_state.json` for automatic crash recovery on next launch, and hooks `GameBoostPage.shutdown()` into `MainWindow._shutdown()` and `atexit`.
-- **Safe Local Uninstaller (`install.sh`)**: Replaced `curl -sSL .../main/install.sh | sudo bash -s -- --uninstall` in `/usr/local/bin/cyberclean` with a self-contained local uninstall routine.
-- **Packaging Completeness (`build.py`, `CyberClean.spec`, `CyberClean.iss`, `VERSION`)**: Bundled `packaging/cyber-clean-helper`, `VERSION`, `ui_widgets.py`, `ui_pages.py`, `core.game_boost_widget`, and `rules/*.toml` across `.deb`, `.AppImage`, `.tar.gz`, source `.zip`, and PyInstaller `.spec`; removed hardcoded `/home/tung/...` icon path; synchronized `CyberClean.iss` to `3.1.0`.
+------------------------------------------------------------------------
 
-### Stage 2 — Reliability & Performance Improvements
-- **Non-Blocking Dashboard Refresh (`main.py`, `ui_widgets.py`)**: Clicking `REFRESH` wakes `SysInfoWorker` immediately via `threading.Event` (`force_refresh()`) instead of blocking the Qt GUI thread with synchronous `get_snapshot()`.
-- **Bounded Animation Timer in `DiskDeltaWidget` (`ui_widgets.py`)**: Stopped the 16ms (~60 FPS) timer from running indefinitely in the background; it now runs only during the 1.4s reveal animation after a scan/clean and stops when hidden.
-- **Clean Tab Locked-App Badge (`ui_widgets.py`, `main.py`)**: Emits `target_status` when a target's application is running and displays a `🔒 LOCKED` badge with tooltip on the Clean tab.
-- **Granular Windows Review & Dynamic Uninstaller Source Filters (`core/windows_cleaner.py`, `main.py`)**: `WindowsCleaner.review_scan()` and `review_clean()` now expose individual items for Prefetch, Shader Cache, and Crash Dumps; the Uninstaller tab dynamically builds source filter buttons (`ALL`, `PACMAN`/`APT`/`FLATPAK`/`WINGET`/`REGISTRY`) matching the current OS.
-- **Regression Test Suite (`tests/test_stage1_stage2_regressions.py`)**: Added 14 regression tests verifying all Stage 1–3 fixes.
+## 1. Release objective
 
-### Stage 3 — UI/UX & Wayland / Hyprland Refinements
-- **Cyber Utility Design Tokens & QFrame Selector Scoping (`ui_widgets.py`, `main.py`, `core/game_boost_widget.py`)**: Scoped all card and container stylesheets (`QFrame#cyberCard`, `QFrame#statCard`, `QFrame#topHeader`, `QFrame#leftSidebar`, `QFrame#diskPanel`) with `QLabel{border:none;background:transparent;}` to eliminate unwanted inner label borders.
-- **Configurable Boost Profile & Full EN/VI Translation (`core/game_boost_widget.py`, `utils/i18n.py`)**: Added interactive module checkboxes (`Compact/Free RAM`, `CPU Performance Mode`, `Process Priority`, `Low Swappiness`, `Hyprland VFR/Scanout`) and one-shot tools (`Clear Shader Cache`, `Suspend Bloat`), with 100% English and Vietnamese translation support (`retranslate()`).
-- **Wayland & Hyprland Tiling Support (`main.py`, `ui_widgets.py`, `ui_pages.py`)**: Added `app.setDesktopFileName('cyberclean')`, single-click (`Trigger`) System Tray activation for Waybar/SNI trays, lowered minimum window size to `880x620`, and added automatic Compact Rail sidebar collapse (`60px`) when window width is `< 980px`.
+CyberClean 3.2.0 should prioritize making existing system-level
+operations safer and more recoverable rather than adding many new
+features.
 
-## 3.1.0
+The release should aim to:
 
-Security hardening of the root helper and updater, a rewrite of the cleaning pipeline (plan → preview →
-guarded execute), and the three-tier model **AUTO / REVIEW / ADVISOR**.
+1.  Prevent unintended deletion when filesystem objects change during a
+    cleanup operation.
+2.  Recover system settings reliably if Boost is interrupted, the
+    application crashes, or the machine loses power.
+3.  Strengthen the trust chain from installer download through
+    privileged installation and update.
+4.  Reduce unnecessary privilege exposure.
+5.  Establish repeatable automated tests and release checks on Windows
+    and Linux.
 
-### ⚠ Release / migration checklist (read before tagging)
+**Release principle:** No cleanup or optimization feature should leave
+the operating system in a worse state when an operation fails halfway
+through.
 
-1. Build with `python3 build.py --linux` — the tarball now carries `cyber-clean-helper` and `VERSION` next to
-   the executable (required by `install.sh` and by the helper's `update-apply`). Sign it with `sign_release.py`
-   and upload the tarball **and** its `.sig`.
-2. Publish the GitHub release **before** merging the new `install.sh` to `main`: it installs the *latest release*
-   and refuses releases that do not ship the helper.
-3. Existing 3.0.x users: the in-app update still works (the old updater uses the old helper once). After the
-   first start of 3.1.0 a banner appears in the Clean tab — **UPDATE HELPER** (asks for the admin password via
-   polkit) or simply re-run `install.sh`. Until then Linux root targets keep working through the old helper,
-   but the in-app updater of 3.1.0 refuses to run through an outdated helper.
-4. `tomli` is only needed when running from source on Python < 3.11.
+## 2. Priority overview
 
-### Verification of the 3.0.3 audit report
+  ----------------------------------------------------------------------------------
+  ID             Priority       Area            Improvement        Release gate
+  -------------- -------------- --------------- ------------------ -----------------
+  CC32-01        P0             Boost recovery  Durable            Must pass
+                                                write-ahead        crash-injection
+                                                recovery journal   tests
 
-| # | Report item | Result |
-|---|-------------|--------|
-| 1 | Helper path traversal (`..`) | **Confirmed, fixed.** `case` patterns let `*` match `/` and `..`. Paths are now canonicalised, must be symlink-free, inside `/var/log` / `/var/crash` / coredump, under root-owned non-group/other-writable directories, regular files, not modified in the last hour. Tests: `tests/test_helper.py`. |
-| 2 | `user_cache` (tier *safe*) deleted dev caches | **Confirmed, fixed.** Replaced by an allow-list (rules) + a REVIEW-tier `app_cache`; regression test `test_user_cache_regression_dev_caches_not_deleted_by_safe_tier`. |
-| 3 | `tmp_files` missing guards | **Confirmed, fixed.** Age = newest file *inside* the item; sockets/FIFOs, other users' files, mounts, open files and well-known runtime dirs (`.X11-unix`, `tmux-*`, `ssh-*`, `.mount_*`…) are skipped; RAM-backed `/tmp` is skipped. |
-| 4 | "paccache missing → no error" was wrong | **Confirmed, fixed.** The estimate said 0 B and a real clean said "Need root". It now reports `paccache not found — install pacman-contrib` in both modes. |
-| 5 | `docker volume prune` | **Confirmed, fixed.** Volumes are individual REVIEW items (risk HIGH, never pre-ticked, never touched unless ticked). |
-| 6 | `pacman-remove` option injection | **Tested with a fake pacman — injection is real** (`--hookdir=…` would run hooks as root; the orphan path also word-split `$pkgs`). Fixed: names must match `^[A-Za-z0-9][A-Za-z0-9+._:@-]{0,127}$`, one package per call, `--` before names, core packages refused, orphan list re-checked against `pacman -Qdtq`. |
-| 7 | Auto-clean ran every "safe" target incl. Trash | **Confirmed, fixed.** `empty_trash` is REVIEW; the scheduler runs only `tier == auto and scheduled`, and `clean(..., unattended=True)` re-checks that. |
-| 8 | No pacman lock guard | **Confirmed, fixed.** Helper refuses while `db.lck` exists / pacman runs; `aur_cache` is blocked while yay/paru/makepkg/pacman/fakeroot run. |
-| 9 | Helper `stop-service "$2"` | **Removed** (it had no caller). |
-| 10 | Uninstaller can remove core packages | **Confirmed, fixed.** Same protected list in the UI (🔒) and in the helper; a helper refusal no longer falls back to `sudo pacman -Rns`. |
-| 11 | Confirm dialog does not say "permanent" | **Fixed.** Both dialogs say it; the Review dialog defaults to *Cancel* and names HIGH-risk items. |
-| 12 | `one-click-fix` uses `drop_caches` | `one-click-fix` / `drop-cache` were dead helper code (no caller) — removed. |
-| 13 | `booster.py` `sudo -n tee oom_score_adj` never runs | **Confirmed** (`<<<` is not in `/bin/sh`, sudoers allows only the helper). Branch removed on purpose. |
-| 14 | Widget killer: 0.4 s of CPU sampling | **Fixed.** Current user's processes only, ignore < 8 s old, 0.3 s pre-check, then 4 consecutive samples above 85 % (~2 s), SIGTERM → wait → SIGKILL. |
-| 15 | Unused `_disk_free_before`/`disk_after`; "freed" maybe not measured | **Confirmed.** History's `disk_after` always equalled `disk_before`, and totals were plan/estimate numbers. Now measured with `shutil.disk_usage`; History stores `planned_bytes` and `measured_bytes`; Btrfs/ZFS snapshot warning. |
-| 16 | `sudo python3 main.py` → `Path.home()` may be `/root` | **Confirmed as a risk.** `real_home()` / `real_uid()` resolve `SUDO_*`/`PKEXEC_UID`; the hint to start the GUI with sudo was removed. |
+  CC32-02        P0             Windows cleaner Handle-based       Must pass
+                                                deletion and       race-condition
+                                                reparse-point      tests
+                                                protection         
 
-### More defects found while fixing
+  CC32-03        P1             Installer       Authenticate the   Must verify
+                                security        bootstrap          before privileged
+                                                installer          execution
 
-**Security**
-- `update-replace SRC DST BACKUP` gave every process of a sudo-group user an arbitrary *root copy / `rm -rf` / move* primitive (instant root). Replaced by `update-apply`: root-side Ed25519 re-verification on a private copy, symlink-escape check, mandatory newer `VERSION`, atomic swap with rollback. The old flow also had a TOCTOU between signature check and install (staging was user-writable).
-- `install.sh`: fixed `/tmp/CyberClean.tar.gz` (symlink attack as root), no signature check, extracted over the previous install (stale files), wrote a sudoers rule *before* validating it, hard-coded fallback version `3.0.1`. Now: random root-owned work dir, Ed25519 verification, atomic swap, rule written via temp file + `visudo -c`, version pinned/validated.
-- `apt-remove "$2"`/`dnf-remove "$2"` accepted option-looking names (`-o…`, `--setopt`).
-- `snap-remove-rev` arguments were unvalidated.
-- `ensure_privileged_session()` tested `sudo -n true` — impossible to pass with a helper-only sudoers rule (it would ask for a password even when everything was configured). Now uses a harmless `ping` action.
-- Uninstaller fallback `sudo pacman -Rns …` bypassed the helper's protections on machines with broad sudo.
+  CC32-04        P1             Privileged      Review             Must pass
+                                helper          sudoers/Polkit     authorization
+                                                authorization      tests
+                                                boundary           
 
-**Correctness**
-- `journal`: the user-level `journalctl --vacuum` ran first and the privileged helper only on a non-zero exit. Whether an unprivileged vacuum exits non-zero depends on the systemd version (not verified here), so the root path was unreliable. It now always goes through the helper and the result is measured.
-- `crash_reports`: bytes freed for root-owned dumps were always 0.
-- `pacman_broken`: pacman ≥ 6 uses `download-*/` *directories* (counted as 4096 B, `find -delete` could not remove them).
-- `docker` estimate added total + reclaimable; `flatpak` counted header lines and guessed sizes; `snap_old` estimated "25 % of /var/lib/snapd".
-- `remove_dir_contents` counted symlink targets as freed and hid failures (`rmtree(ignore_errors=True)`); Go's read-only module cache could not be removed.
-- `empty_trash`: `rglob` walked entire external drives; stale `directorysizes`.
-- AUR cleanup deleted `vcs.json` (yay forgets `-git` package state).
-- `paccache -rk1` → keeps 2 versions (downgrade path).
-- `safe_delete()` reported success for a symlink it could not remove.
-- Kill-process dialog never appeared and the button stayed disabled: `QTimer.singleShot` from a plain Python thread never fires — now a `QThread` signal.
-- Booster `_run_helper` fell back to running a command literally named `swappiness` (not the helper action) when sudo/helper were unavailable and the app ran as root.
-- Windows: one-click "Clear TEMP" ran `del /q /f /s %TEMP%\*` (no age/lock/junction guards); thumbcache reported delayed deletions as errors *and* as freed; `dosvc` was stopped and never restarted; Delivery Optimization removed its own root folder (service ACLs); Windows Update cache was cleaned while an update was installing.
+  CC32-05        P1             CI/testing      Automated          Required checks
+                                                Windows/Linux test must pass
+                                                matrix             
 
-### New
+  CC32-06        P1             Build system    Remove             Clean build on
+                                                machine-specific   another machine
+                                                paths from         
+                                                packaging          
 
-- **Three tiers, three pages.** The Clean tab keeps only the AUTO tier (ticked, may run unattended) plus a one-line pointer. The other two tiers got their own sidebar pages instead of being squeezed into Clean:
-  - **DEEP CLEAN** (REVIEW tier): categories on the left, every item on the right, risk labels, high-risk warnings shown in full, nothing pre-ticked, "select all" skips high-risk rows, every delete asks first (default Cancel), results + measured free space shown inline, "scan all" for a total.
-  - **DISK ADVISOR** (ADVISOR tier): read-only report with summary tiles, a share-of-disk bar, per-category cards, "open folder" and "copy report"; no delete button exists on the page (a test enforces it).
-  - Also fixed on the way: Qt reads `#RRGGBBAA` as ARGB, so the app's `{color}40`-style borders/backgrounds were never translucent (they rendered pink or invisible) — the new pages use `rgba()`; labels inside rows no longer inherit the row's border; Vietnamese had two different buttons both called "XEM TRƯỚC" (DRY-RUN is now "CHẠY THỬ").
-- **Engine** (`core/engine.py`): plan → preview → re-validated execute; guards for age, running app (process list, `SingletonLock`, `--user-data-dir`, Flatpak `bwrap`), open files, symlinks/junctions, mount points, sockets/FIFOs, owner, hard links; measured free space; Btrfs/ZFS snapshot warning. Missing `psutil` fails closed.
-- **Declarative rules** (`rules/*.toml`, `~/.config/cyber-clean/rules.d/`): one Chromium/Electron rule (all profiles; `Cache`, `Code Cache`, `GPUCache`, `DawnCache`, `Service Worker/CacheStorage`… — never Cookies / Local Storage / IndexedDB), Firefox incl. Snap/Flatpak, Flatpak app caches, developer caches, thumbnails, pip, temp, AUR.
-- **Distro coverage**: `ID_LIKE` detection, Fedora Atomic/Bazzite (`rpm-ostree`), NixOS, Alpine, `dnf autoremove`, Flatpak user + system. `tests/containers/` holds a per-distro dry-run harness.
-- **Vietnamese** names/descriptions for every target and rule note.
+  CC32-07        P2             Architecture    Split oversized    No behavior
+                                                modules by         regression
+                                                responsibility     
 
-### Known limits
+  CC32-08        P2             Observability   Structured         Logs must not
+                                                operation and      expose secrets
+                                                recovery logs      
 
-- Windows-only code paths (DISM, services, `wevtutil`, MoveFileEx) were not executed on a real Windows host; the engine, tiers, rules and guards are unit-tested on Linux.
-- `tests/containers/run_matrix.sh` (docker/podman wrapper) was not executed where this release was prepared; the harness it runs is covered by `tests/test_containers_harness.py`.
-- pacman, dnf, zypper, xbps, apk, snap, flatpak and docker were exercised against fakes (recorded argv / canned output), never against the real tools.
-- The GUI was rendered and exercised with Qt's offscreen platform, not on a real desktop session.
+  CC32-09        P2             Documentation   Publish support    Documentation
+                                                matrix and safety  matches tested
+                                                limitations        behavior
+
+  CC32-10        P2             Release process Reproducible       Release
+                                                artifacts,         verification
+                                                checksums and      succeeds
+                                                signatures         
+  ----------------------------------------------------------------------------------
+
+P0 items are release blockers for the affected functionality. If they
+are not completed, disable or clearly restrict the affected feature
+rather than shipping it as fully safe.
+
+------------------------------------------------------------------------
+
+## 3. Detailed work items
+
+### CC32-01 --- Make Boost recovery crash-safe
+
+**Priority:** P0\
+**Relevant files:** `core/booster.py`, `core/game_boost_widget.py`
+
+#### Current concern
+
+The existing implementation has state persistence and stale-state
+recovery mechanisms, which is a good foundation. However, state
+persistence is not consistently guaranteed before every system mutation.
+A direct JSON `write_text()` operation can also be interrupted and leave
+an incomplete state file.
+
+Cleanup callbacks are useful for normal shutdown, but they cannot be
+relied on for hard crashes, forced termination, kernel failure or power
+loss.
+
+#### Required improvements
+
+1.  Capture the original state of every setting before changing it.
+2.  Persist a write-ahead journal before the first system mutation.
+3.  Write journal updates using a temporary file in the same directory,
+    flush, `fsync`, and atomic replacement.
+4.  Record each operation with a stable ID, target, original value,
+    intended value and status.
+5.  Mark an operation complete only after verifying the resulting system
+    state.
+6.  On startup, detect incomplete transactions and offer or perform safe
+    recovery according to a documented policy.
+7.  Make restoration idempotent: running recovery more than once must
+    not cause additional damage.
+8.  Preserve the journal until recovery is verified; do not delete it
+    merely because a restore command was attempted.
+9.  Handle partial failure: report which settings were restored and
+    which require manual intervention.
+10. Ensure concurrent Boost sessions cannot overwrite each other's
+    state.
+
+#### Suggested journal model
+
+-   `schema_version`
+-   `transaction_id`
+-   `created_at`
+-   `updated_at`
+-   `platform`
+-   `application_version`
+-   `status`: `prepared`, `applying`, `restoring`, `recovered`,
+    `needs_attention`
+-   `operations[]`:
+    -   `operation_id`
+    -   `subsystem`
+    -   `target`
+    -   `original_value`
+    -   `requested_value`
+    -   `status`
+    -   `last_error`
+
+Do not store credentials, tokens or other secrets in the journal.
+
+#### Acceptance tests
+
+-   Kill the application after each individual system mutation.
+-   Simulate a failed journal write.
+-   Simulate a failed system mutation.
+-   Restart after an incomplete transaction.
+-   Run recovery twice and verify idempotency.
+-   Verify that a failed restore retains enough information for
+    diagnosis.
+-   Verify that a new Boost session cannot start while an unresolved
+    transaction exists, unless an explicit safe policy allows it.
+
+**Definition of done:** Every Boost mutation is preceded by durable
+recovery information, and crash-injection tests demonstrate recovery or
+a clear `needs_attention` state.
+
+------------------------------------------------------------------------
+
+### CC32-02 --- Harden Windows cleanup against filesystem races
+
+**Priority:** P0\
+**Relevant file:** `core/engine.py`, especially
+`_remove_tree_windows_verified()`
+
+#### Current concern
+
+The Windows deletion path relies on path-based checks followed by
+path-based deletion. An object may be replaced between validation and
+deletion (a TOCTOU race). Reparse points and junctions also require
+careful handling.
+
+#### Required improvements
+
+1.  Use Windows file handles to identify and operate on the validated
+    filesystem object.
+2.  Open objects with reparse-point-aware flags and inspect their
+    attributes and final identity.
+3.  Verify volume and file identity using handle-based metadata where
+    supported.
+4.  Refuse unexpected reparse points, junctions, mount points and device
+    paths.
+5.  Revalidate the object immediately before deletion.
+6.  Avoid following links during recursive traversal.
+7.  Ensure cleanup roots are canonicalized and constrained to explicitly
+    approved locations.
+8.  Fail closed when identity verification is unavailable or ambiguous.
+9.  Keep dry-run and preview behavior aligned with actual execution
+    behavior.
+10. Record skipped objects and reasons without exposing sensitive file
+    contents.
+
+Implementation should use a carefully reviewed Windows API wrapper
+rather than scattered low-level calls throughout the cleaner.
+
+#### Acceptance tests
+
+-   Replace a directory with a junction between scan and delete.
+-   Replace a file with a symlink/reparse point between validation and
+    delete.
+-   Attempt traversal outside the approved cleanup root.
+-   Test locked files, access denied, long paths and Unicode paths.
+-   Test mount points and volume boundaries.
+-   Confirm that a race causes a safe skip, not deletion of an
+    unexpected target.
+
+**Definition of done:** Windows cleanup uses object identity and
+reparse-point protections, and adversarial race tests demonstrate safe
+failure.
+
+------------------------------------------------------------------------
+
+### CC32-03 --- Secure the installer bootstrap
+
+**Priority:** P1\
+**Relevant file:** `install.sh`
+
+#### Current concern
+
+The installer bootstrap is downloaded and executed with elevated
+privileges. Verifying the application package later in the script does
+not authenticate the bootstrap script that has already begun running.
+
+#### Required improvements
+
+1.  Publish a signed installer or a small independently verifiable
+    bootstrap.
+2.  Document how users obtain the trusted public key.
+3.  Verify the installer signature before running privileged operations.
+4.  Pin trusted release metadata and reject unsigned or invalid
+    metadata.
+5.  Avoid executing mutable content from a branch such as `main` as
+    root.
+6.  Use secure temporary directories and restrictive file permissions.
+7.  Validate archive paths before extraction to prevent path traversal.
+8.  Ensure failed verification stops installation immediately.
+9.  Document key rotation and compromised-key response.
+10. Keep installation logs useful but free of secrets.
+
+#### Acceptance tests
+
+-   Modified installer must fail verification.
+-   Modified release metadata must fail verification.
+-   Invalid or unknown signing key must fail closed.
+-   Archive containing path traversal entries must be rejected.
+-   Interrupted installation must not leave unsafe permissions or
+    partially trusted binaries.
+
+**Definition of done:** The bootstrap is authenticated before privileged
+execution, and tampering tests fail safely.
+
+------------------------------------------------------------------------
+
+### CC32-04 --- Reduce privileged-helper exposure
+
+**Priority:** P1\
+**Relevant files:** `packaging/cyber-clean-helper`,
+`core/privileged.py`, installer authorization configuration
+
+#### Current concern
+
+The helper already uses an allowlist-oriented design, which is
+preferable to accepting arbitrary shell commands. However, a broad
+passwordless sudo rule increases the impact of any vulnerability in the
+helper or its argument validation.
+
+#### Required improvements
+
+1.  Review every helper action and classify its risk.
+2.  Keep the action allowlist narrow and reject unknown actions.
+3.  Validate argument types, lengths, paths and package identifiers at
+    the privileged boundary.
+4.  Never pass user-controlled strings to a shell.
+5.  Consider Polkit for interactive authorization of sensitive actions.
+6.  If sudoers remains supported, use the narrowest feasible command and
+    argument policy.
+7.  Ensure helper binaries and parent directories are not writable by
+    unprivileged users.
+8.  Protect against symlink replacement of helper configuration and
+    executable paths.
+9.  Add authorization audit events for sensitive operations.
+10. Ensure helper errors do not leak secrets or internal environment
+    data.
+
+#### Acceptance tests
+
+-   Unknown action is rejected.
+-   Extra or malformed arguments are rejected.
+-   Shell metacharacters are treated as data, never commands.
+-   Untrusted paths and symlink swaps are rejected.
+-   Unauthorized users cannot perform privileged actions.
+-   Helper cannot be replaced or modified by an unprivileged account.
+
+**Definition of done:** Every privileged operation has a documented
+authorization rule and negative tests proving unauthorized requests are
+rejected.
+
+------------------------------------------------------------------------
+
+### CC32-05 --- Establish a cross-platform CI test matrix
+
+**Priority:** P1
+
+#### Required improvements
+
+Create automated CI workflows that run on clean environments.
+
+Suggested matrix:
+
+  -----------------------------------------------------------------------
+  Platform                Python                  Required checks
+  ----------------------- ----------------------- -----------------------
+  Ubuntu Linux            Supported project       Compile, lint, unit
+                          version(s)              tests, helper tests
+
+  Windows                 Supported project       Compile, lint, unit
+                          version(s)              tests, cleaner safety
+                                                  tests
+
+  macOS                   Supported project       Compile, lint, portable
+                          version(s), if          unit tests
+                          officially supported    
+  -----------------------------------------------------------------------
+
+The exact Python versions and operating-system versions must match the
+project's declared support policy.
+
+#### CI stages
+
+1.  Dependency installation from pinned or constrained dependencies.
+2.  Python compile check.
+3.  Lint and formatting checks.
+4.  Unit tests.
+5.  Platform-specific tests.
+6.  Security-focused tests.
+7.  Build/package smoke test.
+8.  Artifact and signature verification.
+
+GUI tests should run with the required Qt dependencies and a suitable
+headless display strategy where appropriate.
+
+#### Acceptance tests
+
+-   CI runs from a clean checkout.
+-   A missing dependency causes a clear failure.
+-   Test skips are reported with reasons.
+-   Platform-specific tests are not silently skipped on the platform
+    they are intended to validate.
+-   Release branches cannot publish artifacts when required checks fail.
+
+**Definition of done:** A clean checkout can be tested and built through
+documented automated workflows on every officially supported platform.
+
+------------------------------------------------------------------------
+
+### CC32-06 --- Make packaging independent of the developer's machine
+
+**Priority:** P1\
+**Relevant file:** `CyberClean.spec`
+
+#### Current concern
+
+The spec file contains a developer-machine-specific absolute Windows
+path for the icon. This can break builds on another machine.
+
+#### Required improvements
+
+1.  Resolve assets relative to the spec file's directory.
+2.  Validate that required assets exist before starting the build.
+3.  Keep build configuration out of personal user directories.
+4.  Pin build dependencies.
+5.  Build in a clean environment.
+6.  Record build version, commit identifier and dependency versions.
+7.  Test the produced package on a clean machine or VM.
+
+#### Acceptance tests
+
+-   Build succeeds after moving the repository to a different directory.
+-   Build succeeds on a second Windows machine or clean CI runner.
+-   Missing assets produce a clear error.
+-   No personal absolute paths remain in packaging configuration.
+
+**Definition of done:** The release package can be built from a clean
+checkout without relying on the original developer's filesystem.
+
+------------------------------------------------------------------------
+
+### CC32-07 --- Refactor oversized modules incrementally
+
+**Priority:** P2\
+**Relevant files:** `core/booster.py`, `main.py`, `ui_widgets.py`,
+`core/game_boost_widget.py`, `utils/i18n.py`, `core/engine.py`
+
+#### Suggested direction
+
+  Existing responsibility          Suggested module boundary
+  -------------------------------- ------------------------------
+  CPU scheduling and priority      `core/boost/cpu.py`
+  GPU settings and detection       `core/boost/gpu.py`
+  Service management               `core/boost/services.py`
+  Boost state and recovery         `core/boost/recovery.py`
+  Platform-specific cleanup        `core/cleaner/platform/`
+  Cleanup planning and execution   `core/cleaner/engine.py`
+  UI presentation                  `ui/` or existing UI package
+
+These are suggested boundaries, not mandatory filenames.
+
+#### Rules
+
+-   Do not combine a large refactor with a safety-critical behavior
+    change.
+-   Preserve public interfaces while extracting modules.
+-   Add regression tests before moving code.
+-   Keep platform-specific operations behind explicit interfaces.
+-   Avoid circular imports.
+
+**Definition of done:** Each extracted module has a clear responsibility
+and the existing regression suite remains green.
+
+------------------------------------------------------------------------
+
+### CC32-08 --- Improve logs and diagnostics
+
+**Priority:** P2
+
+#### Required improvements
+
+1.  Use structured logs with timestamp, severity, component and
+    operation ID.
+2.  Record cleanup decisions: planned, skipped, completed and failed.
+3.  Record Boost transaction and recovery outcomes.
+4.  Distinguish user cancellation, permission denial, unsupported
+    operation and internal failure.
+5.  Add log rotation and bounded disk usage.
+6.  Redact secrets, tokens, personal paths and sensitive command
+    arguments where appropriate.
+7.  Provide an exportable diagnostic report with user consent.
+
+**Definition of done:** A failed operation can be diagnosed from logs
+without exposing sensitive user data.
+
+------------------------------------------------------------------------
+
+### CC32-09 --- Clarify support and safety documentation
+
+**Priority:** P2
+
+Update documentation to state:
+
+-   Officially supported operating systems and versions.
+-   Supported Python versions.
+-   Which features are read-only and which modify the system.
+-   Which actions require Administrator/root privileges.
+-   What Boost changes and how restoration works.
+-   What cleanup categories can and cannot be safely removed.
+-   Known limitations for Windows reparse points and Linux filesystem
+    behavior.
+-   How to recover after an interrupted operation.
+-   How signatures and trusted keys are verified.
+-   Which tests run in CI and which require real hardware.
+
+Do not describe a feature as fully tested on a platform unless it has
+actually been exercised there.
+
+------------------------------------------------------------------------
+
+### CC32-10 --- Formalize the release process
+
+**Priority:** P2
+
+#### Required release checklist
+
+-   [ ] Version and changelog updated.
+-   [ ] Clean CI matrix passes.
+-   [ ] P0 safety tests pass.
+-   [ ] Installer bootstrap signature verifies.
+-   [ ] Application package signature verifies.
+-   [ ] Checksums generated and published.
+-   [ ] Windows package installed and launched in a clean VM.
+-   [ ] Linux package installed and launched in a clean VM.
+-   [ ] Upgrade from the previous supported version tested.
+-   [ ] Uninstall tested.
+-   [ ] Recovery after interrupted Boost tested.
+-   [ ] No secrets, local paths or development artifacts included.
+-   [ ] Known limitations documented.
+-   [ ] Rollback/revocation procedure documented.
+
+------------------------------------------------------------------------
+
+## 4. Recommended implementation order
+
+### Sprint 1 --- Safety and recovery
+
+-   CC32-01: Boost recovery journal.
+-   CC32-02: Windows cleaner hardening.
+-   Add crash-injection and filesystem race tests.
+-   Temporarily disable unsafe paths if a fix cannot be completed.
+
+### Sprint 2 --- Privilege and supply-chain security
+
+-   CC32-03: Installer bootstrap authentication.
+-   CC32-04: Privileged helper authorization review.
+-   Add tampering and authorization tests.
+
+### Sprint 3 --- Repeatable builds and quality gates
+
+-   CC32-05: Cross-platform CI.
+-   CC32-06: Portable packaging.
+-   Add clean VM smoke tests.
+
+### Sprint 4 --- Maintainability and release readiness
+
+-   CC32-07: Incremental module extraction.
+-   CC32-08: Structured diagnostics.
+-   CC32-09: Documentation.
+-   CC32-10: Release checklist and final validation.
+
+Sprint boundaries can be adjusted to the available development time. Do
+not defer P0 safety work in favor of UI polish or new optimization
+features.
+
+------------------------------------------------------------------------
+
+## 5. Release acceptance criteria
+
+CyberClean 3.2.0 should not be declared production-ready until all
+applicable criteria below are met:
+
+1.  **Boost recovery:** Every system mutation has durable recovery
+    information written before execution.
+2.  **Crash safety:** Forced termination at each transaction stage
+    results in verified restoration or a clear manual-recovery state.
+3.  **Windows deletion safety:** Reparse-point and race-condition tests
+    demonstrate that cleanup cannot escape approved roots.
+4.  **Privilege boundary:** Every helper action is allowlisted,
+    validated and authorization-tested.
+5.  **Installer integrity:** The bootstrap and application artifacts are
+    authenticated before privileged installation.
+6.  **Cross-platform quality:** Required CI checks pass on all
+    officially supported platforms.
+7.  **Build portability:** A clean checkout builds without
+    developer-specific absolute paths.
+8.  **Operational visibility:** Failures and recovery outcomes are
+    diagnosable without leaking secrets.
+9.  **Documentation accuracy:** Every platform and feature claim is
+    supported by actual test evidence.
+10. **Release rollback:** A failed update or installation has a
+    documented recovery path.
+
+A feature that does not meet its safety criteria should be disabled,
+restricted or clearly marked experimental in 3.2.0.
+
+------------------------------------------------------------------------
+
+## 6. Scope control --- what should not be prioritized in 3.2.0
+
+To keep this release focused, defer the following unless they are
+required to fix a confirmed defect:
+
+-   Major visual redesign.
+-   New optimization toggles.
+-   More aggressive automatic cleanup categories.
+-   Large-scale rewrite of the application.
+-   Unnecessary framework migration.
+-   Performance claims without repeatable benchmarks.
+
+The goal of 3.2.0 is not to have the most features. It is to make the
+existing features safer, predictable and verifiable.
+
+## 7. Final recommendation
+
+Treat CyberClean 3.2.0 as a **stability and security release**.
+
+The first two engineering tasks should be:
+
+1.  Make Boost recovery durable and crash-safe.
+2.  Make Windows deletion operate on verified filesystem objects rather
+    than relying only on path-based checks.
+
+After those are addressed, harden the installer and privileged helper,
+then establish CI and clean-machine release testing.
+
+**Suggested release message:**\
+"CyberClean 3.2.0 focuses on system-operation safety, crash recovery,
+installer integrity, privilege boundaries and cross-platform
+reliability."
+
+------------------------------------------------------------------------
+
+**Important review note:** This plan is based on the initial source
+review and test execution available for the supplied ZIP. It is an
+engineering action plan, not a claim that every listed issue is
+exploitable or that the proposed fixes have already been implemented.
+Re-test each item against the exact 3.2.0 source and supported operating
+systems before release.

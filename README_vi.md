@@ -1,6 +1,11 @@
 <div align="center">
 
-```
+<!-- Animated Cyber Wave Banner -->
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:060911,50:00c8e0,100:c060f0&height=120&section=header&animation=fadeIn" width="100%" alt="header" />
+
+<img src="assets/logo.png" width="96" alt="Logo CyberClean">
+
+```text
  ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗
 ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║
 ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝    ██║     ██║     █████╗  ███████║██╔██╗ ██║
@@ -9,309 +14,258 @@
  ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝
 ```
 
-**Công cụ Dọn dẹp & Tối ưu Hiệu năng Hệ thống**
+<!-- Animated Typing SVG (No emojis, pure terminal style) -->
+<a href="https://github.com/vuphitung/CyberClean">
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=18&duration=3000&pause=1000&color=00E5FF&center=true&vCenter=true&width=750&lines=Smart+System+Cleaner+%26+Performance+Optimizer;Tr%C3%ACnh+D%E1%BB%8Dn+R%C3%A1c+%26+T%E1%BB%91i+%C6%AFu+H%E1%BB%87+Th%E1%BB%91ng+Cho+Windows+%26+Linux;Gi%C3%A1m+S%C3%A1t+Th%E1%BB%9Di+Gian+Th%E1%BB%B1c+%C2%B7+D%E1%BB%8Dn+S%C3%A2u+3+T%E1%BA%A7ng+%C2%B7+Game+Booster;Ki%E1%BA%BFn+Tr%C3%BAc+Rule-Driven+%C2%B7+Ho%C3%A0n+T%C3%A1c+An+To%C3%A0n+%C2%B7+Zero+Telemetry" alt="Typing SVG" />
+</a>
+
+**Tiện ích desktop cho Windows và Linux: giám sát hệ thống, dọn dẹp ổ đĩa, báo cáo dung lượng, gỡ ứng dụng và bộ tăng tốc tùy chọn.**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-41CD52?style=flat-square&logo=qt&logoColor=white)](https://pypi.org/project/PyQt6/)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20Linux-Hỗ%20trợ-00c8e0?style=flat-square)](https://github.com/vuphitung/CyberClean/releases/latest)
-[![License](https://img.shields.io/badge/Giấy%20phép-MIT-f0c040?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/vuphitung/CyberClean?style=flat-square&color=c060f0)](https://github.com/vuphitung/CyberClean/releases/latest)
+[![Platform](https://img.shields.io/badge/Windows%20%7C%20Linux-supported-00c8e0?style=flat-square&logo=linux&logoColor=white)](#hỗ-trợ-nền-tảng)
+[![License](https://img.shields.io/badge/License-GPL--3.0-f0c040?style=flat-square&logo=gnu&logoColor=white)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/vuphitung/CyberClean?style=flat-square&color=c060f0&logo=github)](https://github.com/vuphitung/CyberClean/releases/latest)
+[![Version](https://img.shields.io/badge/version-3.1.0-A47DFF?style=flat-square)](CHANGELOG.md)
 
-🌐 **Ngôn ngữ / Language:** [English](README.md) · **Tiếng Việt**
+<br>
+
+<a href="README.md"><img src="https://img.shields.io/badge/LANG-ENGLISH-334155?style=for-the-badge&labelColor=0E1626" alt="English"></a>&nbsp;&nbsp;<a href="README_vi.md"><img src="https://img.shields.io/badge/LANG-TI%E1%BA%BENG_VI%E1%BB%86T-00E5FF?style=for-the-badge&labelColor=0E1626" alt="Tiếng Việt"></a>
 
 </div>
 
-## Cài đặt
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
 
-### Linux
+## Cài đặt nhanh (Quick Installation)
+
+<table>
+<tr>
+<td width="52%" valign="top">
+
+### <img src="https://cdn.simpleicons.org/linux/00E5FF" width="18" height="18" align="absmiddle" /> &nbsp;Linux
+
+<p>
+  <img src="https://img.shields.io/badge/Arch-1793D1?style=flat-square&logo=archlinux&logoColor=white" alt="Arch">
+  <img src="https://img.shields.io/badge/Ubuntu-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu">
+  <img src="https://img.shields.io/badge/Debian-A81D33?style=flat-square&logo=debian&logoColor=white" alt="Debian">
+  <img src="https://img.shields.io/badge/Fedora-51A2DA?style=flat-square&logo=fedora&logoColor=white" alt="Fedora">
+  <img src="https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white" alt="openSUSE">
+</p>
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
-
-Cài vào `/opt/CyberClean` · tạo lệnh `cyberclean` · đăng ký app vào launcher · thiết lập helper đặc quyền có phạm vi giới hạn.
+Cài vào `/opt/CyberClean` · đăng ký lệnh `cyberclean` · thiết lập helper đặc quyền có phạm vi giới hạn.
 
 **Gỡ cài đặt:**
 ```bash
 sudo cyberclean --uninstall
 ```
 
-### Windows
+</td>
+<td width="48%" valign="top">
 
-**[⬇ Tải CyberClean cho Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
+### <img src="https://img.shields.io/badge/-Windows_10_%2F_11-0078D6?style=flat-square&logo=windows&logoColor=white" height="22" align="absmiddle" />
 
-Chỉ hỏi UAC một lần lúc cài. Gỡ qua `Cài đặt → Ứng dụng → CyberClean`.
+<div align="center">
+<br>
+<a href="https://github.com/vuphitung/CyberClean/releases/latest">
+  <img src="https://img.shields.io/badge/T%E1%BA%A2I_B%E1%BB%98_C%C3%80I_WINDOWS-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Tải CyberClean cho Windows" />
+</a>
+<br><br>
+</div>
 
----
+**[Tải CyberClean cho Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-## Screenshots
+Chỉ hỏi quyền UAC ở lần cài đầu tiên. Gỡ qua **Settings → Apps → CyberClean**.
 
-<p align="center">
-  <img src="screenshots/dashboard.png" width="100%">
-</p>
----
+</td>
+</tr>
+</table>
 
-<p align="center">
-  <img src="screenshots/clean.png" width="100%">
-</p>
----
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
 
-<p align="center">
-  <img src="screenshots/uninstaller.png" width="100%">
-</p>
----
+## Giới thiệu
 
-<p align="center">
-  <img src="screenshots/history.png" width="100%">
-</p>
----
+CyberClean hiển thị số liệu hệ thống theo thời gian thực, tìm các tệp có thể dọn, báo cáo dung lượng đã đi đâu, gỡ ứng dụng, và có thể áp dụng một bộ tinh chỉnh hiệu năng có thể hoàn tác khi bạn chơi game hoặc làm việc. Ứng dụng viết bằng PyQt6, có giao diện tối và sáng, ngôn ngữ tiếng Anh và tiếng Việt.
 
-<p align="center">
-  <img src="screenshots/booster.png" width="100%">
-</p>
----
+Mục dọn chỉ gồm tệp và cache. CyberClean không phải phần mềm diệt virus và không dọn registry. Hiệu năng phụ thuộc vào máy và khối lượng công việc; ứng dụng không hứa hẹn mức tăng tốc cụ thể.
+
+## Ảnh chụp màn hình
+
+*Windows 10, giao diện tối.*
+
+**Dashboard** — số liệu trực tiếp, bảo trì một chạm, tiến trình nặng nhất, dung lượng từng ổ
+<img src="screenshots/dashboard.png" alt="Dashboard" width="100%">
+
+**Clean** — cache có thể tạo lại, xem trước (dry-run), ước tính dung lượng giải phóng
+<img src="screenshots/clean.png" alt="Clean" width="100%">
+
+**Deep Clean** — từng mục do bạn tự chọn
+<img src="screenshots/deep-clean.png" alt="Deep Clean" width="100%">
+
+**Disk Advisor** — dung lượng đã đi đâu (chỉ báo cáo)
+<img src="screenshots/disk-advisor.png" alt="Disk Advisor" width="100%">
+
+**Uninstaller**
+<img src="screenshots/uninstaller.png" alt="Uninstaller" width="100%">
+
+**History** và **Audit log**
+<img src="screenshots/history.png" alt="History" width="100%">
+<img src="screenshots/audit-log.png" alt="Audit log" width="100%">
+
+**System Booster**
+<img src="screenshots/booster.png" alt="System Booster" width="100%">
+
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
 
 ## Tính năng
 
-### [◈] Bảng điều khiển
-Thống kê hệ thống thời gian thực, tự làm mới mỗi 4 giây.
+### Dashboard
+- CPU, RAM, nhiệt độ (khi có cảm biến), bộ nhớ commit (Windows) hoặc swap (Linux), lưu lượng mạng, biểu đồ lịch sử CPU/RAM và thời gian chạy; làm mới sau vài giây.
+- Danh sách tiến trình nặng nhất kèm nút Kill, dung lượng đã dùng/còn trống của từng ổ.
+- **Tối ưu một chạm** — Windows: xóa cache DNS, xóa tệp tạm, thu gọn working set, TRIM SSD. Linux: giải phóng cache, chỉnh `vm.swappiness`, `fstrim`, dọn journal cũ.
+- *Load index* là chỉ số ước tính từ CPU, RAM, ổ đĩa, nhiệt độ và swap. Đó không phải phần trăm CPU, không phải dữ liệu SMART và không chẩn đoán sức khỏe ổ đĩa.
 
-- CPU / RAM / Swap / Nhiệt độ / Lưu lượng mạng
-- Danh sách tiến trình nặng, tắt ngay một click
-- Dung lượng ổ đĩa từng phân vùng
-- Thời gian hoạt động
+### Clean
+Các mục có thể tự tạo lại, được tích sẵn. *Dry-run* cho xem chính xác những gì sẽ bị xóa trước khi bấm *Clean now*.
 
----
+| Hệ điều hành | Mục dọn |
+|---|---|
+| Windows | Windows Temp, cache trình duyệt Chromium và ứng dụng Electron (Chrome, Edge, Brave, Opera, Vivaldi, Cốc Cốc, VS Code, Discord, Slack…), cache Firefox, cache ảnh thu nhỏ, Windows Error Reports, cache DNS |
+| Linux | Cache trình quản lý gói (apt, pacman, dnf, zypper, xbps, apk, rpm-ostree), journal và log hệ thống cũ, báo cáo crash, cache trình duyệt và Electron, ảnh thu nhỏ, cache pip, tệp tạm |
 
-### [✦] Dọn dẹp Thông minh — ba tầng, ba trang
-CyberClean không đoán xem thứ gì xóa được. Mỗi mục thuộc một trong ba tầng, và mỗi tầng có **trang riêng** trên thanh bên:
+Cache trình duyệt được bỏ qua kèm ghi chú nếu trình duyệt đang chạy.
 
-| Tầng | Trang | Gồm | Cách hoạt động |
-|------|-------|-----|----------------|
-| **AUTO** (tự động) | **DỌN RÁC** | Thứ luôn tái tạo được: cache trình duyệt & app Electron, thumbnail, log đã xoay vòng, cache trình quản lý gói, journal, file tạm cũ, crash dump | Tick sẵn · là tầng DUY NHẤT được phép chạy nền khi máy rảnh |
-| **REVIEW** (xem lại) | **DỌN SÂU** | Thứ *có thể* quan trọng: gói mồ côi, cache lập trình, image/volume Docker, phần thừa của Flatpak/Snap, thư mục lạ trong `~/.cache`, Thùng rác | Danh mục bên trái, từng mục bên phải — **không mục nào được tick sẵn**, "chọn hết" bỏ qua mục rủi ro cao (lời cảnh báo hiện đầy đủ), mỗi lần xóa đều hỏi lại (mặc định: Hủy) · không bao giờ chạy nền |
-| **ADVISOR** (tư vấn) | **TƯ VẤN Ổ ĐĨA** | Dung lượng *thật sự* đi đâu: máy ảo, thư viện game, `/opt`, gói nặng, file lớn, `node_modules`/`target`/venv của dự án cũ, Downloads, ổ WSL | **Chỉ báo cáo** — thẻ tổng quan, thanh tỷ lệ dung lượng, thẻ theo danh mục, "mở thư mục" và "sao chép báo cáo"; không có nút xóa |
+### Deep Clean
+Những mục có thể quan trọng. **Không có mục nào được chọn sẵn**, "select all" bỏ qua các dòng rủi ro cao, và mỗi lần xóa đều hỏi xác nhận (mặc định: Cancel). Deep Clean không bao giờ chạy nền.
 
-Một lần dọn diễn ra thế nào (Linux và Windows dùng chung `core/engine.py`):
+- Windows: Recycle Bin, Prefetch, cache Windows Update, Delivery Optimization, cache font, cache shader GPU, dọn WinSxS, Event Logs, crash dump, cache lập trình (npm, yarn, pnpm, pip, NuGet, Gradle, Maven, Cargo, Go, JetBrains…).
+- Linux: gói mồ côi/không còn dùng (apt, pacman, dnf, xbps), Nix garbage collection, cache lập trình, các thư mục `~/.cache` khác, Thùng rác, và — nếu đã cài — Docker/Podman, runtime Flatpak không dùng, bản cũ của Snap.
 
-1. **Lập plan** — quét một lần ra danh sách mục cụ thể (dung lượng thật, hardlink tính đúng).
-2. **Xem trước** — Dry-run hiển thị đúng plan đó.
-3. **Thực thi** — chạy *chính plan đó*, nhưng kiểm tra lại từng mục ngay trước khi xóa: bị thay mới? đã sửa kể từ lúc quét? app chủ vừa mở lại? Cái gì đã đổi thì bị bỏ qua, không bao giờ bị xóa.
+### Disk Advisor
+Chỉ báo cáo — không có nút xóa. Gom nhóm những nơi chiếm nhiều dung lượng nhất: tệp hệ thống Windows (`Windows.old`, `pagefile.sys`, `hiberfil.sys`, cache Installer), Downloads, tệp lớn, máy ảo và ổ WSL, thư viện game, thư mục `node_modules` / `target` / virtualenv cũ, container, `/opt`, các gói nặng nhất. Có thể mở dòng trong trình quản lý tệp và sao chép báo cáo.
 
-Các hàng rào áp cho mọi thứ: tuổi (không đụng ≥ N ngày + không bao giờ đụng thứ vừa sửa trong 10 phút) · app sở hữu phải đã tắt (danh sách tiến trình, `SingletonLock` của Chromium, `--user-data-dir`) · file/thư mục không đang được tiến trình nào mở · không bao giờ đi theo symlink/junction · không băng qua mount point · thư mục chứa socket/FIFO (trạng thái runtime đang sống như `/tmp/.X11-unix`, `tmux-*`, `ssh-*`) bị bỏ qua · file của user khác bị bỏ qua.
+### Uninstaller
+- Windows: chương trình đã cài đọc từ Registry, bổ sung thông tin từ `winget`.
+- Linux: pacman, apt, dnf, zypper, xbps và Flatpak; các gói lõi của hệ thống được bảo vệ.
+- Chọn nhiều ứng dụng, có log tiến trình trực tiếp. Trên Windows danh sách không bị lọc, nên hãy kiểm tra kỹ (driver, runtime) trước khi gỡ.
 
-Dung lượng trống được đo bằng `shutil.disk_usage` trước/sau. Nếu ổ là Btrfs/ZFS, app cảnh báo rằng snapshot có thể vẫn giữ dung lượng — xóa xong chưa chắc giải phóng ngay.
+### History và Audit log
+*History* ghi lại dung lượng ổ trước/sau mỗi phiên và dung lượng đã giải phóng. *Audit log* ghi lại những gì đã bị xóa (đường dẫn, loại, kích thước). Cả hai là tệp cục bộ; tệp đã xóa không được giữ để khôi phục.
 
-**Linux** — pacman / apt / dnf / zypper / xbps / apk / rpm-ostree (Fedora Atomic, Bazzite) / Nix · cache AUR build · Flatpak (user + system) · Docker/Podman · Snap · journal · trình duyệt (mọi trình duyệt Chromium và app Electron bằng MỘT luật — Chrome, Brave, Edge, Vivaldi, Opera, VS Code, Cursor, Discord, Slack…; Firefox kể cả bản Snap/Flatpak) · pip · thumbnail · file tạm.
+### System Booster
+Áp dụng tinh chỉnh khi bạn yêu cầu và **lưu trạng thái gốc trước**. Trạng thái được khôi phục khi bạn tắt Boost hoặc đóng ứng dụng, và được phục hồi ở lần mở kế tiếp nếu ứng dụng bị tắt đột ngột.
 
-**Windows** — Temp, Thumbnail DB, báo cáo WER, DNS flush (auto) · Thùng rác, Prefetch, Windows Update / Delivery Optimization, Font & GPU shader cache, WinSxS, Event log, crash dump (review, mỗi cái một mục phải tick rõ ràng) · cache trình duyệt theo cùng luật Chromium/Firefox · cache lập trình (npm, NuGet, Gradle, Maven, Cargo, Go, JetBrains…).
+- Windows: yêu cầu độ phân giải timer 1 ms, tắt GameDVR, thiết lập fullscreen DirectX/DWM, ưu tiên cho game được phát hiện, giảm ưu tiên tiến trình nền (EcoQoS trên Windows 11), dọn cache GPU của trình duyệt.
+- Linux: CPU governor / power profile, tinh chỉnh bộ nhớ, ưu tiên tiến trình, tùy chọn Hyprland khi đang chạy Hyprland.
+- Bộ dò game chỉ nâng ưu tiên khi game đang chạy. Log ghi rõ khi một lợi ích chưa được đo.
 
-> **Lưu ý Windows** — các lệnh chỉ có trên Windows (DISM, dịch vụ, `wevtutil`) không đổi và chưa chạy thử được trong môi trường test; engine, tầng, luật và hàng rào đều có unit test.
+### Khay hệ thống và Auto-clean
+Auto-clean **tắt theo mặc định**. Khi bật, chỉ chạy các mục `AUTO` được đánh dấu cho phép chạy định kỳ, chỉ khi máy rảnh, tối đa 6 giờ một lần, và chỉ khi ứng dụng đang mở hoặc nằm ở khay. Không bao giờ đụng tới Recycle Bin hoặc Thùng rác. Nếu Auto-clean tắt, đóng cửa sổ là thoát ứng dụng.
 
-#### Luật dạng khai báo, không phải code
-Các mục dạng đường dẫn nằm trong [`rules/linux.toml`](rules/linux.toml) và [`rules/windows.toml`](rules/windows.toml). Một luật là dữ liệu (`paths`, `mode`, `min_age_days`, `closed`, `keep`, `tier`…) — thêm một app chỉ là PR 6 dòng, dễ review. Luật cá nhân đặt ở `~/.config/cyber-clean/rules.d/*.toml`; chúng bị ép vào tầng **REVIEW**, chỉ được trỏ vào trong thư mục home của bạn và không bao giờ chạy nền.
+### Cập nhật và quyền riêng tư
+Ứng dụng kiểm tra GitHub Releases để biết bản mới và không cài gì nếu bạn chưa bấm. Bản tải về được xác minh bằng chữ ký Ed25519 tích hợp trong ứng dụng. Không có telemetry hay analytics; kiểm tra cập nhật là kết nối mạng duy nhất.
 
----
+## Cách việc dọn dẹp được giữ có kiểm soát
 
-### [⚡] System Booster
-Tối ưu hiệu năng không gây crash. Mọi thay đổi đều có thể hoàn tác hoàn toàn.
-
-- **Giải phóng RAM** — nén bộ nhớ không cần dùng mà không ảnh hưởng page cache
-- **Memory Tune** — swappiness / vm params (Linux) · trim working set tiến trình nhàn rỗi (Windows)
-- **Kill Bloat** — loại bỏ tiến trình zombie và ngốn RAM nhưng không làm gì
-- **Xóa GPU / Shader Cache** — mesa, NVIDIA, Chrome, Edge
-- **[◈] Game Mode** — CPU jail 3 tầng, dồn toàn bộ tài nguyên cho app foreground
-- **[~] Eco Mode** — cgroups v2 (Linux) · EcoQoS + memory priority (Windows 11)
-- **[★] Smart Boost** — tự phân loại máy (High / Mid / Low) theo RAM + core + GPU VRAM
-- **Tắt TCP Nagle** — giảm ping game online (Windows)
-- **Timer Resolution 1ms** — frame mượt hơn (Windows)
-
----
-
-### [≡] Gỡ cài đặt ứng dụng
-- **Windows** — đọc từ registry Add/Remove Programs (không dùng `wmic`)
-- **Linux** — tích hợp pacman / apt / dnf
-- Hiển thị dung lượng, phiên bản, nguồn cài
-- Gỡ nền với log tiến trình trực tiếp
-
----
-
-### [↺] Lịch sử & Log xóa
-- Mỗi phiên dọn dẹp được ghi vào `~/.local/share/cyber-clean/history.jsonl`
-- Audit trail đầy đủ: đường dẫn, kích thước, loại của từng file bị xóa
-- Xem dung lượng đã giải phóng theo từng phiên
-
----
-
-### [↑] Tự động cập nhật
-Kiểm tra GitHub Releases lúc khởi động (chạy nền, không block UI) — chỉ hiện badge, không tự tải/tự cài nếu chưa bấm. Update cần bấm xác nhận rõ ràng; file tải về được verify bằng chữ ký Ed25519 nhúng sẵn trong app trước khi cài bất cứ thứ gì.
-
----
-
-### [♪] System Tray & Tự động dọn
-Thu nhỏ xuống khay hệ thống. Tự động dọn **chỉ các mục tầng AUTO có cờ `scheduled`** mỗi 6 tiếng khi máy nhàn rỗi (CPU < 20%, mạng < 500 KB/s), với ngưỡng tuổi nghiêm hơn dọn thủ công (ví dụ cache trình duyệt chỉ bị dọn nếu trình duyệt đó không dùng suốt 7 ngày). Không bao giờ đụng Thùng rác, gói mồ côi, cache lập trình, Docker hay bất cứ thứ gì ở tầng REVIEW, không bao giờ hiện hộp thoại mật khẩu, và tự tạm dừng khi Game Mode đang bật.
-
----
-
-## Tương thích
-
-| Hệ điều hành | Phiên bản | Ghi chú |
+| Tầng | Trang | Hành vi |
 |---|---|---|
-| Linux | Arch · Manjaro · EndeavourOS · CachyOS | pacman |
-| Linux | Ubuntu · Debian · Pop!_OS · Mint · Kali | apt |
-| Linux | Fedora · CentOS · Rocky · Nobara | dnf |
-| Linux | openSUSE Leap / Tumbleweed | zypper |
-| Linux | Void Linux | xbps |
-| Linux | Alpine | apk (cài từ mã nguồn) |
-| Linux | Fedora Atomic · Silverblue · Kinoite · Bazzite | rpm-ostree |
-| Linux | NixOS | nix-collect-garbage (user profile) |
-| Linux | Mọi bản con (Zorin, MX, Nobara, Garuda, KDE neon…) | nhận diện qua `ID_LIKE` trong `/etc/os-release` |
-| Windows | 10 (1903+) | Đầy đủ |
-| Windows | 11 | Đầy đủ + EcoQoS |
-| Windows | ARM64 (Surface Pro X, Snapdragon) | Hỗ trợ |
+| `AUTO` | Clean | Cache có thể tạo lại. Tích sẵn. Là tầng duy nhất bộ lập lịch được phép chạy. |
+| `REVIEW` | Deep Clean | Mỗi mục phải được chọn rõ ràng. |
+| `ADVISOR` | Disk Advisor | Chỉ báo cáo. |
 
----
+Một lần dọn được **lập kế hoạch, xem trước, rồi mới thực thi**. Ngay trước khi xóa từng mục, engine kiểm tra lại và bỏ qua nếu mục đó đã thay đổi từ lúc quét, đang được dùng, hoặc ứng dụng sở hữu nó đã chạy lại. Symlink và junction không được đi theo, điểm mount không bị vượt qua. **Xóa là vĩnh viễn** — không có gì được chuyển vào Recycle Bin.
 
-## Bảo mật & Quyền riêng tư
+## Hỗ trợ nền tảng
 
-- **Không thu thập dữ liệu** — không gọi mạng trong lúc hoạt động bình thường
-- **Không chạy ngầm** — chỉ chạy khi bạn mở app
-- **Release có chữ ký** — từ v3.0.2, mọi release được ký bằng Ed25519; public key nằm sẵn trong app, private key không bao giờ nằm trên repo này. Updater từ chối cài bất cứ file nào không có chữ ký hợp lệ.
-- **Đặc quyền có phạm vi** — sudoers rule chỉ cấp quyền cho `/usr/local/bin/cyber-clean-helper`, không phải sudo toàn bộ. Helper là shell script ([`packaging/cyber-clean-helper`](packaging/cyber-clean-helper)) bạn có thể đọc và kiểm tra. Vì rule là `NOPASSWD`, **mọi** tham số đều bị coi là độc hại: tên gói phải khớp mẫu chặt và không bao giờ thành option (`--`), gói lõi (kernel, bootloader, init, sudo, mạng…) bị từ chối, đường dẫn xóa phải chuẩn hóa, không symlink, nằm trong `/var/log` / `/var/crash` / coredump và dưới thư mục thuộc root; helper không có primitive sao chép/di chuyển/xóa tùy ý hay dừng service tùy ý.
-- **Cập nhật được xác minh hai lần** — app kiểm tra chữ ký Ed25519, rồi helper chạy bằng root (`update-apply`) sao chép gói vào thư mục thuộc root, **xác minh chữ ký lần nữa**, từ chối symlink trỏ ra ngoài gói, yêu cầu `VERSION` mới hơn bản đang cài (chặn downgrade/replay) và hoán đổi nguyên tử có rollback. `install.sh` cũng xác minh chữ ký trước khi giải nén.
-- **Cái gì bị xóa vĩnh viễn** — cache tầng AUTO tái tạo được nên bị xóa vĩnh viễn (hộp thoại xác nhận nói rõ điều này). Thứ có thể là dữ liệu của bạn (Thùng rác, gói, volume Docker…) chỉ bị xóa từ hộp thoại REVIEW, từng mục một.
+| Môi trường | Trạng thái |
+|---|---|
+| Windows 10 (build 19044), Python 3.12 | Đã chạy và sử dụng trên máy thật: tất cả các trang, đối chiếu số liệu với bộ đếm Windows, nhóm test riêng của Windows đạt. |
+| Windows 11 | Có mã xử lý (ví dụ EcoQoS); chưa kiểm chứng trên phần cứng. |
+| Linux nền apt (họ Ubuntu / Debian) | Test tự động đạt ở chế độ headless trên Ubuntu với Python 3.12 (628 đạt, 17 bỏ qua). |
+| Các bản phân phối Linux khác | Có nhận diện trình quản lý gói pacman, dnf, zypper, xbps, apk, rpm-ostree và Nix; chưa test riêng từng bản. |
 
----
+Nhiệt độ CPU trên Windows là tùy chọn và cần helper cảm biến đã cài (LibreHardwareMonitor + PawnIO); khi không có cảm biến, dashboard hiển thị `N/A`. Chạy `main.py` trực tiếp từ mã nguồn không kèm helper này.
 
-## Build từ mã nguồn
+## Cài đặt
+
+**Yêu cầu:** Python 3.10+ (PyQt6, psutil, cryptography, send2trash; `tomli` trên Python 3.10; `pythonnet` trên Windows). Không cần quyền Administrator/root để mở ứng dụng; các mục gắn `[ADMIN]` cần quyền nâng cao.
+
+### Chạy từ mã nguồn (Windows và Linux)
 
 ```bash
 git clone https://github.com/vuphitung/CyberClean.git
 cd CyberClean
-
-# Arch/Debian 12+/các distro theo PEP 668 chặn pip cài thẳng vào system —
-# dùng venv (chạy được mọi nơi, không đụng Python hệ thống):
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-pip install pyinstaller
 
-# Chạy trực tiếp
-python main.py
+# Linux
+source .venv/bin/activate
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
-# Build binary Linux
-python3 build.py --linux
-
-# Build installer Windows
-python build.py --inno
+python -m pip install -r requirements.txt
+python -X utf8 main.py
 ```
 
-**Yêu cầu:** Python 3.10+ · PyQt6 · psutil · cryptography · PyInstaller
-
-### Ra release (dành cho maintainer)
-
-Từ v3.0.3, release được ký bằng Ed25519 — chỉ có SHA-256 sidecar thôi
-không đủ chứng minh release thật sự đến từ repo này, nó chỉ chứng minh
-file tải về không lỗi đường truyền. Public key nằm sẵn trong
-`utils/updater.py`; private key chỉ nằm trong GitHub Actions secret
-`CYBERCLEAN_SIGNING_KEY` của repo, không có gì trong file này để lộ nó ra.
+### Trình cài đặt Linux (từ bản phát hành đã công bố)
 
 ```bash
-# 1. Bump version — chỉ sửa version.py, không cần sửa file nào khác:
-__version__ = "3.0.x"
-
-# 2. Build (trong venv):
-python3 build.py --linux         # và/hoặc: python build.py --inno   (Windows)
-
-# 3. Ký artifact — ra file .sig (Ed25519, căn cứ xác thực thật sự)
-#    và .sha256 (giữ lại chỉ để app đời cũ trước 3.0.2 update lên mượt):
-export CYBERCLEAN_SIGNING_KEY="<private key — xem gen_release_key.py, không bao giờ commit>"
-python3 sign_release.py dist/CyberClean-3.0.x-linux-x86_64.tar.gz
-
-# 4. Publish — upload cả file gốc lẫn 2 sidecar:
-gh release create v3.0.x \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sig \
-  dist/CyberClean-3.0.x-linux-x86_64.tar.gz.sha256 \
-  --title "CyberClean v3.0.x" \
-  --notes "### Changelog
-- Fix ...
-- Add ..."
+curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
 
-`install.sh` tự lấy version từ GitHub Releases API lúc cài, nên không
-cần sửa mỗi lần release. Nó vẫn giữ 1 hằng số fallback hardcode (chỉ
-dùng khi gọi API lỗi) — nếu muốn kỹ thì bump luôn cho nhánh dự phòng đó
-đỡ quá cũ, nhưng không bắt buộc để cài đặt bình thường hoạt động.
+Xác minh chữ ký bản phát hành, cài vào `/opt/CyberClean`, đăng ký lệnh `cyberclean` và mục desktop, đồng thời thiết lập một helper đặc quyền có phạm vi giới hạn. Gỡ cài đặt bằng `sudo cyberclean --uninstall`.
 
-**Tự verify file tải về:**
+### Gói Windows
+
+Tự build theo phần bên dưới. Gói đã build sẵn được đính kèm trên [GitHub Releases](https://github.com/vuphitung/CyberClean/releases) khi có bản phát hành.
+
+## Build
+
 ```bash
-sha256sum -c CyberClean-3.0.x-linux-x86_64.tar.gz.sha256
+python -m pip install pyinstaller
+python build.py --linux      # tar.gz cho Linux
+python build.py --windows    # thư mục onedir cho Windows trong dist/CyberClean
+python build.py --inno       # onedir Windows + script Inno Setup (biên dịch bằng Inno Setup)
 ```
-Lệnh này chỉ xác nhận file không bị lỗi đường truyền — không tự chứng
-minh được tính xác thực. Updater trong app còn kiểm tra thêm file
-`.sig` với public key nhúng sẵn trước khi cài bất cứ gì.
 
----
+## Phát triển
 
-## Cấu trúc dự án
-
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m pyflakes main.py ui_widgets.py ui_pages.py core utils
 ```
+
+Trên Windows, bộ test đầy đủ hiện báo 49 lỗi xuất phát từ các fixture chỉ dành cho POSIX (symlink cần đặc quyền, Unix socket, mục chỉ có trên Linux); nhóm test riêng của Windows đạt. Chi tiết: [báo cáo Windows](docs/WINDOWS_NATIVE_REPORT_VI.md). Hãy dùng thư mục thử riêng khi thử chức năng xóa.
+
+```text
 CyberClean/
-├── main.py                 # Giao diện chính (PyQt6)
-├── ui_widgets.py           # Widget tùy chỉnh, icon, QThread worker chạy nền
-├── ui_pages.py             # Trang DEEP CLEAN (tầng 2: xem lại từng mục) + trang DISK ADVISOR (tầng 3: chỉ báo cáo)
-├── version.py              # Nguồn duy nhất cho số phiên bản
-├── rules/
-│   ├── linux.toml          # Luật dọn dạng khai báo (đường dẫn · tuổi · app phải đóng · tầng)
-│   └── windows.toml
-├── packaging/
-│   └── cyber-clean-helper  # Helper đặc quyền (root) — nằm trong gói release đã ký
-├── tests/                  # pytest: helper, engine, rules, cleaner, installer, UI
-├── core/
-│   ├── engine.py           # plan → xem trước → thực thi có hàng rào (tuổi / tiến trình / file mở / symlink / mount)
-│   ├── rules.py            # Nạp + kiểm tra luật TOML, dựng plan (chromium / firefox / paths)
-│   ├── privileged.py       # Cửa DUY NHẤT tới helper root (argv, phân loại lỗi)
-│   ├── advisor.py          # Quét chỉ-đọc (máy ảo, /opt, file lớn, dự án cũ…)
-│   ├── base_cleaner.py     # Interface cleaner, các tầng, kiểu Review, mixin plan
-│   ├── linux_cleaner.py    # Mục Linux dựng bằng code (trình quản lý gói, journal, Docker…)
-│   ├── windows_cleaner.py  # Mục Windows dựng bằng code
-│   ├── booster.py          # RAM / CPU / Game Mode / Smart Boost
-│   ├── game_boost_widget.py # Panel giao diện Game Mode (thread theo dõi GPU/tiến trình game)
-│   ├── analyzer.py         # Lập lịch tự động dọn khi máy nhàn rỗi
-│   ├── uninstaller.py      # Gỡ cài đặt ứng dụng
-│   └── os_detect.py        # Phát hiện OS / distro / package manager
-├── utils/
-│   ├── sysinfo.py          # Snapshot hệ thống qua psutil
-│   ├── i18n.py             # Dịch Tiếng Anh / Tiếng Việt
-│   └── updater.py          # Tự động cập nhật OTA
-├── assets/
-│   ├── logo.png
-│   └── logo.ico
-├── LibreHardwareMonitorLib.dll  # Cảm biến nhiệt độ Windows
-└── install.sh              # Trình cài đặt Linux một lệnh
+├── main.py                 # điểm vào, cửa sổ chính và khay hệ thống
+├── ui_widgets.py, ui_pages.py
+├── core/                   # engine, cleaner, booster, advisor, uninstaller
+├── utils/                  # số liệu hệ thống, bản dịch, cập nhật
+├── rules/                  # luật dọn theo hệ điều hành (TOML)
+├── packaging/              # helper đặc quyền cho Linux
+├── vendor/lhm/             # thư viện cảm biến Windows
+├── tests/                  # pytest
+├── build.py, install.sh
+└── assets/, screenshots/
 ```
 
----
+## Giới hạn đã biết
 
-## Ngôn ngữ
+- Việc thử tương tác trên máy Linux thật còn hạn chế; vui lòng báo lỗi riêng của từng bản phân phối.
+- Windows 11, ARM64 và các tổ hợp DPI/driver khác chưa được kiểm chứng.
+- Ứng dụng không đo (benchmark) hiệu quả của Booster.
+- Ước tính dung lượng log và WinSxS có thể khác với dung lượng thực sự giải phóng (volume, quyền, snapshot).
 
-English · Tiếng Việt 
+## Đóng góp và báo lỗi
 
----
+Mở issue kèm hệ điều hành và phiên bản, phiên bản CyberClean, các bước bạn đã làm và nội dung hiển thị trong ứng dụng.
 
 ## Giấy phép
 
-MIT — xem [LICENSE](LICENSE)
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
----
-
-<div align="center">
-
-Made with ☕ by [vuphitung](https://github.com/vuphitung) — sinh viên Việt Nam 🇻🇳
-
-*Nếu CyberClean có ích với bạn, hãy cho một ⭐ nhé*
-
-🌐 [View English README](README.md)
-
-</div>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:c060f0,50:00c8e0,100:060911&height=100&section=footer" width="100%" alt="footer" />
