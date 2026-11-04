@@ -34,13 +34,9 @@
 
 </div>
 
-<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
-
 ## Cài đặt nhanh (Quick Installation)
 
-<table>
-<tr>
-<td width="52%" valign="top">
+Chọn hệ điều hành của bạn và làm theo hướng dẫn bên dưới.
 
 ### <img src="https://cdn.simpleicons.org/linux/00E5FF" width="18" height="18" align="absmiddle" /> &nbsp;Linux
 
@@ -52,38 +48,35 @@
   <img src="https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white" alt="openSUSE">
 </p>
 
+Cài đặt bằng một lệnh:
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/vuphitung/CyberClean/main/install.sh | sudo bash
 ```
-Cài vào `/opt/CyberClean` · đăng ký lệnh `cyberclean` · thiết lập helper đặc quyền có phạm vi giới hạn.
 
-**Gỡ cài đặt:**
+Ứng dụng được cài vào `/opt/CyberClean`, đăng ký lệnh `cyberclean` và thiết lập helper đặc quyền có phạm vi giới hạn.
+
+<details>
+<summary>Gỡ cài đặt CyberClean</summary>
+
 ```bash
 sudo cyberclean --uninstall
 ```
+</details>
 
-</td>
-<td width="48%" valign="top">
+---
 
 ### <img src="https://img.shields.io/badge/-Windows_10_%2F_11-0078D6?style=flat-square&logo=windows&logoColor=white" height="22" align="absmiddle" />
 
-<div align="center">
-<br>
-<a href="https://github.com/vuphitung/CyberClean/releases/latest">
-  <img src="https://img.shields.io/badge/T%E1%BA%A2I_B%E1%BB%98_C%C3%80I_WINDOWS-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Tải CyberClean cho Windows" />
-</a>
-<br><br>
-</div>
+<p>
+  <a href="https://github.com/vuphitung/CyberClean/releases/latest">
+    <img src="https://img.shields.io/badge/T%E1%BA%A2I_B%E1%BB%98_C%C3%80I_WINDOWS-(.EXE)-00E5FF?style=for-the-badge&logo=windows&logoColor=060911&labelColor=0E1626" alt="Tải CyberClean cho Windows" />
+  </a>
+</p>
 
 **[Tải CyberClean cho Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-Chỉ hỏi quyền UAC ở lần cài đầu tiên. Gỡ qua **Settings → Apps → CyberClean**.
-
-</td>
-</tr>
-</table>
-
-<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+Windows chỉ yêu cầu quyền UAC ở lần cài đặt đầu tiên. Gỡ qua **Settings → Apps → CyberClean**.
 
 ## Giới thiệu
 
