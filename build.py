@@ -262,6 +262,8 @@ def _generate_inno_script(exe: Path):
         f'AppPublisherURL={URL}',
         f'AppSupportURL={URL}/issues',
         f'AppUpdatesURL={URL}/releases',
+        'ArchitecturesAllowed=x64',
+        'ArchitecturesInstallIn64BitMode=x64',
         r'DefaultDirName={autopf}' + f'\\{APP}',
         f'DefaultGroupName={APP}',
         'AllowNoIcons=yes',
