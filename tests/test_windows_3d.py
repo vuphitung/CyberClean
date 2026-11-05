@@ -77,3 +77,18 @@ def test_stationary_hover_returns_to_idle_cadence(core,monkeypatch):
     assert core._timer.interval()==33
     core._last_motion=19.9;core._tick()
     assert core._timer.interval()==33
+
+
+def test_non_windows_uses_same_30fps_cached_path(core,monkeypatch):
+    """Linux/macOS must not fall back to the slow 8 FPS fixed-step painter."""
+    monkeypatch.setattr(U,'IS_WINDOWS',False)
+    monkeypatch.setattr(U.time,'monotonic',lambda:10.)
+    core._frame_time=9.96;core._intro_ticks=100;core._hover=False
+    angle=core._rot_y
+    core._tick()
+    assert core._timer.interval()==33
+    assert core._rot_y-angle==pytest.approx(1.28)
+    core.set_usage_detail(53.2,'23.9 GB / 47.3 GB','47.3 GB');paint(core)
+    generation=core._static_builds
+    core._rot_y+=20.;paint(core)
+    assert core._static_builds==generation

@@ -697,7 +697,6 @@ class Cyber3DDiskCore(QWidget):
         self._rot_y = 0.0
         self._target_rot_x = 24.0
         self._target_rot_y = 0.0
-        self._pulse = 0.0
 
         radius = 38.0 if compact else 47.0
         self._ring1: List[Point3D] = []
@@ -731,8 +730,7 @@ class Cyber3DDiskCore(QWidget):
                                         for pt in points])
         self._intro_ticks = 0
         self._timer = QTimer(self)
-        if IS_WINDOWS:
-            self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._tick)
         if self._animate:
             self._timer.start(33)  # Animated instances pause while hidden or minimized.
@@ -781,7 +779,7 @@ class Cyber3DDiskCore(QWidget):
             super().mouseMoveEvent(event)
             return
         self._last_motion = time.monotonic()
-        if IS_WINDOWS and self._timer.isActive():
+        if self._timer.isActive():
             self._timer.setInterval(33)
         w, h = max(1.0, float(self.width())), max(1.0, float(self.height()))
         rx = (event.position().x() - w / 2.0) / (w / 2.0)
@@ -796,16 +794,13 @@ class Cyber3DDiskCore(QWidget):
             self._target_rot_x = 24.0
             self._target_rot_y = 0.0
         if self._animate and self._cursor_tilt and self._timer.isActive():
-            self._timer.setInterval(33 if IS_WINDOWS else 120)
+            self._timer.setInterval(33)
         else:
             self.update()
         super().leaveEvent(event)
 
     def _tick(self):
-        if not self._animate:
-            self._timer.stop()
-            return
-        if not self.isVisible():
+        if not self._animate or not self.isVisible():
             self._timer.stop()
             return
         win = self.window()
@@ -813,154 +808,26 @@ class Cyber3DDiskCore(QWidget):
             self._timer.stop()
             return
         self._intro_ticks += 1
-        idle_interval = 33 if IS_WINDOWS else 120
+        now = time.monotonic()
         interactive = (self._cursor_tilt and self._hover and
-                       (not IS_WINDOWS or time.monotonic()-self._last_motion < .75))
-        if IS_WINDOWS:
-            now = time.monotonic()
-            elapsed = min(.1, max(0., now-self._frame_time))
-            self._frame_time = now
-            # Clipped by a scroll viewport: keep a cheap visibility check so
-            # scrolling back resumes without a new showEvent.
-            if self.visibleRegion().isEmpty():
-                self._timer.setInterval(200)
-                return
-            self._timer.setInterval(33 if interactive else idle_interval)
-            self._rot_y = (self._rot_y + elapsed*(42. if interactive else 32.)) % _DISK_CORE_ROTATION_PERIOD
-            blend = 1.-math.exp(-8.*elapsed)
-            self._rot_x += (self._target_rot_x-self._rot_x)*blend
-            self._tilt_y += (self._target_rot_y-self._tilt_y)*blend
-            self.update()
+                       now - self._last_motion < .75)
+        elapsed = min(.1, max(0., now - self._frame_time))
+        self._frame_time = now
+        # Clipped by a scroll viewport: keep a cheap visibility check so
+        # scrolling back resumes without a new showEvent.
+        if self.visibleRegion().isEmpty():
+            self._timer.setInterval(200)
             return
-        if self._intro_ticks > 60 and not interactive and self._timer.interval() != idle_interval:
-            self._timer.setInterval(idle_interval)
-        step = 1.35 if self._timer.interval() <= 40 else 2.2
-        self._rot_y = (self._rot_y + step) % _DISK_CORE_ROTATION_PERIOD
-        self._rot_x += (self._target_rot_x - self._rot_x) * 0.16
-        self._pulse = (self._pulse + 0.07) % (math.pi * 2.0)
+        self._timer.setInterval(33)
+        # Motion is driven by elapsed wall-clock time, not by tick count, so a
+        # late timer event never shows up as a visible stutter.
+        self._rot_y = (self._rot_y + elapsed * (42. if interactive else 32.)) % _DISK_CORE_ROTATION_PERIOD
+        blend = 1. - math.exp(-8. * elapsed)
+        self._rot_x += (self._target_rot_x - self._rot_x) * blend
+        self._tilt_y += (self._target_rot_y - self._tilt_y) * blend
         self.update()
 
-    def paintEvent(self, _):
-        if IS_WINDOWS:
-            self._paint_windows()
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = float(self.width()), float(self.height())
-        has_pill = bool(self.used_str and not self._compact)
-        # Shift 3D sphere center slightly up when bottom capacity pill is visible so there is zero overlap
-        cx = w / 2.0
-        cy = (h - 24.0) / 2.0 if has_pill else h / 2.0
-        dark = is_dark_theme()
-
-        primary_hex = C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan']
-        col_primary = QColor(primary_hex)
-        col_secondary = QColor(C.get('purple', '#A855F7'))
-
-        # Ambient radial glow
-        glow_r = min(w, h) * 0.44
-        glow = QRadialGradient(cx, cy, glow_r)
-        g1 = QColor(col_primary); g1.setAlphaF((0.26 if self._hover else 0.20) if dark else (0.17 if self._hover else 0.12))
-        g2 = QColor(col_secondary); g2.setAlphaF((0.10 if self._hover else 0.07) if dark else (0.06 if self._hover else 0.04))
-        g3 = QColor(col_primary); g3.setAlphaF(0.0)
-        glow.setColorAt(0.0, g1)
-        glow.setColorAt(0.65, g2)
-        glow.setColorAt(1.0, g3)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(glow))
-        p.drawEllipse(QPointF(cx, cy), glow_r, glow_r)
-
-        def draw_3d_ring(pts: List[Point3D], y_off: float, z_tilt: float, col: QColor, ratio: float = 1.0, base_w: float = 2.2):
-            proj = []
-            for pt in pts:
-                r_pt = pt.rotate_z(z_tilt).rotate_y(self._rot_y + y_off).rotate_x(self._rot_x + self._target_rot_y * 0.15)
-                px, py, f = r_pt.project(cx, cy, fov=215.0, dist=255.0)
-                proj.append((px, py, r_pt.z, f))
-
-            n_total = len(proj)
-            n_active = max(1, int(n_total * min(1.0, max(0.02, ratio))))
-            for i in range(n_total):
-                p1 = proj[i]
-                p2 = proj[(i + 1) % n_total]
-                avg_z = (p1[2] + p2[2]) * 0.5
-                if i < n_active:
-                    alpha = int(max(50, min(255, (175 if dark else 200) - avg_z * 1.6)))
-                    thick = max(1.1, min(3.6, base_w - avg_z * 0.02))
-                    sc = QColor(col.red(), col.green(), col.blue(), alpha)
-                else:
-                    track_c = QColor(C['border3'])
-                    track_c.setAlpha(60 if dark else 85)
-                    sc = track_c
-                    thick = 1.0
-                p.setPen(QPen(sc, thick, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(p1[0], p1[1]), QPointF(p2[0], p2[1]))
-
-        usage_ratio = min(1.0, max(0.0, self.percent / 100.0))
-        draw_3d_ring(self._ring3, -self._rot_y * 1.4, 32.0, QColor(C['cyan2']), ratio=1.0, base_w=1.2)
-        draw_3d_ring(self._ring2, 55.0, -18.0, col_secondary, ratio=0.82, base_w=1.6)
-        draw_3d_ring(self._ring1, 0.0, 8.0, col_primary, ratio=usage_ratio, base_w=2.6)
-
-        for pt in self._particles:
-            r_pt = pt.rotate_y(self._rot_y * 1.4).rotate_x(self._rot_x)
-            px, py, f = r_pt.project(cx, cy, fov=215.0, dist=255.0)
-            p_alpha = int(max(30, min(210, 130 - r_pt.z * 1.5)))
-            p_sz = max(1.0, min(2.8, 1.8 * f))
-            pc = QColor(col_primary.red(), col_primary.green(), col_primary.blue(), p_alpha)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(pc))
-            p.drawEllipse(QPointF(px, py), p_sz, p_sz)
-
-        # Central 3D Hologram Core Sphere
-        pulse_s = 1.0 + 0.022 * math.sin(self._pulse)
-        core_r = (24.0 if self._compact else 31.0) * pulse_s
-        sphere = QRadialGradient(cx - core_r * 0.25, cy - core_r * 0.25, core_r * 1.2)
-        if dark:
-            sphere.setColorAt(0.0, QColor(24, 38, 64, 242))
-            sphere.setColorAt(0.72, QColor(9, 14, 26, 248))
-            rim = QColor(col_primary); rim.setAlpha(180 if self._hover else 165)
-            sphere.setColorAt(1.0, rim)
-        else:
-            sphere.setColorAt(0.0, QColor(255, 255, 255, 252))
-            sphere.setColorAt(0.75, QColor(238, 244, 252, 250))
-            rim = QColor(col_primary); rim.setAlpha(150 if self._hover else 135)
-            sphere.setColorAt(1.0, rim)
-
-        p.setBrush(QBrush(sphere))
-        p.setPen(QPen(col_primary, 1.6))
-        p.drawEllipse(QPointF(cx, cy), core_r, core_r)
-
-        # Crisp Percentage Readout centered inside the sphere (NEVER collides with used_str!)
-        pct_txt = (f'{self.percent:.1f}%' if self.percent < 99.95 else f'{round(self.percent)}%') if getattr(self, '_data_available', True) else '—'
-        font_sz = 10 if self._compact else 12
-        p.setFont(mono_font(pt=font_sz, bold=True))
-        p.setPen(QColor(C['text']))
-        p.drawText(QRectF(cx - core_r, cy - 10, core_r * 2.0, 20), Qt.AlignmentFlag.AlignCenter, pct_txt)
-
-        # External HUD Pill at the bottom of the widget for "30.2 GB / 47.3 GB"
-        if has_pill:
-            pill_w = min(w - 12.0, 146.0)
-            pill_h = 20.0
-            pill_x = cx - pill_w / 2.0
-            pill_y = h - pill_h - 2.0
-            pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
-            pill_bg = QColor(C['cyan_dim'] if self.percent <= 75 else (C['yel_dim'] if self.percent <= 90 else C['red_dim']))
-            if dark:
-                pill_bg.setAlpha(190)
-            p.setBrush(QBrush(pill_bg))
-            b_col = QColor(col_primary); b_col.setAlpha(110)
-            p.setPen(QPen(b_col, 1.0))
-            p.drawRoundedRect(pill_rect, 6.0, 6.0)
-
-            f_pill = mono_font()
-            f_pill.setPixelSize(10)
-            f_pill.setBold(True)
-            p.setFont(f_pill)
-            p.setPen(col_primary if dark else QColor(C['text']))
-            p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, self.used_str)
-
-        p.end()
-
-    def _windows_static_layers(self, width, height, cx, cy, has_pill, primary, secondary):
+    def _static_layers(self, width, height, cx, cy, has_pill, primary, secondary):
         """Rasterize gradients and text only when their actual inputs change."""
         dark = is_dark_theme()
         dpr = self.devicePixelRatioF()
@@ -1016,7 +883,7 @@ class Cyber3DDiskCore(QWidget):
             painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,self.used_str)
         painter.end()
 
-    def _paint_windows(self):
+    def paintEvent(self, _):
         """Cheap animated geometry over cached, DPI-aware static layers."""
         width, height = float(self.width()), float(self.height())
         has_pill = bool(self.used_str and not self._compact)
@@ -1024,7 +891,7 @@ class Cyber3DDiskCore(QWidget):
         dark = is_dark_theme()
         primary = QColor(C['red'] if self.percent > 90 else C['yellow'] if self.percent > 75 else C['cyan'])
         secondary = QColor(C.get('purple','#A855F7'))
-        self._windows_static_layers(width,height,cx,cy,has_pill,primary,secondary)
+        self._static_layers(width,height,cx,cy,has_pill,primary,secondary)
         painter=QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.drawPixmap(0,0,self._glow_layer)

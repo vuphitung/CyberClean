@@ -895,7 +895,7 @@ class CyberCleanApp(QMainWindow):
             self._si_worker.paused = (pid != 'dashboard')
         if hasattr(self, 'dash_holo_core') and hasattr(self.dash_holo_core, '_timer'):
             if pid == 'dashboard' and self.isVisible() and self.dash_holo_core._animate:
-                self.dash_holo_core._timer.start(40 if IS_WINDOWS else 120)
+                self.dash_holo_core._timer.start(40)
             else:
                 self.dash_holo_core._timer.stop()
         if pid == 'log':       self._load_log()
@@ -3334,7 +3334,7 @@ class CyberCleanApp(QMainWindow):
             self._clock_timer.start(1000)
         if (self.stack.currentIndex() == 0 and hasattr(self, 'dash_holo_core') and
                 hasattr(self.dash_holo_core, '_timer') and self.dash_holo_core._animate):
-            self.dash_holo_core._timer.start(40 if IS_WINDOWS else 120)
+            self.dash_holo_core._timer.start(40)
 
     def _theme_btn_text(self) -> str:
         if is_dark_theme():
