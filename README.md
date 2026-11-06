@@ -3,20 +3,8 @@
 <!-- Animated Cyber Wave Banner -->
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:060911,50:00c8e0,100:c060f0&height=120&section=header&animation=fadeIn" width="100%" alt="header" />
 
-<img src="assets/logo.png" width="96" alt="CyberClean logo">
-
-```text
- ██████╗██╗   ██╗██████╗ ███████╗██████╗      ██████╗██╗     ███████╗ █████╗ ███╗   ██╗
-██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║     ██╔════╝██╔══██╗████╗  ██║
-██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝    ██║     ██║     █████╗  ███████║██╔██╗ ██║
-██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗    ██║     ██║     ██╔══╝  ██╔══██║██║╚██╗██║
-╚██████╗   ██║   ██████╔╝███████╗██║  ██║    ╚██████╗███████╗███████╗██║  ██║██║ ╚████║
- ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝     ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝
-```
-
-<!-- Animated Typing SVG (No emojis, pure terminal style) -->
 <a href="https://github.com/vuphitung/CyberClean">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=18&duration=3000&pause=1000&color=00E5FF&center=true&vCenter=true&width=750&lines=Smart+System+Cleaner+%26+Performance+Optimizer;Desktop+Utility+for+Windows+10%2F11+%26+Linux;Live+Telemetry+%C2%B7+3-Tier+Safe+Cleaner+%C2%B7+System+Booster;Rule-Driven+Engine+%C2%B7+Reversible+State+%C2%B7+Zero+Telemetry" alt="Typing SVG" />
+  <img src="assets/banner.svg" width="100%" alt="CyberClean — Smart System Cleaner &amp; Disk Manager" />
 </a>
 
 **Desktop utility for Windows and Linux: system monitoring, disk cleanup, disk-usage report, app uninstaller and an optional performance booster.**
@@ -76,7 +64,7 @@ sudo cyberclean --uninstall
 
 **[Download CyberClean for Windows (.exe)](https://github.com/vuphitung/CyberClean/releases/latest)**
 
-The UAC prompt appears only during the first installation. Uninstall via **Settings → Apps → CyberClean**.
+CyberClean requests Administrator privileges (UAC) on launch to perform system-level cleanup, SSD TRIM, and CPU temperature sensor access. Uninstall via **Settings → Apps → CyberClean**.
 
 ## Overview
 
@@ -179,11 +167,17 @@ A clean is **planned, previewed, then executed**. Immediately before each deleti
 | Linux, apt-based (Ubuntu / Debian family) | Automated tests pass headless on Ubuntu with Python 3.12 (628 passed, 17 skipped). |
 | Other Linux distributions | Package-manager detection for pacman, dnf, zypper, xbps, apk, rpm-ostree and Nix; not individually tested. |
 
-CPU temperature on Windows is optional and needs the installed sensor helper (LibreHardwareMonitor + PawnIO); when no sensor is available the dashboard shows `N/A`. Running `main.py` directly from source does not include that helper.
+### Hardware Monitoring Credits (Windows CPU Temperature)
+
+Windows does not expose a standard user-mode API for reading CPU package and core thermal registers. To support accurate **CPU Temperature** monitoring on the Dashboard, CyberClean uses and credits the following projects:
+
+- **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)** *(MPL-2.0)*: the hardware sensor library used by CyberClean to query CPU and GPU thermal sensors on Windows (`vendor/lhm/LibreHardwareMonitorLib.dll`).
+- **[PawnIO](https://github.com/namazso/PawnIO)** by **[namazso](https://github.com/namazso)** ([pawnio.eu](https://pawnio.eu/)): the signed low-level hardware access driver used by CyberClean as LibreHardwareMonitor's kernel backend to support the **CPU Temperature** feature safely on Windows 10/11 without relying on legacy drivers blocked by Windows Defender/HVCI.
+- When PawnIO is not installed or no compatible sensor is available, the dashboard card shows `N/A`; you can click the **Temperature** card directly in the app (or select the driver task in the CyberClean installer) to verify its SHA-256 hash and install PawnIO.
 
 ## Installation
 
-**Requirements:** Python 3.10+ (PyQt6, psutil, cryptography, send2trash; `tomli` on Python 3.10; `pythonnet` on Windows). Administrator/root is not needed to open the app; items marked `[ADMIN]` need elevated rights.
+**Requirements:** Python 3.10+ (PyQt6, psutil, cryptography, send2trash; `tomli` on Python 3.10; `pythonnet` on Windows).
 
 ### Run from source (Windows and Linux)
 
@@ -200,6 +194,64 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -X utf8 main.py
 ```
+
+<details>
+<summary><b>Step-by-step setup guide for a brand-new machine (without Git / Python pre-installed)</b></summary>
+
+#### 1. Prepare a fresh system
+
+- **On Windows 10 / 11:**
+  1. Open **PowerShell** and install Git and Python 3.12 via `winget` (or download them from [python.org](https://www.python.org/downloads/) and [git-scm.com](https://git-scm.com/download/win) — make sure to tick **"Add Python to PATH"** during installation):
+     ```powershell
+     winget install -e --id Git.Git
+     winget install -e --id Python.Python.3.12
+     ```
+  2. Reopen PowerShell (preferably **Run as Administrator** for CPU temperature sensor access and system-level cleanup targets).
+  3. If PowerShell blocks `.venv\Scripts\Activate.ps1` due to script execution policy, allow scripts for the current session:
+     ```powershell
+     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+     ```
+
+- **On Linux:**
+  ```bash
+  # Ubuntu / Debian / Linux Mint / Pop!_OS
+  sudo apt update && sudo apt install -y git python3 python3-venv python3-pip libegl1 libxcb-cursor0
+
+  # Arch Linux / Manjaro / EndeavourOS / CachyOS
+  sudo pacman -S --needed git python python-pip
+
+  # Fedora
+  sudo dnf install -y git python3 python3-pip
+
+  # openSUSE
+  sudo zypper install -y git python3 python3-pip
+  ```
+
+#### 2. Clone, install dependencies, and run
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/vuphitung/CyberClean.git
+cd CyberClean
+
+# 2. Create an isolated virtual environment (.venv)
+python -m venv .venv          # On some Linux distros use: python3 -m venv .venv
+
+# 3. Activate the virtual environment
+source .venv/bin/activate     # Linux
+.venv\Scripts\Activate.ps1    # Windows PowerShell (or .venv\Scripts\activate.bat on CMD)
+
+# 4. Upgrade pip and install all required dependencies
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 5. Launch CyberClean
+python -X utf8 main.py
+```
+
+> **Windows tip:** To enable CPU temperature readings when running from source on a machine without the sensor driver, simply click the **TEMPERATURE** card on the Dashboard to verify and install [PawnIO](https://pawnio.eu/).
+
+</details>
 
 ### Linux installer (from a published release)
 
@@ -221,6 +273,50 @@ python build.py --linux      # Linux tar.gz
 python build.py --windows    # Windows onedir folder in dist/CyberClean
 python build.py --inno       # Windows onedir + Inno Setup script (compile it with Inno Setup)
 ```
+
+<details>
+<summary><b>Full step-by-step Build &amp; Packaging guide for Windows (.exe / Setup.exe) and Linux (.tar.gz / AppImage / .deb)</b></summary>
+
+#### 1. Verify build dependencies
+
+Make sure your `.venv` is active and has both `requirements.txt` and `pyinstaller` installed:
+
+```bash
+python -m pip install -r requirements.txt pyinstaller
+python build.py --check
+```
+
+#### 2. Build on Windows (`.exe` and `Setup.exe` installer)
+
+1. Build the `onedir` application bundle and generate the Inno Setup script:
+   ```powershell
+   python build.py --inno
+   ```
+   - `build.py` verifies the SHA-256 hashes of all bundled `vendor/lhm` DLLs, downloads/verifies the official `PawnIO_setup.exe`, builds `dist\CyberClean\CyberClean.exe` (with the `--uac-admin` manifest), and generates `CyberClean.iss`.
+2. Compile the standalone Windows installer using [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+   - **GUI:** Open `CyberClean.iss` in **Inno Setup Compiler** and press **Compile (`F9`)**.
+   - **CLI:**
+     ```powershell
+     & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" CyberClean.iss
+     ```
+   - The finished installer is written to `dist\CyberClean_Setup_v3.1.0.exe`.
+
+#### 3. Build on Linux (`.tar.gz`, `AppImage`, `.deb`)
+
+```bash
+# Build standard .tar.gz archive (used by install.sh / GitHub Releases)
+python build.py --linux
+
+# Build standalone portable AppImage
+python build.py --appimage
+
+# Build .deb package (on Debian / Ubuntu / Linux Mint)
+python build.py --deb
+```
+
+All build artifacts are placed in the `dist/` directory.
+
+</details>
 
 ## Development
 
@@ -262,3 +358,4 @@ Open an issue with your OS and version, the CyberClean version, what you did, an
 GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:c060f0,50:00c8e0,100:060911&height=100&section=footer" width="100%" alt="footer" />
+
