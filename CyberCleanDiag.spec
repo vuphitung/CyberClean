@@ -32,7 +32,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\WIN10\\Downloads\\CyberClean-Windows-Review\\CyberClean\\assets\\logo.ico'],
+    uac_admin=True,
+    icon=['assets\\logo.ico'],
 )
 coll = COLLECT(
     exe,

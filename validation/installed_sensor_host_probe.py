@@ -1,4 +1,4 @@
-"""One-shot read-only check through the installed protected helper."""
+"""One-shot CPU temperature check using TemperatureHost."""
 import json
 from pathlib import Path
 import sys
@@ -11,17 +11,15 @@ from utils.windows_temperature import TemperatureHost
 
 def main():
     host = TemperatureHost(startup_timeout=12., sample_timeout=4.)
-    if not host.request_privileged_access():
-        raise RuntimeError('Installed sensor helper is unavailable')
     host.start()
-    deadline = time.monotonic() + 50.
+    deadline = time.monotonic() + 25.
     result = None
     try:
         while time.monotonic() < deadline:
             result = host.snapshot()
             if result['cpu'] is not None:
                 break
-            if result['reason_code'] in ('elevation_cancelled', 'sensor_helper_failed'):
+            if result['reason_code'] in ('pawnio_missing', 'pawnio_reboot_required', 'cpu_access_denied'):
                 break
             time.sleep(.1)
     finally:

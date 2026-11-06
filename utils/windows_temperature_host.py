@@ -11,6 +11,21 @@ import traceback
 _output_lock = threading.Lock()
 
 
+def _has_cpu_temperature_value(hardware, classify_sensor=None) -> bool:
+    """Return True if at least one classified CPU temperature sensor already has a numeric value."""
+    if classify_sensor is None:
+        from utils.windows_temperature import classify_sensor
+    for hw in hardware:
+        if str(hw.HardwareType) == 'Cpu':
+            for sensor in hw.Sensors:
+                if str(sensor.SensorType) == 'Temperature' and sensor.Value is not None:
+                    if classify_sensor('Cpu', str(sensor.Name)):
+                        return True
+        if _has_cpu_temperature_value(getattr(hw, 'SubHardware', ()), classify_sensor):
+            return True
+    return False
+
+
 def diagnose_backend(hardware, report='', *, admin=False, pawnio=None):
     """Explain missing CPU data using raw sensors and the backend's own report.
 
@@ -40,15 +55,20 @@ def diagnose_backend(hardware, report='', *, admin=False, pawnio=None):
     access_denied = ('OpenSCManager' in ring0 and
                      ('00000005' in ring0 or 'access is denied' in ring0.lower()))
     from utils.windows_temperature import classify_sensor
+    installed = pawnio.get('installed') if isinstance(pawnio, dict) else None
+    reboot_flag = pawnio.get('reboot_required') if isinstance(pawnio, dict) else None
+    access_err = pawnio.get('access_error') if isinstance(pawnio, dict) else None
     if any(sensor['has_value'] and classify_sensor('Cpu', sensor['name']) for sensor in sensors):
         code = 'cpu_sensor_available'
-    elif pawnio is not None and not pawnio.get('installed'):
+    elif pawnio is not None and installed is False:
         code = 'pawnio_missing'
-    elif pawnio is not None and pawnio.get('access_error') == 5:
+    elif pawnio is not None and (reboot_flag is True or (reboot_flag is None and access_err in (2, 3))):
+        code = 'pawnio_reboot_required'
+    elif pawnio is not None and access_err == 5:
         code = 'cpu_access_denied'
-    elif pawnio is not None and pawnio.get('access_error') in (577, 1275):
+    elif pawnio is not None and access_err in (577, 1275):
         code = 'cpu_driver_blocked'
-    elif pawnio is not None and pawnio.get('access_error'):
+    elif pawnio is not None and access_err:
         code = 'cpu_driver_unavailable'
     elif access_denied:
         code = 'cpu_access_denied'
@@ -60,41 +80,30 @@ def diagnose_backend(hardware, report='', *, admin=False, pawnio=None):
         code = 'cpu_sensor_missing'
     else:
         code = 'cpu_sensor_no_value'
-    needs_admin = access_denied if pawnio is None else pawnio.get('installed') and pawnio.get('access_error') == 5
+    needs_admin = access_denied if (pawnio is None or installed is None) else bool(installed and access_err == 5)
     return dict(reason_code=code, requires_admin=bool(code != 'cpu_sensor_available' and needs_admin and not admin),
                 administrator=bool(admin), cpu_hardware_count=cpus, raw_cpu_sensors=sensors,
                 driver_status=ring0.strip(), driver_backend='legacy_winring0' if pawnio is None else 'pawnio',
                 pawnio=dict(pawnio or {}), setup_required=code == 'pawnio_missing',
+                reboot_required=code == 'pawnio_reboot_required',
                 elevation_supported=False)
 
 
 def probe_pawnio():
     """Read installation metadata and test an existing device handle; never install.
 
-    The access mask matches the official PawnIO client. No DeviceIoControl or
-    hardware writes are performed here. LHM owns subsequent CPU read modules.
+    Delegates to pure-Python registry + Win32 CreateFileW state probing in
+    windows_sensor_access so the host never relies on CLR reflection for PawnIo.
     """
-    import ctypes
-    from ctypes import wintypes
-    from LibreHardwareMonitor.PawnIo import PawnIo
-    installed = bool(PawnIo.IsInstalled)
-    result = dict(installed=installed, version=str(PawnIo.Version) if installed else None,
-                  access_error=None)
-    if not installed:
-        return result
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    create = kernel.CreateFileW
-    create.argtypes = [wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,
-                       wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
-    create.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
-    handle = create(r'\\?\GLOBALROOT\Device\PawnIO',0xC0000000,3,None,3,0x80,None)
-    if handle == ctypes.c_void_p(-1).value:
-        result['access_error'] = ctypes.get_last_error()
-    else:
-        kernel.CloseHandle(handle)
-    return result
+    from utils.windows_sensor_access import PawnIOStatus, probe_pawnio_state
+    state = probe_pawnio_state()
+    if state.status == PawnIOStatus.UNKNOWN:
+        return dict(installed=None, version=state.version,
+                    access_error=state.access_error, reboot_required=False,
+                    status=state.status.value)
+    return dict(installed=bool(state.installed), version=state.version,
+                access_error=state.access_error, reboot_required=bool(state.reboot_required),
+                status=state.status.value)
 
 
 def emit(message):
@@ -105,25 +114,31 @@ def emit(message):
 def _sample_group(group, selected, read, stop, send=emit, clock=time.monotonic):
     """Keep the child responsive without native polling for absent sensors.
 
-    Empty heartbeats clear that group's readings. They never reuse/refresh an
-    older temperature. Retry native detection within ten seconds of no data.
+    Empty heartbeats clear that group's readings when no sensors exist. When
+    sensors are active, an early Event.wait wakeup must never skip polling or
+    emit an empty heartbeat that flashes N/A on the dashboard.
     """
     next_probe = 0.
     reason = ''
+    had_readings = False
     while not stop.is_set():
         now = clock()
         readings, errors = [], []
-        sampled = now >= next_probe
+        sampled = had_readings or now >= next_probe
         if sampled:
             for hardware in selected:
                 read(hardware, readings, errors)
-            next_probe = now+(1. if readings else 10.)
+            after = clock()
+            base = after if after > now else now
+            had_readings = bool(readings)
+            next_probe = base + (1. if had_readings else 10.)
             reason = '; '.join(errors)
             if not readings:
                 reason = (reason+'; ' if reason else '') + f'No {group.upper()} temperature sensors; hardware retry within 10s'
         send({'type': 'sample', 'group': group, 'readings': readings, 'reason': reason,
               'hardware_sampled': sampled})
-        stop.wait(1.)
+        remaining = max(0., next_probe - clock())
+        stop.wait(remaining if had_readings else min(1., remaining))
 
 
 def _restore_redirected_streams():
@@ -187,14 +202,17 @@ def run():
             admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
             admin = False
-        try:
-            report = str(comp.GetReport())
-        except Exception as exc:
-            report = 'Backend report unavailable: ' + str(exc)
+        report = ''
+        if not _has_cpu_temperature_value(hardware, classify_sensor):
+            try:
+                report = str(comp.GetReport())
+            except Exception as exc:
+                report = 'Backend report unavailable: ' + str(exc)
         try:
             pawnio = probe_pawnio()
         except Exception as exc:
-            pawnio = dict(installed=None, version=None, access_error=None, error=str(exc))
+            pawnio = dict(installed=None, version=None, access_error=None,
+                          reboot_required=False, error=str(exc))
         diagnostics = diagnose_backend(hardware, report, admin=admin, pawnio=pawnio)
         emit({'type': 'READY', 'backend': 'LHM ' + manifest['release'] + ' net472', 'diagnostics': diagnostics})
         def read(hw, readings, errors):

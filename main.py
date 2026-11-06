@@ -267,6 +267,19 @@ class _HelperUpgrade(QThread):
         self.result.emit(r.ok, r.message or r.err)
 
 
+class _PawnIOInstallWorker(QThread):
+    """Run PawnIO download, SHA-256 verification, and elevated installer off the GUI thread."""
+    finished_install = pyqtSignal(object, object)
+
+    def run(self):
+        from utils.windows_sensor_access import install_pawnio_driver
+        try:
+            res = install_pawnio_driver()
+            self.finished_install.emit(res, None)
+        except Exception as exc:
+            self.finished_install.emit(None, exc)
+
+
 class _KillWorker(QThread):
     """psutil.terminate() nền có kiểm tra tiến trình hệ thống và chờ xác nhận đã thoát."""
     finished_with = pyqtSignal(list, list)
@@ -1696,36 +1709,191 @@ class CyberCleanApp(QMainWindow):
         self._si_worker.snapshot.connect(self._on_snapshot)
         self._si_worker.start()
 
-    def _request_temperature_access(self):
-        """Request an elevated, read-only sensor helper; keep the GUI unprivileged."""
+    def _update_temperature_card_feedback(self, status, temp_val):
+        """Update both the tooltip and the inline card hint on the Windows TEMPERATURE card."""
+        if not hasattr(self, '_stat_cards') or 'temp' not in self._stat_cards:
+            return
+        card = self._stat_cards['temp']
+        status = status if isinstance(status, dict) else {}
+        reason_code = status.get('reason_code')
+        temp_tip = temperature_status_text(status, temp_val)
+        if temp_val is None:
+            if reason_code == 'pawnio_missing':
+                temp_tip += '\n\n' + _t(
+                    'temp_click_install_pawnio',
+                    'CPU temperature unavailable — click this card to install the PawnIO driver.')
+                hint_text = _t('temp_card_hint_pawnio', 'Install PawnIO driver')
+            elif reason_code == 'pawnio_reboot_required':
+                temp_tip += '\n\n' + _t(
+                    'temp_click_reboot_pawnio',
+                    'PawnIO is installed — please restart Windows to activate CPU temperature monitoring.')
+                hint_text = _t('temp_card_hint_reboot', 'Restart Windows')
+            else:
+                temp_tip += '\n\n' + _t(
+                    'temp_click_access',
+                    'N/A — click this card to enable CPU temperature monitoring.')
+                hint_text = _t('temp_card_hint_enable', 'Click to enable sensor')
+        else:
+            hint_text = ''
+        card.setToolTip(temp_tip)
+        if hasattr(card, 'set_hint'):
+            card.set_hint(hint_text)
+
+    def _set_temperature_reason(self, reason_code: str, reason: str = ''):
+        """Record a temperature reason_code on telemetry and update the dashboard tooltip/hint."""
+        from utils.windows_telemetry import set_windows_temperature_reason
+        set_windows_temperature_reason(
+            reason_code,
+            reason or reason_code,
+            setup_required=(reason_code == 'pawnio_missing'),
+        )
+        status = dict(getattr(self._snap, 'temperature_status', None) or {})
+        status['reason_code'] = reason_code
+        if reason:
+            status['reason'] = reason
+        if self._snap is not None:
+            self._snap.temperature_status = status
+        temp_val = getattr(self._snap, 'temp_max', None) if self._snap is not None else None
+        self._update_temperature_card_feedback(status, temp_val)
+
+    def _detect_pawnio_issue(self) -> str | None:
+        """Distinguish missing PawnIO ('pawnio_missing'), pending reboot ('pawnio_reboot_required'), or ready (None)."""
+        from utils.windows_sensor_access import PawnIOStatus, is_pawnio_installed, probe_pawnio_state
+        status = getattr(self._snap, 'temperature_status', None) if self._snap is not None else None
+        status = status if isinstance(status, dict) else {}
+        code = status.get('reason_code')
+        if code in ('pawnio_missing', 'pawnio_reboot_required'):
+            return code
+        pawnio_diag = (status.get('diagnostics') or {}).get('pawnio')
+        if isinstance(pawnio_diag, dict) and pawnio_diag.get('installed') is not None:
+            if pawnio_diag.get('installed') is False:
+                return 'pawnio_missing'
+            reboot_flag = pawnio_diag.get('reboot_required')
+            if reboot_flag is True or (reboot_flag is None and pawnio_diag.get('access_error') in (2, 3)):
+                return 'pawnio_reboot_required'
+            return None
+        if code in (
+                'cpu_access_denied', 'cpu_sensor_available',
+                'cpu_driver_blocked', 'cpu_driver_unavailable'):
+            return None
+        if not is_pawnio_installed():
+            return 'pawnio_missing'
+        probed = probe_pawnio_state()
+        if probed.status == PawnIOStatus.NOT_INSTALLED:
+            return 'pawnio_missing'
+        if probed.status == PawnIOStatus.REBOOT_REQUIRED:
+            return 'pawnio_reboot_required'
+        return None
+
+    def _is_pawnio_missing(self) -> bool:
+        """Return True when PawnIO is confirmed not installed."""
+        return self._detect_pawnio_issue() == 'pawnio_missing'
+
+    def _prompt_install_pawnio(self):
+        """Offer verified PawnIO driver installation or open the official PawnIO website."""
+        from utils.windows_sensor_access import PAWNIO_HOMEPAGE
+        existing_worker = getattr(self, '_pawnio_install_worker', None)
+        if existing_worker is not None and existing_worker.isRunning():
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(_t('temp_pawnio_install_title', 'PawnIO sensor driver required'))
+        box.setText(_t(
+            'temp_pawnio_install_body',
+            'LibreHardwareMonitor needs the signed PawnIO driver to read CPU temperatures on Windows.\n\n'
+            'Would you like CyberClean to verify and run the official PawnIO installer now '
+            '(requires Windows administrator approval)?'))
+        install_btn = box.addButton(
+            _t('temp_pawnio_btn_install', 'Install PawnIO Driver'),
+            QMessageBox.ButtonRole.AcceptRole)
+        web_btn = box.addButton(
+            _t('temp_pawnio_btn_website', 'Open pawnio.eu'),
+            QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == web_btn:
+            QDesktopServices.openUrl(QUrl(PAWNIO_HOMEPAGE))
+            return
+        if clicked != install_btn:
+            return
+        if hasattr(self, '_stat_cards') and 'temp' in self._stat_cards:
+            self._stat_cards['temp'].setToolTip(_t(
+                'temp_pawnio_installing',
+                'Installing PawnIO sensor driver… waiting for Windows approval.'))
+        worker = _PawnIOInstallWorker(self)
+        worker.finished_install.connect(self._on_pawnio_install_finished)
+        self._pawnio_install_worker = worker
+        worker.start()
+
+    def _on_pawnio_install_finished(self, install_result, error):
+        """Handle completion of the background PawnIO driver installer worker."""
+        if error is not None:
+            QMessageBox.warning(
+                self,
+                _t('temp_pawnio_install_title', 'PawnIO sensor driver required'),
+                _t('temp_pawnio_install_failed',
+                   'Could not install PawnIO automatically ({err}). You can download and install PawnIO_setup.exe manually from https://pawnio.eu/.',
+                   err=str(error)))
+            return
+        if getattr(install_result, 'reboot_required', False):
+            self._set_temperature_reason(
+                'pawnio_reboot_required',
+                'PawnIO installed; Windows restart required')
+            QMessageBox.information(
+                self,
+                _t('temp_pawnio_reboot_title', 'Windows restart required'),
+                _t('temp_pawnio_reboot_body',
+                   'The PawnIO sensor driver was installed, but Windows requires a system restart before the kernel driver can be loaded.\n\n'
+                   'Please restart your computer to enable CPU temperature monitoring.'))
+            return
+        self._set_temperature_reason(
+            'cpu_access_denied',
+            'PawnIO installed; restarting temperature reader')
+        from utils.windows_telemetry import request_windows_temperature_access
+        request_windows_temperature_access()
+
+    def _request_temperature_access(self, *, auto: bool = False):
+        """Check PawnIO status and restart or prompt for driver setup as needed."""
         if getattr(self, '_shutting_down', False) or not IS_WINDOWS:
             return
-        from utils.windows_sensor_access import installed_sensor_helper
-        if installed_sensor_helper() is None:
-            QMessageBox.information(
-                self, _t('temp_helper_install_title', 'Temperature reader unavailable'),
-                _t('temp_helper_install_body',
-                   'This source-run copy cannot safely request hardware access. Install CyberClean so its protected, read-only temperature helper can run when you approve the Windows prompt.'))
+        pawnio_issue = self._detect_pawnio_issue()
+        if pawnio_issue == 'pawnio_missing':
+            self._set_temperature_reason(
+                'pawnio_missing',
+                'PawnIO sensor driver is not installed')
+            if not auto:
+                self._prompt_install_pawnio()
+            return
+        if pawnio_issue == 'pawnio_reboot_required':
+            self._set_temperature_reason(
+                'pawnio_reboot_required',
+                'PawnIO installed; Windows restart required')
+            if not auto:
+                QMessageBox.information(
+                    self,
+                    _t('temp_pawnio_reboot_title', 'Windows restart required'),
+                    _t('temp_pawnio_reboot_body',
+                       'The PawnIO sensor driver was installed, but Windows requires a system restart before the kernel driver can be loaded.\n\n'
+                       'Please restart your computer to enable CPU temperature monitoring.'))
             return
         from utils.windows_telemetry import request_windows_temperature_access
-        if request_windows_temperature_access():
-            self._stat_cards['temp'].setToolTip(_t(
-                'temp_access_pending', 'Waiting for Windows approval to read CPU temperature.'))
+        request_windows_temperature_access()
 
     def _auto_request_temperature_access(self):
-        """Request sensor access once at startup when no unprivileged sample exists."""
+        """Synchronize PawnIO status on the temperature card once at startup."""
         if getattr(self, '_shutting_down', False) or not IS_WINDOWS:
             return
         if self._snap is not None and self._snap.temp_max is not None:
             return
-        # An already elevated app can read through its child process without a
-        # second UAC prompt. Source runs have no protected helper to launch.
-        if is_windows_admin():
+        pawnio_issue = self._detect_pawnio_issue()
+        if pawnio_issue is not None:
+            self._set_temperature_reason(
+                pawnio_issue,
+                'PawnIO sensor driver is not installed' if pawnio_issue == 'pawnio_missing'
+                else 'PawnIO installed; Windows restart required')
             return
-        from utils.windows_sensor_access import installed_sensor_helper
-        if installed_sensor_helper() is None:
-            return
-        self._request_temperature_access()
+        self._request_temperature_access(auto=True)
 
     def _refresh_now(self):
         if getattr(self, '_shutting_down', False):
@@ -1788,12 +1956,8 @@ class CyberCleanApp(QMainWindow):
         elif IS_WINDOWS:
             self._stat_cards['temp'].set_val('N/A', 'dim')
         if IS_WINDOWS:
-            temp_tip = temperature_status_text(
+            self._update_temperature_card_feedback(
                 getattr(s, 'temperature_status', {}), s.temp_max)
-            if s.temp_max is None:
-                temp_tip += '\n\n' + _t('temp_click_access',
-                    'CyberClean requests temperature access at startup. Click this card to retry if needed.')
-            self._stat_cards['temp'].setToolTip(temp_tip)
         # Network speed (NEW: uses net_up_bps / net_down_bps from sysinfo v2.3)
         if hasattr(self, '_stat_cards') and 'net' in self._stat_cards:
             up_s   = fmt_speed(s.net_up_bps)   if (s.net_up_bps is not None if IS_WINDOWS else bool(s.net_up_bps)) else '—'
@@ -4068,6 +4232,7 @@ class CyberCleanApp(QMainWindow):
 
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
+    if IS_WINDOWS and not is_windows_admin(): request_windows_admin()
     # HiDPI rounding policy — set before QApplication for crisp rendering on 4K
     from PyQt6.QtCore import Qt as _Qt
     try:

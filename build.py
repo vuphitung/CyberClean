@@ -12,7 +12,7 @@ Usage:
   python3 build.py --deb        → build .deb  (Debian/Ubuntu)
   python3 build.py --check      → check dependencies only
 """
-import sys, os, shutil, subprocess, platform, re
+import sys, os, shutil, subprocess, platform, re, json, hashlib, urllib.request
 from pathlib import Path
 
 try:
@@ -101,18 +101,69 @@ def check_deps():
         ok_all = False
     return ok_all
 
+
+def _ensure_pawnio_installer(destination_dir: Path | None = None) -> Path | None:
+    """Verify (or download and verify) official PawnIO_setup.exe against pinned SHA-256."""
+    vendor = ROOT / 'vendor' / 'lhm'
+    manifest_path = vendor / 'manifest.json'
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    pawnio = manifest.get('pawnio') or {}
+    installer_name = pawnio.get('installer', 'PawnIO_setup.exe')
+    expected_sha256 = str(pawnio.get('sha256', '')).lower()
+    source_url = pawnio.get('source', '')
+    if not expected_sha256:
+        return None
+
+    cached = vendor / installer_name
+    if cached.is_file():
+        actual = hashlib.sha256(cached.read_bytes()).hexdigest().lower()
+        if actual != expected_sha256:
+            raise RuntimeError(
+                f'SHA-256 mismatch for {cached}: expected {expected_sha256}, got {actual}'
+            )
+        ok(f'Verified {installer_name} SHA-256 ({expected_sha256[:12]}…)')
+    elif source_url:
+        warn(f'Downloading {installer_name} v{pawnio.get("version", "")} from {source_url}...')
+        try:
+            req = urllib.request.Request(source_url, headers={'User-Agent': f'{APP}-Build/{VERSION}'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            actual = hashlib.sha256(data).hexdigest().lower()
+            if actual != expected_sha256:
+                raise RuntimeError(
+                    f'Downloaded {installer_name} SHA-256 mismatch: expected {expected_sha256}, got {actual}'
+                )
+            cached.write_bytes(data)
+            ok(f'Downloaded and verified {installer_name} ({len(data)/1024/1024:.2f} MB)')
+        except Exception as exc:
+            warn(f'Could not bundle {installer_name} during build ({exc}); in-app installer will download on demand.')
+            return None
+
+    if cached.is_file() and destination_dir is not None:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = destination_dir / installer_name
+        shutil.copy2(cached, dest_file)
+        if hashlib.sha256(dest_file.read_bytes()).hexdigest().lower() != expected_sha256:
+            raise RuntimeError(f'Post-copy SHA-256 verification failed for {dest_file}')
+        ok(f'Bundled PawnIO installer: {dest_file}')
+        return dest_file
+    return cached if cached.is_file() else None
+
+
 # ── PyInstaller shared options ────────────────────────────
 def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     sep  = ';' if OS == 'Windows' else ':'
     mode = '--onefile' if onefile else '--onedir'
 
     if sys.platform == "win32":
-        import json, hashlib
         vendor = ROOT / 'vendor' / 'lhm'
         manifest = json.loads((vendor / 'manifest.json').read_text(encoding='utf-8'))
         for name, expected in manifest['sha256'].items():
             if hashlib.sha256((vendor / name).read_bytes()).hexdigest() != expected:
                 raise RuntimeError(f'Missing or mismatched Windows dependency: {name}')
+        _ensure_pawnio_installer()
 
     parts = [
         f'{_pyinstaller_bin()} {mode} --noconsole --noconfirm',
@@ -124,6 +175,7 @@ def _pyinstaller_cmd(onefile: bool, icon: Path | None) -> str:
     ]
 
     if sys.platform == "win32":
+        parts.append('--uac-admin')
         parts.append(f'--add-data "vendor/lhm{sep}vendor/lhm"')
         parts.extend(['--hidden-import pythonnet', '--hidden-import utils.windows_temperature_host'])
 
@@ -186,56 +238,11 @@ def build_windows(make_inno: bool = False):
         err(f'{exe} not found after build')
         return False
 
-    if not _build_windows_sensor_host(app_dir):
-        err('Protected temperature helper build failed')
-        return False
+    _ensure_pawnio_installer(app_dir)
 
     ok(f'Built: {app_dir}  ({sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1024/1024:.1f} MB total)')
     if make_inno:
         _generate_inno_script(exe)
-    return True
-
-
-def _build_windows_sensor_host(app_dir: Path) -> bool:
-    """Bundle the minimal read-only elevated helper beside the normal GUI."""
-    helper_name = 'CyberCleanSensorHost'
-    helper_dist = BUILD / 'sensor-host-dist'
-    helper_work = BUILD / 'sensor-host-work'
-    if helper_dist.exists():
-        shutil.rmtree(helper_dist)
-    if helper_work.exists():
-        shutil.rmtree(helper_work)
-    helper_dist.mkdir(parents=True)
-    helper_work.mkdir(parents=True)
-    BUILD.mkdir(parents=True, exist_ok=True)
-    sep = ';'
-    vendor_dir = ROOT / 'vendor' / 'lhm'
-    entrypoint = ROOT / 'sensor_host_entry.py'
-    cmd = ' '.join([
-        f'{_pyinstaller_bin()} --onedir --noconsole --clean',
-        f'--name {helper_name}',
-        f'--distpath "{helper_dist}"',
-        f'--workpath "{helper_work}"',
-        f'--specpath "{BUILD}"',
-        f'--add-data "{vendor_dir}{sep}vendor/lhm"',
-        '--hidden-import pythonnet',
-        '--hidden-import utils.windows_temperature_host',
-        '--hidden-import clr',
-        f'"{entrypoint}"',
-    ])
-    if run(cmd).returncode != 0:
-        return False
-    built = helper_dist / helper_name
-    if not (built / f'{helper_name}.exe').is_file():
-        return False
-    internal = built / '_internal'
-    if not (internal / 'vendor' / 'lhm' / 'manifest.json').is_file():
-        return False
-    destination = app_dir / 'sensor-host'
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(built, destination)
-    ok(f'Bundled protected sensor helper: {destination / (helper_name + ".exe")}')
     return True
 
 
@@ -289,6 +296,10 @@ def _generate_inno_script(exe: Path):
         '',
         '[Tasks]',
         'Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"',
+        'Name: "pawniodriver"; Description: "Install PawnIO hardware sensor driver (required for CPU temperature)"; GroupDescription: "Hardware monitoring:"',
+        '',
+        '[Dirs]',
+        'Name: "{app}"; Permissions: admins-full system-full users-readexec',
         '',
         '[Files]',
         f'Source: "dist\\{APP}\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs',
@@ -301,8 +312,19 @@ def _generate_inno_script(exe: Path):
         f'Name: "{{autodesktop}}\\{APP}"; Filename: "{{app}}\\{APP}.exe"; Tasks: desktopicon',
         '',
         '[Run]',
+        '; Install PawnIO CPU sensor driver if selected and bundled (silent install, skipped if already installed)',
+        'Filename: "{app}\\PawnIO_setup.exe"; Parameters: "-install -silent"; StatusMsg: "Installing PawnIO CPU sensor driver..."; Tasks: pawniodriver; Check: ShouldInstallPawnIO; Flags: waituntilterminated skipifdoesntexist',
         '; Launch app sau khi cài xong',
         f'Filename: "{{app}}\\{APP}.exe"; Description: "Launch {APP}"; Flags: nowait postinstall',
+        '',
+        '[Code]',
+        'function ShouldInstallPawnIO(): Boolean;',
+        'var',
+        '  Ver: String;',
+        'begin',
+        "  Result := not (RegQueryStringValue(HKLM64, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PawnIO', 'DisplayVersion', Ver) and (Length(Ver) > 0))",
+        "            and not (RegQueryStringValue(HKLM, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PawnIO', 'DisplayVersion', Ver) and (Length(Ver) > 0));",
+        'end;',
         '',
     ]
 

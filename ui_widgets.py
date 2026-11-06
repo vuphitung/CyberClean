@@ -1242,8 +1242,21 @@ class TemperatureStatCard(StatCard):
         super().__init__(label, init_val, color, parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        for child in (self.lbl_name, self.lbl_val, self._dot):
+        self.lbl_hint = QLabel('')
+        self.lbl_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_hint.setStyleSheet(
+            f'color:{C["text3"]};font-size:10px;font-family:{UI};'
+            f'border:none;background:transparent;'
+        )
+        self.lbl_hint.hide()
+        self.layout().addWidget(self.lbl_hint)
+        for child in (self.lbl_name, self.lbl_val, self._dot, self.lbl_hint):
             child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_hint(self, text: str = ''):
+        text = (text or '').strip()
+        self.lbl_hint.setText(text)
+        self.lbl_hint.setVisible(bool(text))
 
     def mouseReleaseEvent(self, event):
         if (event.button() == Qt.MouseButton.LeftButton and

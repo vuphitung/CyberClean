@@ -80,8 +80,20 @@ def test_pinned_vendor_hashes_and_packaging():
     assert set(manifest['load_order']) == set(manifest['sha256'])
     for name, digest in manifest['sha256'].items():
         assert hashlib.sha256((vendor/name).read_bytes()).hexdigest() == digest
-    assert 'vendor/lhm' in (root/'CyberClean.spec').read_text(encoding='utf-8')
-    assert 'vendor/lhm' in (root/'build.py').read_text(encoding='utf-8')
+    pawnio = manifest['pawnio']
+    assert pawnio['version'] == '2.2.0'
+    assert pawnio['installer'] == 'PawnIO_setup.exe'
+    assert pawnio['sha256'] == '1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032'
+    spec_text = (root/'CyberClean.spec').read_text(encoding='utf-8')
+    assert 'vendor/lhm' in spec_text
+    assert 'uac_admin=True' in spec_text
+    build_text = (root/'build.py').read_text(encoding='utf-8')
+    assert 'vendor/lhm' in build_text
+    assert '--uac-admin' in build_text
+    iss_text = (root/'CyberClean.iss').read_text(encoding='utf-8')
+    assert 'PawnIO_setup.exe' in iss_text
+    assert 'ShouldInstallPawnIO' in iss_text
+    assert 'DisplayVersion' in iss_text
 
 
 def test_gpu_heartbeat_does_not_hide_hung_cpu_sampler():
@@ -114,6 +126,34 @@ def test_sensorless_hardware_is_retried_within_ten_seconds_with_empty_heartbeats
     assert len(messages)==12 and all(message['readings']==[] for message in messages)
     assert [i for i,message in enumerate(messages) if message['hardware_sampled']] == [0,10]
     assert all('retry within 10s' in message['reason'] for message in messages)
+
+
+def test_sample_group_never_emits_empty_heartbeat_on_early_wakeup_when_sensors_active():
+    from utils.windows_temperature_host import _sample_group
+
+    class EarlyWakeStop:
+        def __init__(self):
+            self.now = 0.0
+            self.steps = 0
+
+        def is_set(self):
+            return self.steps >= 4
+
+        def wait(self, seconds):
+            self.steps += 1
+            self.now += max(0.0, seconds - 0.008)
+
+    stop = EarlyWakeStop()
+    messages = []
+
+    def read(hardware, readings, errors):
+        stop.now += 0.015
+        readings.append({'id': '/cpu/0/temp/0', 'label': 'CPU Package', 'kind': 'cpu_package', 'value': 62.0})
+
+    _sample_group('cpu', [object()], read, stop, send=messages.append, clock=lambda: stop.now)
+    assert len(messages) == 4
+    assert all(m['hardware_sampled'] is True for m in messages)
+    assert all(len(m['readings']) == 1 and m['readings'][0]['value'] == 62.0 for m in messages)
 
 
 def test_empty_heartbeats_clear_temperature_without_refreshing_value_age():
@@ -162,18 +202,49 @@ def test_backend_diagnosis_keeps_non_permission_failure_distinct():
     assert not result['requires_admin']
 
 
-def test_modern_pawnio_diagnostics_distinguish_setup_permission_and_driver_errors():
+def test_modern_pawnio_diagnostics_distinguish_setup_reboot_permission_and_driver_errors():
     from types import SimpleNamespace as N
     from utils.windows_temperature_host import diagnose_backend
+
     cpu=N(HardwareType='Cpu',SubHardware=[],Sensors=[
         N(Identifier='package',Name='CPU Package',SensorType='Temperature',Value=None)])
     missing=diagnose_backend([cpu],admin=False,pawnio=dict(installed=False))
     assert missing['reason_code']=='pawnio_missing' and missing['setup_required']
     assert not missing['requires_admin']
+    reboot=diagnose_backend([cpu],admin=True,pawnio=dict(installed=True,access_error=2,reboot_required=True))
+    assert reboot['reason_code']=='pawnio_reboot_required' and reboot['reboot_required']
+    assert not reboot['requires_admin']
+    post_reboot_unavail=diagnose_backend([cpu],admin=True,pawnio=dict(installed=True,access_error=2,reboot_required=False))
+    assert post_reboot_unavail['reason_code']=='cpu_driver_unavailable'
+    assert not post_reboot_unavail['reboot_required'] and not post_reboot_unavail['setup_required']
     denied=diagnose_backend([cpu],admin=False,pawnio=dict(installed=True,access_error=5))
     assert denied['reason_code']=='cpu_access_denied' and denied['requires_admin']
     blocked=diagnose_backend([cpu],admin=True,pawnio=dict(installed=True,access_error=577))
     assert blocked['reason_code']=='cpu_driver_blocked' and not blocked['requires_admin']
+
+    unknown_no_sensors=diagnose_backend([N(HardwareType='Cpu',SubHardware=[],Sensors=[])],
+                                        admin=True, pawnio=dict(installed=None, version=None, access_error=None))
+    assert unknown_no_sensors['reason_code']=='cpu_sensor_missing'
+    assert not unknown_no_sensors['setup_required']
+
+
+def test_host_probe_pawnio_uses_pure_python_probe_pawnio_state(monkeypatch):
+    from utils import windows_sensor_access as access
+    from utils.windows_temperature_host import probe_pawnio
+
+    monkeypatch.setattr(
+        access,
+        'probe_pawnio_state',
+        lambda: access.PawnIOState(access.PawnIOStatus.READY, True, '2.2.0.0', None),
+    )
+    res = probe_pawnio()
+    assert res == dict(
+        installed=True,
+        version='2.2.0.0',
+        access_error=None,
+        reboot_required=False,
+        status='ready',
+    )
 
 
 def test_protocol_preserves_backend_reason_and_reports_exact_fresh_cpu_source():
@@ -197,6 +268,25 @@ for line in sys.stdin:
     assert result['cpu']==65 and result['source']==dict(id='package',label='CPU Package',kind='cpu_package',age_seconds=.5)
 
 
+def test_restart_clears_pawnio_missing_override_and_restarts_child():
+    script = '''import json,sys
+print(json.dumps({'type':'READY','backend':'lhm','diagnostics':{'reason_code':'cpu_sensor_available'}}),flush=True)
+print(json.dumps({'type':'sample','group':'cpu','readings':[{'id':'cpu','kind':'cpu_package','value':58}]}),flush=True)
+for line in sys.stdin:
+    if line.strip()=='STOP': break
+'''
+    host = TemperatureHost([sys.executable, '-u', '-c', script])
+    host.set_diagnostic_reason('pawnio_missing', 'PawnIO not installed')
+    assert host._override_reason_code == 'pawnio_missing'
+
+    assert host.request_privileged_access() is True
+    assert host._override_reason_code is None
+    try:
+        wait_for(lambda: host.snapshot()['cpu'] == 58, timeout=4)
+    finally:
+        host.close()
+
+
 def test_temperature_tooltip_explains_missing_pawnio_in_current_language(monkeypatch):
     from utils.i18n import T
     monkeypatch.setattr(T, 'lang', 'vi')
@@ -207,6 +297,14 @@ def test_temperature_tooltip_explains_missing_pawnio_in_current_language(monkeyp
     assert 'LHM v0.9.6' in text
 
 
+def test_temperature_tooltip_explains_reboot_required_in_vietnamese(monkeypatch):
+    from utils.i18n import T
+    monkeypatch.setattr(T, 'lang', 'vi')
+    status = dict(reason_code='pawnio_reboot_required', backend='LHM v0.9.6 net472')
+    text = temperature_status_text(status)
+    assert 'PawnIO' in text and 'khởi động lại' in text
+
+
 def test_temperature_tooltip_names_real_sensor_and_sample_age(monkeypatch):
     from utils.i18n import T
     monkeypatch.setattr(T, 'lang', 'vi')
@@ -215,8 +313,104 @@ def test_temperature_tooltip_names_real_sensor_and_sample_age(monkeypatch):
     assert 'CPU Package' in text and '0.4 giây' in text
 
 
-def test_temperature_tooltip_explains_protected_helper_status_in_vietnamese(monkeypatch):
-    from utils.i18n import T
-    monkeypatch.setattr(T, 'lang', 'vi')
-    text = temperature_status_text({'reason_code': 'sensor_helper_not_installed'})
-    assert 'bộ đọc nhiệt độ' in text and 'CyberClean' in text
+def test_main_auto_request_temperature_access_three_state_flow(monkeypatch):
+    import ast
+    from types import SimpleNamespace
+    from utils.i18n import _t
+    from utils import windows_sensor_access as access
+    from utils import windows_telemetry as telemetry
+
+    main_path = Path(__file__).resolve().parents[1] / 'main.py'
+    tree = ast.parse(main_path.read_text(encoding='utf-8'))
+    app_cls = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == 'CyberCleanApp'
+    )
+    target_names = {
+        '_update_temperature_card_feedback',
+        '_set_temperature_reason',
+        '_detect_pawnio_issue',
+        '_is_pawnio_missing',
+        '_request_temperature_access',
+        '_auto_request_temperature_access',
+    }
+    selected_methods = [
+        node for node in app_cls.body
+        if isinstance(node, ast.FunctionDef) and node.name in target_names
+    ]
+    mod_ast = ast.Module(body=selected_methods, type_ignores=[])
+    ast.fix_missing_locations(mod_ast)
+    ns = {
+        'IS_WINDOWS': True,
+        '_t': _t,
+        'temperature_status_text': temperature_status_text,
+        'sys': sys,
+    }
+    exec(compile(mod_ast, str(main_path), 'exec'), ns)
+
+    class DummyCard:
+        def __init__(self):
+            self.tooltip = ''
+            self.hint = ''
+        def setToolTip(self, text):
+            self.tooltip = text
+        def set_hint(self, text):
+            self.hint = text
+
+    class DummyApp:
+        _shutting_down = False
+        _update_temperature_card_feedback = ns['_update_temperature_card_feedback']
+        _set_temperature_reason = ns['_set_temperature_reason']
+        _detect_pawnio_issue = ns['_detect_pawnio_issue']
+        _is_pawnio_missing = ns['_is_pawnio_missing']
+        _request_temperature_access = ns['_request_temperature_access']
+        _auto_request_temperature_access = ns['_auto_request_temperature_access']
+        def __init__(self):
+            self._snap = SimpleNamespace(temp_max=None, temperature_status={})
+            self._stat_cards = {'temp': DummyCard()}
+
+    recorded_reasons = []
+    requested_access = []
+    monkeypatch.setattr(
+        telemetry,
+        'set_windows_temperature_reason',
+        lambda code, reason, **kw: recorded_reasons.append((code, reason)) or True,
+    )
+    monkeypatch.setattr(
+        telemetry,
+        'request_windows_temperature_access',
+        lambda: requested_access.append(True) or True,
+    )
+
+    # State 1: PawnIO is missing -> sets pawnio_missing, updates tooltip and inline card hint
+    monkeypatch.setattr(access, 'is_pawnio_installed', lambda: False)
+    dummy = DummyApp()
+    dummy._auto_request_temperature_access()
+    assert dummy._snap.temperature_status['reason_code'] == 'pawnio_missing'
+    assert recorded_reasons[-1][0] == 'pawnio_missing'
+    assert 'PawnIO' in dummy._stat_cards['temp'].tooltip
+    assert dummy._stat_cards['temp'].hint != ''
+    assert not requested_access
+
+    # State 2: PawnIO installed, but pending reboot -> sets pawnio_reboot_required
+    monkeypatch.setattr(access, 'is_pawnio_installed', lambda: True)
+    monkeypatch.setattr(
+        access,
+        'probe_pawnio_state',
+        lambda: access.PawnIOState(access.PawnIOStatus.REBOOT_REQUIRED, True, '2.2.0.0', 2),
+    )
+    dummy_reboot = DummyApp()
+    dummy_reboot._auto_request_temperature_access()
+    assert dummy_reboot._snap.temperature_status['reason_code'] == 'pawnio_reboot_required'
+    assert recorded_reasons[-1][0] == 'pawnio_reboot_required'
+    assert not requested_access
+
+    # State 3: PawnIO installed & active -> triggers temperature reader
+    monkeypatch.setattr(
+        access,
+        'probe_pawnio_state',
+        lambda: access.PawnIOState(access.PawnIOStatus.READY, True, '2.2.0.0', None),
+    )
+    dummy_ready = DummyApp()
+    dummy_ready._auto_request_temperature_access()
+    assert requested_access == [True]

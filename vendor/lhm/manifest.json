@@ -3,7 +3,18 @@
   "framework": "net472",
   "source": "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip",
   "archive_sha256": "086d9f1b5a99e643edc2cfaaac16051685b551e4c5ac0b32a57c58c0e529c001",
-  "driver_backend": "PawnIO (separately installed; no bundled kernel driver)",
+  "driver_backend": "PawnIO (official installer verified by SHA-256; installed via setup or on-demand)",
+  "pawnio": {
+    "version": "2.2.0",
+    "installer": "PawnIO_setup.exe",
+    "source": "https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe",
+    "homepage": "https://pawnio.eu/",
+    "sha256": "1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032",
+    "silent_args": [
+      "-install",
+      "-silent"
+    ]
+  },
   "load_order": [
     "System.Numerics.Vectors.dll",
     "System.Runtime.CompilerServices.Unsafe.dll",

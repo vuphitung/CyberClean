@@ -9,6 +9,7 @@ from copy import deepcopy
 from functools import lru_cache
 import logging
 import os
+import sys
 import threading
 import time
 from typing import NamedTuple
@@ -355,13 +356,27 @@ def get_windows_snapshot():
 
 def request_windows_temperature_access():
     """Switch only the temperature sampler to the protected read-only helper."""
-    if os.name != 'nt':
+    if os.name != 'nt' and sys.platform != 'win32':
         return False
     get_windows_snapshot()  # ensure the service and sensor supervisor exist
     with _service_lock:
         service = _service
     return bool(service and service._temperature and
                 service._temperature.request_privileged_access())
+
+
+def set_windows_temperature_reason(code, reason, *, requires_admin=False, setup_required=None):
+    """Set a specific diagnostic reason on the temperature supervisor."""
+    if os.name != 'nt' and sys.platform != 'win32':
+        return False
+    get_windows_snapshot()
+    with _service_lock:
+        service = _service
+    if service and service._temperature:
+        service._temperature.set_diagnostic_reason(
+            code, reason, requires_admin=requires_admin, setup_required=setup_required)
+        return True
+    return False
 
 
 def close_windows_telemetry():

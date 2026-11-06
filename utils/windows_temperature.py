@@ -1,4 +1,4 @@
-"""One persistent Windows temperature child. No CLR/WMI inside the GUI process."""
+"""One persistent Windows temperature child running with the app's privileges."""
 import json
 import logging
 import math
@@ -29,7 +29,9 @@ def temperature_status_text(status, value=None):
     code = status.get('reason_code')
     messages = {
         'pawnio_missing': ('temp_pawnio_missing',
-            'LHM detected the CPU, but PawnIO is not installed. Windows needs administrator approval to install this sensor driver.'),
+            'LHM detected the CPU, but the PawnIO sensor driver is not installed. Click this card to install PawnIO (requires administrator approval) or run the CyberClean installer.'),
+        'pawnio_reboot_required': ('temp_pawnio_reboot_required',
+            'PawnIO sensor driver is installed, but Windows requires a system restart to finish loading it.'),
         'cpu_access_denied': ('temp_access_denied',
             'Windows denied access to the CPU sensor. This sensor needs administrator-level hardware access.'),
         'cpu_driver_blocked': ('temp_driver_blocked',
@@ -44,12 +46,6 @@ def temperature_status_text(status, value=None):
             'The CPU temperature sensor was detected, but returned no value.'),
         'cpu_data_stale': ('temp_data_stale',
             'The last CPU temperature sample is too old, so it is hidden.'),
-        'sensor_helper_not_installed': ('temp_helper_not_installed',
-            'The protected temperature reader is not installed. Install CyberClean to enable this sensor.'),
-        'elevation_cancelled': ('temp_elevation_cancelled',
-            'Windows administrator approval was cancelled. No temperature was read.'),
-        'sensor_helper_failed': ('temp_helper_failed',
-            'The protected temperature reader could not start. No temperature was read.'),
     }
     key, default = messages.get(code, ('temp_unavailable',
         'No fresh CPU temperature is available. The dashboard will not substitute GPU or estimated values.'))
@@ -94,10 +90,11 @@ class TemperatureHost:
         self.command, self.clock = command, clock
         self._diagnostics = {}
         self._backend_diagnostics = {}
+        self._override_reason_code = None
         self._backend = ''
         self.startup_timeout, self.sample_timeout = startup_timeout, sample_timeout
         self._stop = threading.Event()
-        self._privileged_requested = threading.Event()
+        self._restart_requested = threading.Event()
         self._lock = threading.Lock()
         self._thread = None
         self._readings = []
@@ -106,7 +103,7 @@ class TemperatureHost:
 
     def start(self):
         with self._lock:
-            if self._thread is not None or self._stop.is_set():
+            if self._stop.is_set() or (self._thread is not None and self._thread.is_alive()):
                 return
             self._thread = threading.Thread(target=self._supervise, name='temperature-host', daemon=True)
             self._thread.start()
@@ -117,21 +114,35 @@ class TemperatureHost:
         log.warning('%s', reason)
 
     def _set_backend_reason(self, code, reason):
+        self.set_diagnostic_reason(code, reason, requires_admin=False)
+
+    def set_diagnostic_reason(self, code, reason, *, requires_admin=False, setup_required=None):
         with self._lock:
-            self._backend_diagnostics = dict(reason_code=code, requires_admin=False)
+            diag = dict(self._backend_diagnostics)
+            diag['reason_code'] = code
+            diag['requires_admin'] = bool(requires_admin)
+            if setup_required is not None:
+                diag['setup_required'] = bool(setup_required)
+            elif code == 'pawnio_missing':
+                diag['setup_required'] = True
+            self._backend_diagnostics = diag
+            self._override_reason_code = code
             self._reason = reason
-        log.warning('%s', reason)
+        log.warning('%s (%s)', reason, code)
 
     def request_privileged_access(self):
-        """Ask for a one-session, sensor-only helper from the protected install path."""
-        from utils.windows_sensor_access import installed_sensor_helper
-        if installed_sensor_helper() is None:
-            self._set_backend_reason('sensor_helper_not_installed',
-                                     'Protected sensor helper is not installed')
-            return False
+        """Restart the child temperature reader (e.g. after PawnIO driver installation)."""
         if self._stop.is_set():
             return False
-        self._privileged_requested.set()
+        with self._lock:
+            if self._override_reason_code in ('pawnio_missing', 'cpu_access_denied'):
+                self._override_reason_code = None
+                if self._backend_diagnostics.get('reason_code') == 'pawnio_missing':
+                    diag = dict(self._backend_diagnostics)
+                    diag['setup_required'] = False
+                    self._backend_diagnostics = diag
+        self._restart_requested.set()
+        self.start()
         return True
 
     @staticmethod
@@ -146,26 +157,21 @@ class TemperatureHost:
         backoff = 1.
         while not self._stop.is_set():
             proc, reader = None, None
-            elevated = self._privileged_requested.is_set()
-            restart_for_elevation = False
+            self._restart_requested.clear()
+            restart_immediately = False
             try:
-                if elevated:
-                    self._set_reason('requesting read-only sensor access')
-                    from utils.windows_sensor_access import start_elevated_sensor_host
-                    proc = start_elevated_sensor_host()
-                else:
-                    self._set_reason('starting LHM host')
-                    proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                            stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
-                                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                self._set_reason('starting LHM host')
+                proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True, encoding='utf-8',
+                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 messages = queue.Queue(maxsize=64)
                 reader = threading.Thread(target=self._read_pipe, args=(proc.stdout, messages), daemon=True)
                 reader.start()
                 ready = False
                 deadline = self.clock()+self.startup_timeout
                 while not self._stop.is_set():
-                    if self._privileged_requested.is_set() and not elevated:
-                        restart_for_elevation = True
+                    if self._restart_requested.is_set():
+                        restart_immediately = True
                         break
                     if self.clock() >= deadline:
                         raise TimeoutError('sample deadline exceeded' if ready else 'READY handshake deadline exceeded')
@@ -182,7 +188,22 @@ class TemperatureHost:
                         ready = True
                         with self._lock:
                             self._backend = str(message.get('backend', ''))
-                            self._backend_diagnostics = dict(message.get('diagnostics', {}))
+                            incoming = dict(message.get('diagnostics', {}))
+                            incoming_code = incoming.get('reason_code')
+                            if incoming_code == 'cpu_sensor_available':
+                                self._override_reason_code = None
+                            elif self._override_reason_code == 'pawnio_reboot_required':
+                                incoming['reason_code'] = 'pawnio_reboot_required'
+                                incoming['requires_admin'] = False
+                            elif incoming_code in ('pawnio_missing', 'pawnio_reboot_required'):
+                                self._override_reason_code = None
+                            elif (incoming_code in ('cpu_access_denied', None, '')
+                                  and self._override_reason_code in ('pawnio_missing', 'pawnio_reboot_required')):
+                                incoming['reason_code'] = self._override_reason_code
+                                incoming['requires_admin'] = False
+                                if self._override_reason_code == 'pawnio_missing':
+                                    incoming['setup_required'] = True
+                            self._backend_diagnostics = incoming
                         deadline = self.clock()+self.sample_timeout
                         group_deadlines = dict(cpu=deadline, gpu=deadline)
                     elif message.get('type') == 'sample' and ready:
@@ -206,23 +227,12 @@ class TemperatureHost:
                         if group in ('cpu', 'gpu'):
                             group_deadlines[group] = now+self.sample_timeout
                         else:
-                            # Legacy/fake hosts may deliver a combined sample.
                             group_deadlines = dict(cpu=now+self.sample_timeout,
                                                    gpu=now+self.sample_timeout)
-                        # A healthy GPU heartbeat cannot hide a hung CPU Update,
-                        # or vice versa. Restart the dedicated child on either.
                         deadline = min(group_deadlines.values())
                         backoff = 1.
             except Exception as exc:
-                if elevated:
-                    self._privileged_requested.clear()
-                    cancelled = getattr(exc, 'winerror', None) == 1223
-                    code = 'elevation_cancelled' if cancelled else 'sensor_helper_failed'
-                    message = ('Sensor permission was not approved' if cancelled else
-                               f'{type(exc).__name__}: {exc}')
-                    self._set_backend_reason(code, message)
-                else:
-                    self._set_reason(f'{type(exc).__name__}: {exc}')
+                self._set_reason(f'{type(exc).__name__}: {exc}')
             finally:
                 if proc is not None:
                     try:
@@ -230,19 +240,32 @@ class TemperatureHost:
                             proc.stdin.write('STOP\n'); proc.stdin.flush()
                             proc.wait(timeout=1.5)
                     except (OSError, subprocess.TimeoutExpired):
-                        # This dedicated child may be stuck inside native CLR/Close.
-                        # No QThread or GUI process is forcibly terminated.
                         if proc.poll() is None:
-                            proc.terminate()
+                            try:
+                                proc.terminate()
+                            except OSError:
+                                pass
                             try:
                                 proc.wait(timeout=1.)
-                            except subprocess.TimeoutExpired:
-                                proc.kill(); proc.wait(timeout=1.)
+                            except (OSError, subprocess.TimeoutExpired):
+                                try:
+                                    proc.kill()
+                                except OSError:
+                                    pass
+                                try:
+                                    proc.wait(timeout=1.)
+                                except (OSError, subprocess.TimeoutExpired):
+                                    pass
                     finally:
                         for stream in (proc.stdin, proc.stdout):
-                            if stream: stream.close()
-                        if reader: reader.join(timeout=.5)
-            if restart_for_elevation:
+                            if stream:
+                                try:
+                                    stream.close()
+                                except OSError:
+                                    pass
+                        if reader:
+                            reader.join(timeout=.5)
+            if restart_immediately:
                 backoff = .1
                 continue
             if self._stop.wait(backoff):
