@@ -1952,9 +1952,17 @@ class CyberCleanApp(QMainWindow):
         if s.temp_max:
             tc = 'red' if s.temp_max > 85 else 'yellow' if s.temp_max > 75 else 'green'
             self._stat_cards['temp'].set_val(f'{s.temp_max:.0f}°C', tc)
-
-        elif IS_WINDOWS:
+        else:
+            # Linux/macOS too: never keep a stale number when the sensor vanishes.
             self._stat_cards['temp'].set_val('N/A', 'dim')
+        if not IS_WINDOWS:
+            _ts = getattr(s, 'temperature_status', None) or {}
+            _src = _ts.get('source')
+            if s.temp_max and _src:
+                _low = ' (ACPI – low confidence)' if _ts.get('confidence') == 'low' else ''
+                self._stat_cards['temp'].setToolTip(f'CPU sensor: {_src}{_low}')
+            elif _ts.get('reason'):
+                self._stat_cards['temp'].setToolTip(_ts['reason'])
         if IS_WINDOWS:
             self._update_temperature_card_feedback(
                 getattr(s, 'temperature_status', {}), s.temp_max)

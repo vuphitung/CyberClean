@@ -155,6 +155,138 @@ _last_net_io   = None   # psutil._common.snetio | None
 _last_net_time = 0.0    # float timestamp của lần đo trước
 
 
+# ── Linux temperature (CPU-specific, uncached-ish, source-aware) ──────────────
+# Root cause of the "stuck at 74°C" bug: the old chain returned the MAXIMUM of
+# every sensor on the machine (NVMe, Wi-Fi card, GPU, ACPI zones...) and cached
+# it for 60 s. Any single hot/stuck sensor (often an ACPI zone or NVMe) won the
+# max() forever. Now we read the CPU package sensor directly from sysfs.
+_SYS_HWMON   = Path('/sys/class/hwmon')
+_SYS_THERMAL = Path('/sys/class/thermal')
+_LINUX_TEMP_TTL = 2.0
+_linux_temp_cache: tuple = ({}, None, {}, 0.0)
+_linux_temp_meta: dict = {}
+
+# hwmon chip names / thermal-zone types that are the CPU die/package.
+_CPU_CHIPS = ('coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'cpu-thermal',
+              'cpu0_thermal', 'soc_thermal', 'x86_pkg_temp', 'bcm2835_thermal',
+              'armada_thermal', 'sun8i_ths', 'rockchip_thermal')
+# Never counted as "CPU temperature" (still listed in temp_all for details).
+_NON_CPU_CHIPS = ('nvme', 'iwlwifi', 'ath', 'mt76', 'rtw', 'amdgpu', 'nouveau',
+                  'radeon', 'nvidia', 'bat', 'ucsi', 'pch', 'drivetemp',
+                  'acpitz', 'int3400', 'ac', 'spd', 'jc42')
+
+
+def _read_millideg(path: Path):
+    try:
+        raw = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    v = raw / 1000.0
+    return v if 1.0 < v < 150.0 else None
+
+
+def _linux_collect_sensors():
+    """Return list of (chip, label, value_c, kind) from hwmon + thermal zones."""
+    out = []
+    try:
+        hwmons = sorted(_SYS_HWMON.glob('hwmon*'))
+    except OSError:
+        hwmons = []
+    for hw in hwmons:
+        try:
+            chip = (hw / 'name').read_text().strip()
+        except OSError:
+            chip = hw.name
+        try:
+            inputs = sorted(hw.glob('temp*_input'))
+        except OSError:
+            continue
+        for f in inputs:
+            base = f.name[:-len('_input')]
+            fault = hw / f'{base}_fault'
+            try:
+                if fault.exists() and fault.read_text().strip() == '1':
+                    continue
+            except OSError:
+                pass
+            v = _read_millideg(f)
+            if v is None:
+                continue
+            try:
+                label = (hw / f'{base}_label').read_text().strip()
+            except OSError:
+                label = base
+            out.append((chip, label, v, 'hwmon'))
+    try:
+        zones = sorted(_SYS_THERMAL.glob('thermal_zone*'))
+    except OSError:
+        zones = []
+    for z in zones:
+        v = _read_millideg(z / 'temp')
+        if v is None:
+            continue
+        try:
+            ztype = (z / 'type').read_text().strip()
+        except OSError:
+            ztype = z.name
+        out.append((ztype, z.name, v, 'thermal'))
+    return out
+
+
+def _linux_pick_cpu(sensors):
+    """Choose the CPU temperature. Returns (value, description, confidence)."""
+    def is_cpu(chip):
+        c = chip.lower()
+        return any(c == n or c.startswith(n) for n in _CPU_CHIPS)
+
+    cpu = [x for x in sensors if is_cpu(x[0])]
+    # Prefer hwmon over the duplicate thermal-zone view of the same chip.
+    cpu.sort(key=lambda x: (x[3] != 'hwmon',))
+    for chip in dict.fromkeys(x[0] for x in cpu):
+        group = [x for x in cpu if x[0] == chip]
+        def pick(*keys):
+            hit = [x for x in group if any(k in x[1].lower() for k in keys)]
+            return max(hit, key=lambda x: x[2]) if hit else None
+        # Package/die first (Tdie is offset-free; Tctl may carry +offset on old Ryzen).
+        best = pick('package', 'tdie') or pick('tctl') or pick('core', 'ccd', 'cpu')
+        if best is None:
+            best = max(group, key=lambda x: x[2])
+        return best[2], f'{best[0]}/{best[1]}', 'high'
+
+    # Fallback: ACPI zone. Often a coarse board sensor, flagged low confidence.
+    acpi = [x for x in sensors if x[0].lower().startswith('acpitz')]
+    if acpi:
+        best = max(acpi, key=lambda x: x[2])
+        return best[2], f'{best[0]}/{best[1]}', 'low'
+    return None, '', 'none'
+
+
+def _read_linux_temperature():
+    """(all_temps, cpu_temp_or_None). Details land in _linux_temp_meta."""
+    global _linux_temp_cache, _linux_temp_meta
+    with _temp_lock:
+        all_c, cpu_c, meta_c, ts = _linux_temp_cache
+        if time.time() - ts < _LINUX_TEMP_TTL:
+            return all_c, cpu_c
+    sensors = _linux_collect_sensors()
+    all_temps = {}
+    for chip, label, v, _kind in sensors:
+        key = f'{chip}/{label}'
+        if key in all_temps:               # hwmon/thermal duplicates
+            continue
+        all_temps[key] = v
+    cpu, desc, conf = _linux_pick_cpu(sensors)
+    meta = {'source': desc, 'confidence': conf}
+    if cpu is None:
+        meta['reason_code'] = 'no_cpu_sensor'
+        meta['reason'] = ('No CPU temperature sensor exposed by the kernel '
+                          '(try: sudo modprobe coretemp / k10temp, check `sensors`).')
+    with _temp_lock:
+        _linux_temp_cache = (all_temps, cpu, meta, time.time())
+        _linux_temp_meta = meta
+    return all_temps, cpu
+
+
 def _read_temperature():
     """
     Multi-source temperature chain with 60s cache.
@@ -167,6 +299,8 @@ def _read_temperature():
         from utils.windows_telemetry import get_windows_snapshot
         snapshot = get_windows_snapshot()
         return snapshot.temp_all, snapshot.temp_max
+    if _OS == 'Linux':
+        return _read_linux_temperature()
     global _temp_cache
     with _temp_lock:
         max_cached, all_cached, ts = _temp_cache
@@ -385,6 +519,42 @@ def _is_kernel_or_skipped_proc(arg1, arg2=None) -> bool:
     return norm.startswith(_KERNEL_PREFIXES)
 
 
+class _NetIO:
+    __slots__ = ('bytes_sent', 'bytes_recv')
+    def __init__(self, sent, recv):
+        self.bytes_sent, self.bytes_recv = sent, recv
+
+
+def _physical_net_io():
+    """Sum counters of real NICs only (Ethernet/Wi-Fi/USB), not lo/docker/veth/VPN.
+
+    Linux: a NIC is physical when /sys/class/net/<nic>/device exists. Counting
+    loopback or tun/docker would inflate speed (local traffic, VPN double count).
+    """
+    if _OS != 'Linux':
+        return psutil.net_io_counters()
+    try:
+        per = psutil.net_io_counters(pernic=True)
+    except Exception:
+        per = None
+    if not per:
+        return psutil.net_io_counters()
+    sent = recv = 0
+    used = 0
+    for nic, c in per.items():
+        if nic == 'lo' or not Path(f'/sys/class/net/{nic}/device').exists():
+            continue
+        sent += c.bytes_sent
+        recv += c.bytes_recv
+        used += 1
+    if used == 0:   # containers/VMs without sysfs device links
+        for nic, c in per.items():
+            if nic != 'lo':
+                sent += c.bytes_sent
+                recv += c.bytes_recv
+    return _NetIO(sent, recv)
+
+
 def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     """
     Full system snapshot.
@@ -411,7 +581,7 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
 
     # ── Network speed — persistent global counter (không kẹp chả) ─────────────
     try:
-        current_io   = psutil.net_io_counters()
+        current_io   = _physical_net_io()
         current_time = time.time()
 
         if current_io is not None:
@@ -437,8 +607,10 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
     # RAM
     ram           = psutil.virtual_memory()
     s.ram_percent = ram.percent
-    s.ram_used    = ram.used
     s.ram_total   = ram.total
+    # used = total - available keeps bar, percent and GB text consistent
+    # (psutil's own .used excludes cache, so used/total != percent on Linux).
+    s.ram_used    = (ram.total - ram.available) if getattr(ram, 'available', None) is not None else ram.used
 
     swap          = psutil.swap_memory()
     s.swap_percent= swap.percent
@@ -477,6 +649,8 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
 
     # Temperature
     s.temp_all, s.temp_max = _read_temperature()
+    if _OS == 'Linux':
+        s.temperature_status = dict(_linux_temp_meta)
 
     # Processes
     _IS_WIN = _OS == 'Windows'
@@ -490,8 +664,10 @@ def get_snapshot(interval: float = 0.5) -> SystemSnapshot:
             if _is_kernel_or_skipped_proc(pname):
                 continue
             raw_cpu = p.info['cpu_percent'] or 0
-            # Normalise: psutil can report > 100% on multi-core systems
-            cpu_pct = min(raw_cpu / _ncpus, 100.0) if raw_cpu > 100 else raw_cpu
+            # psutil per-process % is "per core" (can reach ncpus*100). Always
+            # divide so it matches the total CPU % shown on the dashboard;
+            # the old `if raw_cpu > 100` made 90% and 110% incomparable.
+            cpu_pct = min(raw_cpu / _ncpus, 100.0)
             procs.append(ProcessInfo(
                 pid=p.info['pid'], name=pname,
                 cpu=cpu_pct, mem=p.info['memory_percent'] or 0,
